@@ -4,33 +4,34 @@ import CLean.GPU
 open Lean GpuDSL SciLean
 
 
-
-namespace Example1
-
+namespace Saxpy
 
 
-structure BufferNames where
-  x : Name
-  y : Name
-  r : Name
-deriving Repr
 
-structure SaxpyArgs where
-  N      : Nat
-  alpha  : Float
-  names  : BufferNames
-deriving Repr
+-- This generates the saxpyArgs structure automatically
+kernelArgs saxpyArgs(N: Nat, alpha: Float)
+  global[x y r: Array Float]
 
-def saxpyKernel : KernelM SaxpyArgs Unit := do
+-- Verify it generated correctly
+#check saxpyArgs
+#print saxpyArgs
+
+-- Now you write the kernel manually using the generated structure
+def saxpyKernel : KernelM saxpyArgs Unit := do
   let args ← getArgs
+  let N := args.N
+  let alpha := args.alpha
+  let x : GlobalArray Float := ⟨args.x⟩
+  let y : GlobalArray Float := ⟨args.y⟩
+  let r : GlobalArray Float := ⟨args.r⟩
+
   let i ← globalIdxX
-  if i < args.N then
-    let x := global args.names.x
-    let y := global args.names.y
-    let r := global args.names.r
+  if i < N then
     let xi ← x.get i
     let yi ← y.get i
-    r.set i (args.alpha * xi + yi)
+    r.set i (alpha * xi + yi)
+
+
 
 def saxpy {n : Nat}
     (α : Float)
@@ -45,7 +46,7 @@ def saxpy {n : Nat}
     runKernelCPU
       ⟨(n + 511) / 512, 1, 1⟩         -- grid
       ⟨512, 1, 1⟩                     -- block
-      ⟨n, α, ⟨`X, `Y, `R⟩⟩         -- args
+      ⟨n, α, `X, `Y, `R⟩         -- args
       initState
       saxpyKernel
 
@@ -59,15 +60,13 @@ def saxpy {n : Nat}
 #eval do saxpy 8.0 ⊞[1.0, 1.0] ⊞[2.0, 2.0]
 
 
-end Example1
+
+
+end Saxpy
 
 
 
-
-
-
-
-namespace Example2
+namespace ExclusiveScan
 
 
 /-- Find the next power of 2 greater than or equal to n -/
@@ -80,16 +79,9 @@ def nextPow2 (n : Nat) : Nat :=
   let n := n ||| (n >>> 16)
   n + 1
 
-structure BufferNames where
-  data : Name
-deriving Repr
+kernelArgs ScanArgs(length: Int, twod1: Int, twod: Int)
+  global[data: Array Int]
 
-structure ScanArgs where
-  length    : Int
-  twod1     : Int
-  twod      : Int
-  names     : BufferNames
-deriving Repr
 
 /-- Upsweep kernel for parallel scan -/
 def upsweepKernel : KernelM ScanArgs Unit := do
@@ -97,7 +89,7 @@ def upsweepKernel : KernelM ScanArgs Unit := do
   let index ← globalIdxX
   let i := index * args.twod1
   if i + args.twod1 - 1 < args.length then
-    let data : GlobalArray Int := global `data
+    let data : GlobalArray Int := ⟨args.data⟩
     let idx1 := (i + args.twod1 - 1).toNat?.getD 0
     let idx := (i + args.twod - 1).toNat?.getD 0
     let val1 ← data.get idx1
@@ -110,7 +102,7 @@ def downsweepKernel : KernelM ScanArgs Unit := do
   let index ← globalIdxX
   let i := index * args.twod1
   if (i + args.twod - 1 < args.length) && (i + args.twod1 - 1 < args.length) then
-    let data : GlobalArray Int := global `data
+    let data : GlobalArray Int := ⟨args.data⟩
     let idx := (i + args.twod - 1).toNat?.getD 0
     let idx1 := (i + args.twod1 - 1).toNat?.getD 0
     let t ← data.get idx
@@ -140,7 +132,7 @@ def exclusiveScan (input : Array Int) : IO (Array Int) := do
       upsweepState := runKernelCPU
         ⟨numBlocks, 1, 1⟩
         ⟨numThreadsPerBlock, 1, 1⟩
-        ⟨roundedLength, twod1, twod, ⟨`data⟩⟩
+        ⟨roundedLength, twod1, twod, `data⟩
         upsweepState
         upsweepKernel
       twod := twod * 2
@@ -159,7 +151,7 @@ def exclusiveScan (input : Array Int) : IO (Array Int) := do
       downsweepState := runKernelCPU
         ⟨numBlocks, 1, 1⟩
         ⟨numThreadsPerBlock, 1, 1⟩
-        ⟨roundedLength, twod1, twod, ⟨`data⟩⟩
+        ⟨roundedLength, twod1, twod, `data⟩
         downsweepState
         downsweepKernel
       twod := twod / 2
@@ -169,10 +161,8 @@ def exclusiveScan (input : Array Int) : IO (Array Int) := do
     pure <| out.take (n+1)
 
 
--- def big_array : Array Int := (List.range 100).map (fun x => (x:ℤ)) |>.toArray
--- #eval do exclusiveScan big_array
 #eval do exclusiveScan #[1,2,3,4,5,6,7,8]
 
 
 
-end Example2
+end ExclusiveScan

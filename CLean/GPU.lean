@@ -337,6 +337,148 @@ macro "getArgs" : term => `((·.args) <$> readCtx)
 def globals (names : List Name) : List (GlobalArray Float) :=
   names.map (fun n => global n)
 
+/-! ## Kernel Macro for Auto-Generation -/
+
+/-- Kernel Args structure generator.
+
+Automatically generates a kernel arguments structure with scalar parameters
+and Name fields for global/shared variable identifiers.
+
+Example:
+```
+kernelArgs saxpy(N: Nat, alpha: Float)
+  global[x y: Array Float]
+  global[result: Array Int]
+  shared[temp: Array Float]
+  shared[sum: Nat]
+```
+
+This generates:
+```
+structure saxpyArgs where
+  N : Nat
+  alpha : Float
+  x : Name
+  y : Name
+  result : Name
+  temp : Name
+  sum : Name
+  deriving Repr
+```
+
+Then write your kernel manually using the generated structure:
+```
+def saxpyKernel : KernelM saxpyArgs Unit := do
+  let args ← getArgs
+  let N := args.N
+  let alpha := args.alpha
+  let x : GlobalArray Float := ⟨args.x⟩
+  let y : GlobalArray Float := ⟨args.y⟩
+  let result : GlobalArray Int := ⟨args.result⟩
+  let temp : SharedArray Float := ⟨args.temp⟩
+  let sum : SharedScalar Nat := ⟨args.sum⟩
+  -- kernel body...
+```
+-/
+syntax (name := kernelArgsCmd) "kernelArgs" ident
+  "(" (ident ":" term),* ")"
+  ("global" "[" ident+ ":" term "]")*
+  ("shared" "[" ident+ ":" term "]")* : command
+
+open Lean Elab Command Parser in
+@[command_elab kernelArgsCmd] def elabKernelArgsCmd : CommandElab := fun stx => do
+  -- Parse syntax components
+  -- Syntax: "kernelArgs" ident "(" params ")" (global[...])* (shared[...])*
+  let name := stx[1]
+  let scalarParams := stx[3]
+
+  let argsName := mkIdent (name.getId)--.appendAfter "Args")
+
+  -- Build scalar fields
+  let mut scalarFields := #[]
+  for i in [:scalarParams.getArgs.size] do
+    let arg := scalarParams.getArgs[i]!
+    if arg.getNumArgs >= 3 then
+      let sid := arg[0]
+      let sty := arg[2]
+      scalarFields := scalarFields.push (sid, sty)
+
+  -- Collect all global and shared declarations
+  let mut allMemFields := #[]
+
+  -- The global/shared declarations start after the closing paren
+  -- They're stored as separate syntax nodes in the getArgs array
+  let globalDecls := stx[5]  -- This should be the ("global" "[" ident+ ":" term "]")* part
+  let sharedDecls := stx[6]  -- This should be the ("shared" "[" ident+ ":" term "]")* part
+
+  -- Process global declarations
+  for globalDecl in globalDecls.getArgs do
+    if globalDecl.getNumArgs >= 5 then
+      let ids := globalDecl[2]  -- ident+ inside brackets
+      -- Handle multiple identifiers
+      let idArray := if ids.isOfKind `ident then #[ids] else ids.getArgs
+      for id in idArray do
+        if !id.isOfKind nullKind then
+          allMemFields := allMemFields.push id
+
+  -- Process shared declarations
+  for sharedDecl in sharedDecls.getArgs do
+    if sharedDecl.getNumArgs >= 5 then
+      let ids := sharedDecl[2]  -- ident+ inside brackets
+      -- Handle multiple identifiers
+      let idArray := if ids.isOfKind `ident then #[ids] else ids.getArgs
+      for id in idArray do
+        if !id.isOfKind nullKind then
+          allMemFields := allMemFields.push id
+
+  -- Generate structure command as string
+  let mut structStr := s!"structure {argsName.getId} where\n"
+  for (sid, sty) in scalarFields do
+    let styStr := Format.pretty (← liftCoreM <| PrettyPrinter.ppCategory `term sty)
+    structStr := structStr ++ s!"  {sid.getId} : {styStr}\n"
+  for id in allMemFields do
+    structStr := structStr ++ s!"  {id.getId} : Name\n"
+  structStr := structStr ++ "  deriving Repr"
+
+  -- Parse and elaborate structure
+  match runParserCategory (← getEnv) `command structStr with
+  | Except.ok structSyntax => elabCommand structSyntax
+  | Except.error err => throwError "Failed to parse structure: {err}"
+
+/-! ## Test: Verify the kernel macro works -/
+
+-- Test 1: Simple saxpy with just global arrays
+kernelArgs saxpyArgs(N: Nat, alpha: Float)
+  global[x y r: Array Float]
+
+#check saxpyArgs
+#print saxpyArgs
+
+-- Test 2: Multiple array types and shared memory
+kernelArgs complexKernelArgs(blockSize: Nat, threshold: Float)
+  global[data: Array Float]
+  global[indices: Array Int]
+  global[flags: Array Nat]
+  shared[temp: Array Float]
+  shared[counter: Nat]
+
+#check complexKernelArgs
+#print complexKernelArgs
+
+-- Example kernel using the generated structure
+def saxpyKernel : KernelM saxpyArgs Unit := do
+  let args ← getArgs
+  let N := args.N
+  let alpha := args.alpha
+  let x : GlobalArray Float := ⟨args.x⟩
+  let y : GlobalArray Float := ⟨args.y⟩
+  let r : GlobalArray Float := ⟨args.r⟩
+
+  let i ← globalIdxX
+  if i < N then
+    let xi ← x.get i
+    let yi ← y.get i
+    r.set i (alpha * xi + yi)
 
 
 end GpuDSL
