@@ -13,5 +13,12 @@ maxSynthPendingDepth = 3
 name = "mathlib"
 scope = "leanprover-community"
 
+[[require]]
+name = "scilean"
+scope = "git"
+git = "https://github.com/lecopivo/SciLean"
+rev = "v4.20.1"
+
+
 [[lean_lib]]
 name = "CLean"
