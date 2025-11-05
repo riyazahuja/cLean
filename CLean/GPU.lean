@@ -52,11 +52,11 @@ instance : Inhabited KernelState :=
 
 
 abbrev KernelM (Args : Type) (α : Type) :=
-  ReaderT (KernelCtx Args) (StateM KernelState) α
+  ReaderT (KernelCtx Args) (StateT KernelState IO) α
 
 
 @[inline] def readCtx {Args} : KernelM Args (KernelCtx Args) :=
-  fun ctx s => (ctx, s)
+  fun ctx s => pure (ctx, s)
 
 /-! ## Type class for converting to/from KernelValue -/
 
@@ -124,8 +124,8 @@ instance : FromKernelValue Nat where
     (name : Name) : KernelM Args (Option α) :=
   fun _ s =>
     match s.globals.get? name with
-    | some val => (FromKernelValue.fromKernelValue? val, s)
-    | none => (none, s)
+    | some val => pure (FromKernelValue.fromKernelValue? val, s)
+    | none => pure (none, s)
 
 @[inline] def setShared {Args α} [ToKernelValue α]
     (name : Name) (v : α) : KernelM Args Unit :=
@@ -135,8 +135,8 @@ instance : FromKernelValue Nat where
     (name : Name) : KernelM Args (Option α) :=
   fun _ s =>
     match s.shared.get? name with
-    | some val => (FromKernelValue.fromKernelValue? val, s)
-    | none => (none, s)
+    | some val => pure (FromKernelValue.fromKernelValue? val, s)
+    | none => pure (none, s)
 
 /-- Read/write a *global* `Array α` element by name and index. -/
 @[inline] def gReadAt {Args α} [Inhabited α] [FromKernelValue (Array α)]
@@ -159,6 +159,11 @@ instance : FromKernelValue Nat where
 @[inline] def globalIdxX {Args} : KernelM Args Nat := do
   let c ← readCtx
   pure (c.blockIdx.x * c.blockDim.x + c.threadIdx.x)
+
+@[inline] def globalIdxY {Args} : KernelM Args Nat := do
+  let c ← readCtx
+  pure (c.blockIdx.y * c.blockDim.y + c.threadIdx.y)
+
 
 /-! ## Wrapper types for clean syntax -/
 
@@ -272,8 +277,7 @@ def runKernelCPU
     (args : Args)
     (initState : KernelState)
     (body : KernelM Args Unit)
-    : KernelState :=
-  Id.run do
+    : IO KernelState := do
     let mut st := initState
     for bz in [0:grid.z] do
       for by_ in [0:grid.y] do
@@ -289,9 +293,9 @@ def runKernelCPU
                     blockDim  := block
                     gridDim   := grid
                     args }
-                let (_, st') := (body ctx).run st
+                let (_, st') ← (body ctx).run st
                 st := st'
-    st
+    return st
 
 
 
@@ -444,41 +448,5 @@ open Lean Elab Command Parser in
   match runParserCategory (← getEnv) `command structStr with
   | Except.ok structSyntax => elabCommand structSyntax
   | Except.error err => throwError "Failed to parse structure: {err}"
-
-/-! ## Test: Verify the kernel macro works -/
-
--- Test 1: Simple saxpy with just global arrays
-kernelArgs saxpyArgs(N: Nat, alpha: Float)
-  global[x y r: Array Float]
-
-#check saxpyArgs
-#print saxpyArgs
-
--- Test 2: Multiple array types and shared memory
-kernelArgs complexKernelArgs(blockSize: Nat, threshold: Float)
-  global[data: Array Float]
-  global[indices: Array Int]
-  global[flags: Array Nat]
-  shared[temp: Array Float]
-  shared[counter: Nat]
-
-#check complexKernelArgs
-#print complexKernelArgs
-
--- Example kernel using the generated structure
-def saxpyKernel : KernelM saxpyArgs Unit := do
-  let args ← getArgs
-  let N := args.N
-  let alpha := args.alpha
-  let x : GlobalArray Float := ⟨args.x⟩
-  let y : GlobalArray Float := ⟨args.y⟩
-  let r : GlobalArray Float := ⟨args.r⟩
-
-  let i ← globalIdxX
-  if i < N then
-    let xi ← x.get i
-    let yi ← y.get i
-    r.set i (alpha * xi + yi)
-
 
 end GpuDSL
