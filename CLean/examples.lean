@@ -77,7 +77,6 @@ def nextPow2 (n : Nat) : Nat :=
 kernelArgs ScanArgs(length: Int, twod1: Int, twod: Int)
   global[data: Array Int]
 
-
 /-- Upsweep kernel for parallel scan -/
 def upsweepKernel : KernelM ScanArgs Unit := do
   let args ← getArgs
@@ -163,7 +162,6 @@ def exclusiveScan (input : Array Int) : IO (Array Int) := do
 end ExclusiveScan
 
 
-
 namespace BasicMatMul
 
 
@@ -190,8 +188,8 @@ def matmulKernel : KernelM MatMulArgs Unit := do
 
 def matmul {n : Nat}
     (A B : Float^[n,n]) : IO (Float^[n,n]) := do
-  let flattened_A  := A.reshape (Fin (n*n)) (by sorry_proof) |>.toList.toArray.reverse
-  let flattened_B  := B.reshape (Fin (n*n)) (by sorry_proof) |>.toList.toArray.reverse
+  let flattened_A  := A.reshape (Fin (n*n)) (by omega) |>.toList.toArray.reverse
+  let flattened_B  := B.reshape (Fin (n*n)) (by omega) |>.toList.toArray.reverse
   IO.println s!"Flattened A: {flattened_A}"
   IO.println s!"Flattened B: {flattened_B}"
 
@@ -283,8 +281,8 @@ def matmulKernel : KernelM MatMulArgs Unit := do
 
 def matmul {n : Nat} (V : Nat := 4)
     (A B : Float^[n,n]) : IO (Float^[n,n]) := do
-  let flattened_A  := A.reshape (Fin (n*n)) (by sorry_proof) |>.toList.toArray.reverse
-  let flattened_B  := B.reshape (Fin (n*n)) (by sorry_proof) |>.toList.toArray.reverse
+  let flattened_A  := A.reshape (Fin (n*n)) (by omega) |>.toList.toArray.reverse
+  let flattened_B  := B.reshape (Fin (n*n)) (by omega) |>.toList.toArray.reverse
 
   let initState := mkKernelState [
     globalFloatArray `A flattened_A,

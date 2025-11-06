@@ -298,8 +298,6 @@ def runKernelCPU
     return st
 
 
-
-
 -- /-! ## A fixed-length vector (for the host API) -/
 
 -- def Vec (α : Type) (n : Nat) := Fin n → α
