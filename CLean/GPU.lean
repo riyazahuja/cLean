@@ -43,12 +43,70 @@ inductive KernelValue where
   | nat : Nat → KernelValue
 deriving Repr, Inhabited
 
+namespace KernelValue
+/-- Merge two KernelValues element-wise for arrays, prefer v2 for scalars.
+    For arrays: take max size and use v2[i] if available, else v1[i]. -/
+def merge (v1 v2 : KernelValue) : KernelValue :=
+  match v1, v2 with
+  | arrayFloat a1, arrayFloat a2 =>
+    -- Element-wise merge: prefer v2's elements when available
+    let maxSize := max a1.size a2.size
+    let result := Id.run do
+      let mut arr := Array.mkEmpty maxSize
+      for i in [:maxSize] do
+        let val := if i < a2.size then a2[i]!
+                  else if i < a1.size then a1[i]!
+                  else 0.0
+        arr := arr.push val
+      return arr
+    arrayFloat result
+  | arrayInt a1, arrayInt a2 =>
+    let maxSize := max a1.size a2.size
+    let result := Id.run do
+      let mut arr := Array.mkEmpty maxSize
+      for i in [:maxSize] do
+        let val := if i < a2.size then a2[i]!
+                  else if i < a1.size then a1[i]!
+                  else (0 : Int)
+        arr := arr.push val
+      return arr
+    arrayInt result
+  | arrayNat a1, arrayNat a2 =>
+    let maxSize := max a1.size a2.size
+    let result := Id.run do
+      let mut arr := Array.mkEmpty maxSize
+      for i in [:maxSize] do
+        let val := if i < a2.size then a2[i]!
+                  else if i < a1.size then a1[i]!
+                  else 0
+        arr := arr.push val
+      return arr
+    arrayNat result
+  | _, scalar => scalar  -- For scalars, prefer v2
+end KernelValue
+
+/-- WriteBuffer collects all writes made by a thread during a barrier phase.
+    For array elements: key is (arrayName, index), value is the element
+    For scalars: key is (scalarName, 0), value is the scalar -/
+structure WriteBuffer where
+  sharedWrites : Std.HashMap (Name × Nat) KernelValue := ∅
+  globalWrites : Std.HashMap (Name × Nat) KernelValue := ∅
+deriving Inhabited
+
 structure KernelState where
   shared  : Std.HashMap Name KernelValue
   globals : Std.HashMap Name KernelValue
+  -- Write buffering for parallel execution simulation
+  writeBuffer : WriteBuffer  -- Collects writes during phase execution
+  isBuffering : Bool         -- If true, writes go to buffer; if false, writes go to state
+  -- Barrier phase tracking for CPU simulation
+  currentPhase : Nat      -- Which barrier phase we're currently executing
+  threadBarrierCount : Nat  -- How many barriers this thread has hit in current execution
+  hitBarrier : Bool        -- True if this thread hit a barrier beyond the current phase
 
 instance : Inhabited KernelState :=
-  ⟨{ shared := ∅, globals := ∅ }⟩
+  ⟨{ shared := ∅, globals := ∅, writeBuffer := default, isBuffering := false,
+     currentPhase := 0, threadBarrierCount := 0, hitBarrier := false }⟩
 
 
 abbrev KernelM (Args : Type) (α : Type) :=
@@ -117,8 +175,22 @@ instance : FromKernelValue Nat where
 /-! ## Heaps: helpers to get/put arrays and scalars by name -/
 
 @[inline] def setGlobal {Args α} [ToKernelValue α]
-    (name : Name) (v : α) : KernelM Args Unit :=
-  modify fun s => { s with globals := s.globals.insert name (ToKernelValue.toKernelValue v) }
+    (name : Name) (v : α) : KernelM Args Unit := do
+  let s ← get
+  -- Skip operations if we've exceeded the current phase
+  if s.hitBarrier then return ()
+
+  if s.isBuffering then
+    -- Only buffer writes in the active phase (snapshot already has previous phases)
+    if s.threadBarrierCount == s.currentPhase then
+      modify fun s =>
+        { s with writeBuffer :=
+          { s.writeBuffer with globalWrites :=
+            s.writeBuffer.globalWrites.insert (name, 0) (ToKernelValue.toKernelValue v) } }
+    -- else: skip (either replay section or beyond current phase)
+  else
+    -- Write directly to state (initialization, not buffering)
+    modify fun s => { s with globals := s.globals.insert name (ToKernelValue.toKernelValue v) }
 
 @[inline] def getGlobal? {Args α} [FromKernelValue α]
     (name : Name) : KernelM Args (Option α) :=
@@ -128,8 +200,22 @@ instance : FromKernelValue Nat where
     | none => pure (none, s)
 
 @[inline] def setShared {Args α} [ToKernelValue α]
-    (name : Name) (v : α) : KernelM Args Unit :=
-  modify fun s => { s with shared := s.shared.insert name (ToKernelValue.toKernelValue v) }
+    (name : Name) (v : α) : KernelM Args Unit := do
+  let s ← get
+  -- Skip operations if we've exceeded the current phase
+  if s.hitBarrier then return ()
+
+  if s.isBuffering then
+    -- Only buffer writes in the active phase (snapshot already has previous phases)
+    if s.threadBarrierCount == s.currentPhase then
+      modify fun s =>
+        { s with writeBuffer :=
+          { s.writeBuffer with sharedWrites :=
+            s.writeBuffer.sharedWrites.insert (name, 0) (ToKernelValue.toKernelValue v) } }
+    -- else: skip (either replay section or beyond current phase)
+  else
+    -- Write directly to state (initialization, not buffering)
+    modify fun s => { s with shared := s.shared.insert name (ToKernelValue.toKernelValue v) }
 
 @[inline] def getShared? {Args α} [FromKernelValue α]
     (name : Name) : KernelM Args (Option α) :=
@@ -145,14 +231,36 @@ instance : FromKernelValue Nat where
     | panic! s!"global '{name}' not found or wrong type"
   pure <| arr[i]!
 
-@[inline] def gWriteAt {Args α} [FromKernelValue (Array α)] [ToKernelValue (Array α)]
+@[inline] def gWriteAt {Args α} [FromKernelValue (Array α)] [ToKernelValue (Array α)] [ToKernelValue α]
     (name : Name) (i : Nat) (v : α) : KernelM Args Unit := do
-  let some (arr : Array α) ← getGlobal? name
-    | panic! s!"global '{name}' not found or wrong type"
-  setGlobal name (arr.set! i v)
+  let s ← get
+  if s.hitBarrier then return ()  -- Skip if exceeded phase
 
-/-- Block-level barrier (no-op in the single-threaded CPU simulator). -/
-@[inline] def barrier {Args} : KernelM Args Unit := pure ()
+  if s.isBuffering then
+    -- Only buffer writes in the active phase (snapshot already has previous phases)
+    if s.threadBarrierCount == s.currentPhase then
+      modify fun s =>
+        { s with writeBuffer :=
+          { s.writeBuffer with globalWrites :=
+            s.writeBuffer.globalWrites.insert (name, i) (ToKernelValue.toKernelValue v) } }
+    -- else: skip (either replay section or beyond current phase)
+  else
+    -- Direct write to state (initialization, not buffering)
+    let some (arr : Array α) ← getGlobal? name
+      | panic! s!"global '{name}' not found or wrong type"
+    setGlobal name (arr.set! i v)
+
+/-- Block-level barrier. In CPU simulation, this marks synchronization points.
+    Threads execute in phases to simulate barrier synchronization. In phase N,
+    we execute until hitting barrier N+1. -/
+@[inline] def barrier {Args} : KernelM Args Unit := do
+  let s ← get
+  let newCount := s.threadBarrierCount + 1
+  set { s with threadBarrierCount := newCount }
+
+  -- If we've hit the target barrier for this phase, mark it and stop
+  if newCount > s.currentPhase then
+    modify fun s => { s with hitBarrier := true }
 
 /-! ## Thread index helpers -/
 
@@ -191,7 +299,7 @@ namespace GlobalArray
   gReadAt arr.name i
 
 /-- Write to a global array at index i -/
-@[inline] def set {Args α} [FromKernelValue (Array α)] [ToKernelValue (Array α)]
+@[inline] def set {Args α} [FromKernelValue (Array α)] [ToKernelValue (Array α)] [ToKernelValue α]
     (arr : GlobalArray α) (i : Nat) (v : α) : KernelM Args Unit :=
   gWriteAt arr.name i v
 
@@ -214,11 +322,24 @@ namespace SharedArray
   pure a[i]!
 
 /-- Write to a shared array at index i -/
-@[inline] def set {Args α} [FromKernelValue (Array α)] [ToKernelValue (Array α)]
+@[inline] def set {Args α} [FromKernelValue (Array α)] [ToKernelValue (Array α)] [ToKernelValue α]
     (arr : SharedArray α) (i : Nat) (v : α) : KernelM Args Unit := do
-  let some (a : Array α) ← getShared? arr.name
-    | panic! s!"shared '{arr.name}' not found"
-  setShared arr.name (a.set! i v)
+  let st ← MonadState.get
+  if st.hitBarrier then return ()  -- Skip if exceeded phase
+
+  if st.isBuffering then
+    -- Only buffer writes in the active phase (snapshot already has previous phases)
+    if st.threadBarrierCount == st.currentPhase then
+      modify fun s =>
+        { s with writeBuffer :=
+          { s.writeBuffer with sharedWrites :=
+            s.writeBuffer.sharedWrites.insert (arr.name, i) (ToKernelValue.toKernelValue v) } }
+    -- else: skip (either replay section or beyond current phase)
+  else
+    -- Direct write to state (initialization, not buffering)
+    let some (a : Array α) ← getShared? arr.name
+      | panic! s!"shared '{arr.name}' not found"
+    setShared arr.name (a.set! i v)
 
 end SharedArray
 
@@ -233,8 +354,8 @@ namespace GlobalScalar
 
 /-- Write a global scalar value -/
 @[inline] def set {Args α} [ToKernelValue α]
-    (s : GlobalScalar α) (v : α) : KernelM Args Unit :=
-  setGlobal s.name v
+    (gs : GlobalScalar α) (v : α) : KernelM Args Unit :=
+  setGlobal gs.name v
 
 end GlobalScalar
 
@@ -249,8 +370,8 @@ namespace SharedScalar
 
 /-- Write a shared scalar value -/
 @[inline] def set {Args α} [ToKernelValue α]
-    (s : SharedScalar α) (v : α) : KernelM Args Unit :=
-  setShared s.name v
+    (ss : SharedScalar α) (v : α) : KernelM Args Unit :=
+  setShared ss.name v
 
 end SharedScalar
 
@@ -270,7 +391,9 @@ end SharedScalar
 
 /-! ## CPU "runtime": grid/block interpreter -/
 
-/-- Run one kernel body across the whole grid on CPU, threading state. -/
+/-- Run one kernel body across the whole grid on CPU with barrier synchronization.
+    Uses write buffering to simulate parallel execution: all threads in a phase
+    read the same memory state, and their writes are applied atomically at phase end. -/
 def runKernelCPU
     {Args : Type}
     (grid block : Dim3)
@@ -282,19 +405,135 @@ def runKernelCPU
     for bz in [0:grid.z] do
       for by_ in [0:grid.y] do
         for bx in [0:grid.x] do
-          -- reset shared memory for each block
-          st := { st with shared := ∅ }
-          for tz in [0:block.z] do
-            for ty_ in [0:block.y] do
-              for tx in [0:block.x] do
-                let ctx : KernelCtx Args :=
-                  { threadIdx := ⟨tx, ty_, tz⟩
-                    blockIdx  := ⟨bx, by_, bz⟩
-                    blockDim  := block
-                    gridDim   := grid
-                    args }
-                let (_, st') ← (body ctx).run st
-                st := st'
+          -- reset shared memory to initial state for each block
+          st := { st with
+            shared := initState.shared,
+            writeBuffer := default,
+            isBuffering := false,
+            currentPhase := 0,
+            threadBarrierCount := 0,
+            hitBarrier := false
+          }
+
+          -- Execute threads in phases until all complete
+          let mut phase : Nat := 0
+          let mut anyBarrierHit := true
+
+          while anyBarrierHit do
+            anyBarrierHit := false
+
+            -- Create snapshot for this phase (threads read from this)
+            let snapshot := { st with
+              writeBuffer := default,
+              isBuffering := false
+            }
+
+            -- Collect write buffers from all threads
+            let mut allBuffers := #[]
+
+            -- Execute all threads for this phase
+            for tz in [0:block.z] do
+              for ty_ in [0:block.y] do
+                for tx in [0:block.x] do
+                  let ctx : KernelCtx Args :=
+                    { threadIdx := ⟨tx, ty_, tz⟩
+                      blockIdx  := ⟨bx, by_, bz⟩
+                      blockDim  := block
+                      gridDim   := grid
+                      args }
+
+                  -- Start with snapshot, enable buffering
+                  let threadState := { snapshot with
+                    writeBuffer := default,
+                    isBuffering := true,
+                    currentPhase := phase,
+                    threadBarrierCount := 0,
+                    hitBarrier := false
+                  }
+
+                  -- Execute thread body
+                  let (_, finalState) ← (body ctx).run threadState
+
+                  -- Check if thread hit a barrier this phase
+                  if finalState.hitBarrier then
+                    anyBarrierHit := true
+
+                  -- Save this thread's write buffer
+                  allBuffers := allBuffers.push finalState.writeBuffer
+
+            -- Apply all write buffers to state
+            -- Collect all writes: HashMap (Name × Nat) KernelValue contains individual writes
+            -- Need to group by Name, rebuild arrays, then apply to state
+
+            -- Collect all element writes per array
+            let mut sharedElementWrites : Std.HashMap (Name × Nat) KernelValue := ∅
+            let mut globalElementWrites : Std.HashMap (Name × Nat) KernelValue := ∅
+
+            for wb in allBuffers do
+              for ((name, idx), value) in wb.sharedWrites.toList do
+                sharedElementWrites := sharedElementWrites.insert (name, idx) value
+              for ((name, idx), value) in wb.globalWrites.toList do
+                globalElementWrites := globalElementWrites.insert (name, idx) value
+
+            -- Helper to apply element writes to an array
+            let applyWrites (arrayKV : KernelValue) (writes : List (Nat × KernelValue)) : KernelValue :=
+              match arrayKV with
+              | .arrayFloat arr =>
+                .arrayFloat <| Id.run do
+                  let mut result := arr
+                  for (idx, kv) in writes do
+                    match kv with
+                    | .float v => result := result.set! idx v
+                    | _ => ()  -- Skip mismatched types
+                  return result
+              | .arrayInt arr =>
+                .arrayInt <| Id.run do
+                  let mut result := arr
+                  for (idx, kv) in writes do
+                    match kv with
+                    | .int v => result := result.set! idx v
+                    | _ => ()
+                  return result
+              | .arrayNat arr =>
+                .arrayNat <| Id.run do
+                  let mut result := arr
+                  for (idx, kv) in writes do
+                    match kv with
+                    | .nat v => result := result.set! idx v
+                    | _ => ()
+                  return result
+              | scalar =>
+                -- For scalars, if index 0 is written, use that value
+                match writes.head? with
+                | some (0, v) => v
+                | _ => scalar
+
+            -- Apply shared memory writes
+            let sharedNames := sharedElementWrites.toList.map (fun ((n, _), _) => n) |>.eraseDups
+            for name in sharedNames do
+              let writes := sharedElementWrites.toList.filter (fun ((n, _), _) => n == name)
+                            |>.map (fun ((_, idx), v) => (idx, v))
+              match st.shared.get? name with
+              | some arrayKV =>
+                let updated := applyWrites arrayKV writes
+                st := { st with shared := st.shared.insert name updated }
+              | none => pure ()  -- Array not found, skip
+
+            -- Apply global memory writes
+            let globalNames := globalElementWrites.toList.map (fun ((n, _), _) => n) |>.eraseDups
+            for name in globalNames do
+              let writes := globalElementWrites.toList.filter (fun ((n, _), _) => n == name)
+                            |>.map (fun ((_, idx), v) => (idx, v))
+              match st.globals.get? name with
+              | some arrayKV =>
+                let updated := applyWrites arrayKV writes
+                st := { st with globals := st.globals.insert name updated }
+              | none => pure ()  -- Array not found, skip
+
+            -- If any thread hit a barrier, increment phase for next iteration
+            if anyBarrierHit then
+              phase := phase + 1
+
     return st
 
 
@@ -316,7 +555,12 @@ def mkKernelState
     (globals : List (Name × KernelValue))
     (shared : List (Name × KernelValue) := []) : KernelState :=
   { globals := Std.HashMap.ofList globals
-    shared := Std.HashMap.ofList shared }
+    shared := Std.HashMap.ofList shared
+    writeBuffer := default
+    isBuffering := false
+    currentPhase := 0
+    threadBarrierCount := 0
+    hitBarrier := false }
 
 /-- Helper to insert a Float array into globals -/
 @[inline] def globalFloatArray (name : Name) (arr : Array Float) : Name × KernelValue :=

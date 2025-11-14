@@ -313,3 +313,211 @@ def matmul {n : Nat} (V : Nat := 4)
 
 
 end BetterMatMul
+
+
+namespace SharedMemTranspose
+
+kernelArgs TransposeArgs(N: Nat)
+  global[input output: Array Float]
+  shared[tile: Array Float]
+
+def transposeKernel : KernelM TransposeArgs Unit := do
+  let args ← getArgs
+  let N := args.N
+  let input : GlobalArray Float := ⟨args.input⟩
+  let output : GlobalArray Float := ⟨args.output⟩
+  let tile : SharedArray Float := ⟨args.tile⟩
+
+  let row ← globalIdxX
+  let col ← globalIdxY
+
+  -- Phase 1: Load from global memory to shared memory (row-major)
+  if row < N && col < N then
+    let val ← input.get (row * N + col)
+    tile.set (row * N + col) val
+
+  -- CRITICAL BARRIER: Wait for all threads to finish writing to shared memory
+  -- Without this, the read below might access uninitialized memory
+  barrier
+
+  -- Phase 2: Read from shared memory in transposed pattern (column-major)
+  -- and write to global memory
+  if row < N && col < N then
+    -- Read from transposed position in shared memory
+    let val ← tile.get (col * N + row)
+    output.set (row * N + col) val
+
+def transpose {n : Nat}
+    (mat : Float^[n,n]) : IO (Float^[n,n]) := do
+  let flattened := mat.reshape (Fin (n*n)) (by omega) |>.toList.toArray.reverse
+
+  let initState := mkKernelState
+    [ globalFloatArray `input flattened
+    , globalFloatArray `output (Array.replicate (n*n) 0.0)
+    ]
+    [ (`tile, KernelValue.arrayFloat (Array.replicate (n*n) 0.0))
+    ]
+
+  let threadsPerBlock := 8
+  let numBlocks := (n + threadsPerBlock - 1) / threadsPerBlock
+
+  let finalState ←
+    runKernelCPU
+      ⟨numBlocks, numBlocks, 1⟩
+      ⟨threadsPerBlock, threadsPerBlock, 1⟩
+      ⟨n, `input, `output, `tile⟩
+      initState
+      transposeKernel
+
+  let some (KernelValue.arrayFloat out) := finalState.globals.get? `output
+    | throw <| IO.userError "Result missing"
+  if out.size = n * n then
+    pure (⊞ (i j : Idx n) => out[i.1 * n + j.1]!)
+  else
+    throw <| IO.userError s!"Size mismatch: {out.size} ≠ {n*n}"
+
+-- Test with a simple 4x4 matrix
+-- Input:   1  2  3  4
+--          5  6  7  8
+--          9 10 11 12
+--         13 14 15 16
+-- Expected output (transposed):
+--          1  5  9 13
+--          2  6 10 14
+--          3  7 11 15
+--          4  8 12 16
+#eval do
+  let result ← transpose ⊞[1.0,2.0,3.0,4.0; 5.0,6.0,7.0,8.0; 9.0,10.0,11.0,12.0; 13.0,14.0,15.0,16.0]
+  IO.println s!"Transposed matrix: {result}"
+  return result
+
+end SharedMemTranspose
+
+
+namespace SharedPrefixSum
+
+/-! ## Shared Memory Prefix Sum using Hillis-Steele Algorithm
+
+This kernel computes an inclusive prefix sum (scan) of elements within a block
+using shared memory and multiple barrier synchronizations.
+
+Algorithm: Hillis-Steele parallel scan
+- Requires log2(n) iterations with barriers between each
+- Each iteration doubles the stride distance
+- Iteration d: each thread i adds element at (i - 2^d) to element at i
+
+Example for array [1, 2, 3, 4, 5, 6, 7, 8]:
+Initial:    [1, 2, 3, 4, 5, 6, 7, 8]
+After d=0:  [1, 3, 5, 7, 9, 11, 13, 15]  (stride 1)
+After d=1:  [1, 3, 6, 10, 14, 18, 22, 26] (stride 2)
+After d=2:  [1, 3, 6, 10, 15, 21, 28, 36] (stride 4)
+
+The barriers are CRITICAL for correctness - without them, threads would read
+intermediate values before other threads finish writing, leading to race conditions.
+-/
+
+kernelArgs PrefixSumArgs(n: Nat)
+  global[input output: Array Float]
+  shared[temp: Array Float]
+
+def prefixSumKernel : KernelM PrefixSumArgs Unit := do
+  let args ← getArgs
+  let n := args.n
+  let input : GlobalArray Float := ⟨args.input⟩
+  let output : GlobalArray Float := ⟨args.output⟩
+  let temp : SharedArray Float := ⟨args.temp⟩
+
+  let tid ← globalIdxX
+
+  -- Load input into shared memory
+  if tid < n then
+    let val ← input.get tid
+    temp.set tid val
+  else
+    temp.set tid 0.0
+
+  -- BARRIER 1: Ensure all threads have loaded their input
+  barrier
+
+  -- Hillis-Steele iterations
+  -- We need log2(n) iterations, but we'll do a fixed number for simplicity
+  -- For n=8, we need 3 iterations (log2(8) = 3)
+  -- For n=16, we need 4 iterations (log2(16) = 4)
+  let maxIter := 4  -- Supports up to 16 elements
+
+  for d in [0:maxIter] do
+    let stride := 1 <<< d  -- 2^d
+
+    let mut newVal := 0.0
+    if tid < n then
+      newVal ← temp.get tid
+      if tid >= stride then
+        let prevVal ← temp.get (tid - stride)
+        newVal := newVal + prevVal
+
+    -- BARRIER: Wait for all threads to read before writing
+    -- Without this, we'd have a read-after-write hazard
+    barrier
+
+    if tid < n then
+      temp.set tid newVal
+
+    -- BARRIER: Wait for all threads to write before next iteration
+    -- Without this, next iteration might read stale values
+    barrier
+
+  -- Write result back to global memory
+  if tid < n then
+    let result ← temp.get tid
+    output.set tid result
+
+def prefixSum {n : Nat} (input : Float^[n]) : IO (Float^[n]) := do
+  -- Convert tensor to array, reversing to fix ordering issue
+  let inputArray := input.toList.toArray.reverse
+
+  let initState := mkKernelState
+    [ globalFloatArray `input inputArray
+    , globalFloatArray `output (Array.replicate n 0.0)
+    ]
+    [ (`temp, KernelValue.arrayFloat (Array.replicate 16 0.0))  -- Max 16 elements
+    ]
+
+  -- Use a single block with n threads
+  let finalState ←
+    runKernelCPU
+      ⟨1, 1, 1⟩           -- Single block
+      ⟨16, 1, 1⟩          -- Up to 16 threads (supports arrays up to size 16)
+      ⟨n, `input, `output, `temp⟩
+      initState
+      prefixSumKernel
+
+  let some (KernelValue.arrayFloat out) := finalState.globals.get? `output
+    | throw <| IO.userError "Result missing"
+  if out.size >= n then
+    pure (⊞ (i : Idx n) => out[i.1]!)
+  else
+    throw <| IO.userError s!"Size mismatch: {out.size} < {n}"
+
+-- Test cases
+-- Input: [1, 2, 3, 4]
+-- Expected output: [1, 3, 6, 10]
+#eval do
+  let result ← prefixSum ⊞[1.0, 2.0, 3.0, 4.0]
+  IO.println s!"Prefix sum of [1,2,3,4]: {result}"
+  return result
+
+-- Input: [1, 2, 3, 4, 5, 6, 7, 8]
+-- Expected output: [1, 3, 6, 10, 15, 21, 28, 36]
+#eval do
+  let result ← prefixSum ⊞[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+  IO.println s!"Prefix sum of [1,2,3,4,5,6,7,8]: {result}"
+  return result
+
+-- Input: [2, 2, 2, 2, 2, 2, 2, 2]
+-- Expected output: [2, 4, 6, 8, 10, 12, 14, 16]
+#eval do
+  let result ← prefixSum ⊞[2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+  IO.println s!"Prefix sum of [2,2,2,2,2,2,2,2]: {result}"
+  return result
+
+end SharedPrefixSum

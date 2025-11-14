@@ -19,3 +19,8 @@ require scilean from git "https://github.com/lecopivo/SciLean" @ "v4.20.1"
 lean_lib CLean {
   roots := #[`CLean]
 }
+
+lean_exe examples {
+  root := `CLean.examples
+  supportInterpreter := true
+}
