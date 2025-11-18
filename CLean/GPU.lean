@@ -1,9 +1,9 @@
 import Lean
 import Lean.Elab.Command
-import Mathlib.Tactic
+import Mathlib.Tactic.TypeStar
 import Std.Data.HashMap
-import SciLean.Data.DataArray
-open Lean Lean.Elab Lean.Elab.Command Meta SciLean
+-- import SciLean.Data.DataArray
+open Lean Lean.Elab Lean.Elab.Command Meta --SciLean
 
 namespace GpuDSL
 

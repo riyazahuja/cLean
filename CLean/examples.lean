@@ -1,7 +1,9 @@
 import CLean.GPU
+import CLean.VerifyIR
+import CLean.Extract
+import CLean.CodeGen
 
-
-open Lean GpuDSL SciLean
+open Lean GpuDSL CLean.Extract --SciLean
 
 
 namespace Saxpy
@@ -28,9 +30,9 @@ def saxpyKernel : KernelM saxpyArgs Unit := do
 
 
 
-def saxpy {n : Nat}
+def saxpy (n : Nat)
     (α : Float)
-    (x y : Float^[n]) : IO (Float^[n]) := do
+    (x y : Array Float) : IO (Array Float) := do
   let initState := mkKernelState [
     globalFloatArray `X x.toList.toArray,
     globalFloatArray `Y y.toList.toArray,
@@ -48,13 +50,11 @@ def saxpy {n : Nat}
   let some (KernelValue.arrayFloat out) := finalState.globals.get? `R
     | throw <| IO.userError "Result missing"
   if out.size = n then
-    pure (⊞ (i : Idx n) => out[i.1]!)
+    pure out
   else
     throw <| IO.userError s!"Size mismatch: {out.size} ≠ {n}"
 
-#eval do saxpy 8.0 ⊞[1.0, 1.0] ⊞[2.0, 2.0]
-
-
+#eval do saxpy 2 8.0 #[1.0, 1.0] #[2.0, 2.0]
 
 
 end Saxpy
@@ -186,10 +186,10 @@ def matmulKernel : KernelM MatMulArgs Unit := do
       result := result + aVal * bVal
     C.set (row * N + col) result
 
-def matmul {n : Nat}
-    (A B : Float^[n,n]) : IO (Float^[n,n]) := do
-  let flattened_A  := A.reshape (Fin (n*n)) (by omega) |>.toList.toArray.reverse
-  let flattened_B  := B.reshape (Fin (n*n)) (by omega) |>.toList.toArray.reverse
+def matmul (n : Nat)
+    (A B : Array (Array Float)) : IO (Array (Array Float)) := do
+  let flattened_A  := A.flatMap id
+  let flattened_B  := B.flatMap id
   IO.println s!"Flattened A: {flattened_A}"
   IO.println s!"Flattened B: {flattened_B}"
 
@@ -218,12 +218,14 @@ def matmul {n : Nat}
         let val := out[i * n + j]!
         IO.println s!"C[{i},{j}] = {val}"
 
-    pure (⊞ (i j : Idx n) => out[i.1 * n + j.1]!)
+    let result := Array.ofFn fun (i : Fin n) =>
+      Array.ofFn fun (j : Fin n) => out[i.val * n + j.val]!
+    pure result
   else
     throw <| IO.userError s!"Size mismatch: {out.size} ≠ {n*n}"
 
-#eval do matmul ⊞[1.0,2.0;3.0,4.0] ⊞[1.0,0.0;0.0,1.0]
-#eval do matmul ⊞[1.0,2.0;3.0,4.0] ⊞[5.0,6.0;7.0,8.0]
+#eval do matmul 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[1.0,0.0],#[0.0,1.0]]
+#eval do matmul 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[5.0,6.0],#[7.0,8.0]]
 
 
 end BasicMatMul
@@ -279,10 +281,10 @@ def matmulKernel : KernelM MatMulArgs Unit := do
       if xbase * V + x < N && ybase * V + y < N then
         C.set ((xbase * V + x) * N + (ybase * V + y)) (c[x]!|>.get! y)
 
-def matmul {n : Nat} (V : Nat := 4)
-    (A B : Float^[n,n]) : IO (Float^[n,n]) := do
-  let flattened_A  := A.reshape (Fin (n*n)) (by omega) |>.toList.toArray.reverse
-  let flattened_B  := B.reshape (Fin (n*n)) (by omega) |>.toList.toArray.reverse
+def matmul (n : Nat) (V : Nat := 4)
+    (A B : Array (Array Float)) : IO (Array (Array Float)) := do
+  let flattened_A  := A.flatMap id
+  let flattened_B  := B.flatMap id
 
   let initState := mkKernelState [
     globalFloatArray `A flattened_A,
@@ -304,12 +306,13 @@ def matmul {n : Nat} (V : Nat := 4)
   let some (KernelValue.arrayFloat out) := finalState.globals.get? `C
     | throw <| IO.userError "Result missing"
   if out.size = n * n then
-    pure (⊞ (i j : Idx n) => out[i.1 * n + j.1]!)
+    pure (Array.ofFn fun (i : Fin n) =>
+      Array.ofFn fun (j : Fin n) => out[i.val * n + j.val]!)
   else
     throw <| IO.userError s!"Size mismatch: {out.size} ≠ {n*n}"
 
-#eval do matmul 2 ⊞[1.0,2.0;3.0,4.0] ⊞[1.0,0.0;0.0,1.0]
-#eval do matmul 2 ⊞[1.0,2.0;3.0,4.0] ⊞[5.0,6.0;7.0,8.0]
+#eval do matmul 2 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[1.0,0.0],#[0.0,1.0]]
+#eval do matmul 2 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[5.0,6.0],#[7.0,8.0]]
 
 
 end BetterMatMul
@@ -347,9 +350,9 @@ def transposeKernel : KernelM TransposeArgs Unit := do
     let val ← tile.get (col * N + row)
     output.set (row * N + col) val
 
-def transpose {n : Nat}
-    (mat : Float^[n,n]) : IO (Float^[n,n]) := do
-  let flattened := mat.reshape (Fin (n*n)) (by omega) |>.toList.toArray.reverse
+def transpose (n : Nat)
+    (mat : Array (Array Float)) : IO (Array (Array Float)) := do
+  let flattened := mat.flatMap id
 
   let initState := mkKernelState
     [ globalFloatArray `input flattened
@@ -372,7 +375,8 @@ def transpose {n : Nat}
   let some (KernelValue.arrayFloat out) := finalState.globals.get? `output
     | throw <| IO.userError "Result missing"
   if out.size = n * n then
-    pure (⊞ (i j : Idx n) => out[i.1 * n + j.1]!)
+    pure (Array.ofFn fun (i : Fin n) =>
+      Array.ofFn fun (j : Fin n) => out[i.val * n + j.val]!)
   else
     throw <| IO.userError s!"Size mismatch: {out.size} ≠ {n*n}"
 
@@ -387,7 +391,7 @@ def transpose {n : Nat}
 --          3  7 11 15
 --          4  8 12 16
 #eval do
-  let result ← transpose ⊞[1.0,2.0,3.0,4.0; 5.0,6.0,7.0,8.0; 9.0,10.0,11.0,12.0; 13.0,14.0,15.0,16.0]
+  let result ← transpose 4 #[#[1.0,2.0,3.0,4.0], #[5.0,6.0,7.0,8.0], #[9.0,10.0,11.0,12.0], #[13.0,14.0,15.0,16.0]]
   IO.println s!"Transposed matrix: {result}"
   return result
 
@@ -471,12 +475,11 @@ def prefixSumKernel : KernelM PrefixSumArgs Unit := do
     let result ← temp.get tid
     output.set tid result
 
-def prefixSum {n : Nat} (input : Float^[n]) : IO (Float^[n]) := do
+def prefixSum (n : Nat) (input : Array Float) : IO (Array Float) := do
   -- Convert tensor to array, reversing to fix ordering issue
-  let inputArray := input.toList.toArray.reverse
 
   let initState := mkKernelState
-    [ globalFloatArray `input inputArray
+    [ globalFloatArray `input input
     , globalFloatArray `output (Array.replicate n 0.0)
     ]
     [ (`temp, KernelValue.arrayFloat (Array.replicate 16 0.0))  -- Max 16 elements
@@ -494,7 +497,7 @@ def prefixSum {n : Nat} (input : Float^[n]) : IO (Float^[n]) := do
   let some (KernelValue.arrayFloat out) := finalState.globals.get? `output
     | throw <| IO.userError "Result missing"
   if out.size >= n then
-    pure (⊞ (i : Idx n) => out[i.1]!)
+    pure (Array.ofFn fun (i : Fin n) => out[i.val]!)
   else
     throw <| IO.userError s!"Size mismatch: {out.size} < {n}"
 
@@ -502,21 +505,21 @@ def prefixSum {n : Nat} (input : Float^[n]) : IO (Float^[n]) := do
 -- Input: [1, 2, 3, 4]
 -- Expected output: [1, 3, 6, 10]
 #eval do
-  let result ← prefixSum ⊞[1.0, 2.0, 3.0, 4.0]
+  let result ← prefixSum 4 #[1.0, 2.0, 3.0, 4.0]
   IO.println s!"Prefix sum of [1,2,3,4]: {result}"
   return result
 
 -- Input: [1, 2, 3, 4, 5, 6, 7, 8]
 -- Expected output: [1, 3, 6, 10, 15, 21, 28, 36]
 #eval do
-  let result ← prefixSum ⊞[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+  let result ← prefixSum 8 #[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
   IO.println s!"Prefix sum of [1,2,3,4,5,6,7,8]: {result}"
   return result
 
 -- Input: [2, 2, 2, 2, 2, 2, 2, 2]
 -- Expected output: [2, 4, 6, 8, 10, 12, 14, 16]
 #eval do
-  let result ← prefixSum ⊞[2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+  let result ← prefixSum 8 #[2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
   IO.println s!"Prefix sum of [2,2,2,2,2,2,2,2]: {result}"
   return result
 
