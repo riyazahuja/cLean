@@ -272,6 +272,10 @@ instance : FromKernelValue Nat where
   let c ← readCtx
   pure (c.blockIdx.y * c.blockDim.y + c.threadIdx.y)
 
+@[inline] def globalIdxZ {Args} : KernelM Args Nat := do
+  let c ← readCtx
+  pure (c.blockIdx.z * c.blockDim.z + c.threadIdx.z)
+
 
 /-! ## Wrapper types for clean syntax -/
 

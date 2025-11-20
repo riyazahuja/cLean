@@ -104,6 +104,7 @@ partial def exprToDExpr (stx : Syntax) : MacroM Syntax := do
 
   -- Default: treat as variable
   | _ =>
+    -- dbg_trace s!"exprToDExpr: unhandled syntax kind: {stx.getKind}"
     `(DExpr.var "unknown")
 
 /-! ## Statement Extraction -/
@@ -115,11 +116,12 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
 
   for item in items do
     -- Each item is a doSeqItem, extract the doElem
+    -- dbg_trace s!"  item kind: {item.getKind}"
     if item.getKind != ``Lean.Parser.Term.doSeqItem then
       continue
 
     let doElem := item[0]
-    -- dbg_trace s!"Processing doElem kind: {doElem.getKind}"
+    -- dbg_trace s!"  Processing doElem kind: {doElem.getKind}"
 
     -- Use match instead of if-let to avoid timeout
     match doElem with
@@ -131,6 +133,28 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
       let globalIdxExpr ← `(DExpr.binop BinOp.add
         (DExpr.binop BinOp.mul (DExpr.blockIdx Dim.x) (DExpr.blockDim Dim.x))
         (DExpr.threadIdx Dim.x))
+      let globalIdxTSyntax : TSyntax `term := ⟨globalIdxExpr⟩
+      let dstmt ← `(DStmt.assign $(quote varName) $globalIdxTSyntax)
+      dstmts := dstmts.push dstmt
+
+    -- PATTERN: let i ← globalIdxY
+    | `(doElem| let $id:ident ← globalIdxY) =>
+      let varName := id.getId.toString
+      -- Build the globalIdxY expression
+      let globalIdxExpr ← `(DExpr.binop BinOp.add
+        (DExpr.binop BinOp.mul (DExpr.blockIdx Dim.y) (DExpr.blockDim Dim.y))
+        (DExpr.threadIdx Dim.y))
+      let globalIdxTSyntax : TSyntax `term := ⟨globalIdxExpr⟩
+      let dstmt ← `(DStmt.assign $(quote varName) $globalIdxTSyntax)
+      dstmts := dstmts.push dstmt
+
+    -- PATTERN: let i ← globalIdxZ
+    | `(doElem| let $id:ident ← globalIdxZ) =>
+      let varName := id.getId.toString
+      -- Build the globalIdxZ expression
+      let globalIdxExpr ← `(DExpr.binop BinOp.add
+        (DExpr.binop BinOp.mul (DExpr.blockIdx Dim.z) (DExpr.blockDim Dim.z))
+        (DExpr.threadIdx Dim.z))
       let globalIdxTSyntax : TSyntax `term := ⟨globalIdxExpr⟩
       let dstmt ← `(DStmt.assign $(quote varName) $globalIdxTSyntax)
       dstmts := dstmts.push dstmt
@@ -161,6 +185,27 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
           }
       -- else
         -- dbg_trace s!"✗ RHS did not match expected patterns"
+
+    -- PATTERN: let x : SharedArray T := ⟨args.field⟩
+    | `(doElem| let $id:ident : SharedArray $_ := ⟨$rhs:term⟩) =>
+      let varName := id.getId
+      -- Check if rhs is just an ident (the field name directly)
+      if rhs.raw.isIdent then
+        let fullName := rhs.raw.getId
+        -- Extract just the last component (e.g., `args.tile` → `tile`)
+        let fieldName := fullName.components.getLast!
+        newCtx := { newCtx with
+          sharedArrays := newCtx.sharedArrays.push fieldName,
+          arrayMap := newCtx.arrayMap.insert (varName.toString) fieldName
+        }
+      -- Extract field name from args.field
+      else if let `($argsId:ident.$field:ident) := rhs then
+        if argsId.getId == `args then
+          let fieldName := field.getId
+          newCtx := { newCtx with
+            sharedArrays := newCtx.sharedArrays.push fieldName,
+            arrayMap := newCtx.arrayMap.insert (varName.toString) fieldName
+          }
 
     -- PATTERN: let x := expr (scalar assignments)
     | `(doElem| let $id:ident := $rhs:term) =>
@@ -210,10 +255,402 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
               dstmts := dstmts.push dstmt
               -- dbg_trace s!"    ✓ Added arr.get statement to dstmts"
 
+    -- PATTERN: barrier (synchronization)
+    | `(doElem| barrier) =>
+      let dstmt ← `(DStmt.barrier)
+      dstmts := dstmts.push dstmt
+
+    -- PATTERN: doNested - nested do block (check in default case below since no pattern match)
+    -- Handled in default case below
+
+    -- PATTERN: if-then-do (without else) - must come before if-then-else
+    | `(doElem| if $cond:term then $thenBranch:term) =>
+      -- Extract condition
+      let condDExpr ← exprToDExpr cond
+      let condTSyntax : TSyntax `term := ⟨condDExpr⟩
+
+      -- Recursively extract then branch
+      let thenStmt ← if thenBranch.raw.getKind == ``Lean.Parser.Term.do then
+        -- Then branch is do-notation, recursively extract
+        let thenDoSeq := thenBranch.raw[1]
+        let thenItems := if thenDoSeq.getKind == ``Lean.Parser.Term.doSeqIndent ||
+                            thenDoSeq.getKind == ``Lean.Parser.Term.doSeqBracketed then
+          if thenDoSeq.getNumArgs > 0 then thenDoSeq[0].getArgs else #[]
+        else #[]
+        let (thenStmts, thenCtx) ← extractDoItems thenItems newCtx
+        newCtx := thenCtx
+        -- Build sequence of then statements
+        let mut thenBody ← `(DStmt.skip)
+        for stmt in thenStmts.reverse do
+          let stmtTSyntax : TSyntax `term := ⟨stmt⟩
+          thenBody ← `(DStmt.seq $stmtTSyntax $thenBody)
+        pure thenBody
+      else
+        -- Single statement - check if it's arr.set
+        if thenBranch.raw.getKind == ``Lean.Parser.Term.app then
+          let fn := thenBranch.raw.getArg 0
+          if fn.isIdent then
+            let fullName := fn.getId
+            let components := fullName.components
+            if components.length >= 2 && components.getLast! == `set then
+              -- This is arr.set pattern
+              let arrName := components[components.length - 2]!
+              let actualArrayName := newCtx.arrayMap.getD (arrName.toString) arrName
+              let args := thenBranch.raw.getArg 1
+              if args.getKind == `null && args.getNumArgs >= 2 then
+                let idx := args.getArg 0
+                let val := args.getArg 1
+                let idxDExpr ← exprToDExpr idx
+                let valDExpr ← exprToDExpr val
+                let idxTSyntax : TSyntax `term := ⟨idxDExpr⟩
+                let valTSyntax : TSyntax `term := ⟨valDExpr⟩
+                `(DStmt.store (DExpr.var $(quote actualArrayName.toString))
+                   $idxTSyntax $valTSyntax)
+              else
+                `(DStmt.skip)
+            else
+              `(DStmt.skip)
+          else
+            `(DStmt.skip)
+        else
+          `(DStmt.skip)
+
+      -- Else branch is skip for if-then without else
+      let elseStmt ← `(DStmt.skip)
+
+      let thenStmtTSyntax : TSyntax `term := ⟨thenStmt⟩
+      let elseStmtTSyntax : TSyntax `term := ⟨elseStmt⟩
+      let dstmt ← `(DStmt.ite $condTSyntax $thenStmtTSyntax $elseStmtTSyntax)
+      dstmts := dstmts.push dstmt
+
+    -- PATTERN: if-then-else
+    | `(doElem| if $cond:term then $thenBranch:term else $elseBranch:term) =>
+      -- Extract condition
+      let condDExpr ← exprToDExpr cond
+      let condTSyntax : TSyntax `term := ⟨condDExpr⟩
+
+      -- Recursively extract then branch
+      let thenStmt ← if thenBranch.raw.getKind == ``Lean.Parser.Term.do then
+        -- Then branch is do-notation, recursively extract
+        let thenDoSeq := thenBranch.raw[1]
+        let thenItems := if thenDoSeq.getKind == ``Lean.Parser.Term.doSeqIndent ||
+                            thenDoSeq.getKind == ``Lean.Parser.Term.doSeqBracketed then
+          if thenDoSeq.getNumArgs > 0 then thenDoSeq[0].getArgs else #[]
+        else #[]
+        let (thenStmts, thenCtx) ← extractDoItems thenItems newCtx
+        newCtx := thenCtx
+        -- Build sequence of then statements
+        let mut thenBody ← `(DStmt.skip)
+        for stmt in thenStmts.reverse do
+          let stmtTSyntax : TSyntax `term := ⟨stmt⟩
+          thenBody ← `(DStmt.seq $stmtTSyntax $thenBody)
+        pure thenBody
+      else
+        -- Single statement - check if it's arr.set
+        if thenBranch.raw.getKind == ``Lean.Parser.Term.app then
+          let fn := thenBranch.raw.getArg 0
+          if fn.isIdent then
+            let fullName := fn.getId
+            let components := fullName.components
+            if components.length >= 2 && components.getLast! == `set then
+              -- This is arr.set pattern
+              let arrName := components[components.length - 2]!
+              let actualArrayName := newCtx.arrayMap.getD (arrName.toString) arrName
+              let args := thenBranch.raw.getArg 1
+              if args.getKind == `null && args.getNumArgs >= 2 then
+                let idx := args.getArg 0
+                let val := args.getArg 1
+                let idxDExpr ← exprToDExpr idx
+                let valDExpr ← exprToDExpr val
+                let idxTSyntax : TSyntax `term := ⟨idxDExpr⟩
+                let valTSyntax : TSyntax `term := ⟨valDExpr⟩
+                `(DStmt.store (DExpr.var $(quote actualArrayName.toString))
+                   $idxTSyntax $valTSyntax)
+              else
+                `(DStmt.skip)
+            else
+              `(DStmt.skip)
+          else
+            `(DStmt.skip)
+        else
+          `(DStmt.skip)
+
+      -- Recursively extract else branch
+      let elseStmt ← if elseBranch.raw.getKind == ``Lean.Parser.Term.do then
+        -- Else branch is do-notation, recursively extract
+        let elseDoSeq := elseBranch.raw[1]
+        let elseItems := if elseDoSeq.getKind == ``Lean.Parser.Term.doSeqIndent ||
+                            elseDoSeq.getKind == ``Lean.Parser.Term.doSeqBracketed then
+          if elseDoSeq.getNumArgs > 0 then elseDoSeq[0].getArgs else #[]
+        else #[]
+        let (elseStmts, elseCtx) ← extractDoItems elseItems newCtx
+        newCtx := elseCtx
+        -- Build sequence of else statements
+        let mut elseBody ← `(DStmt.skip)
+        for stmt in elseStmts.reverse do
+          let stmtTSyntax : TSyntax `term := ⟨stmt⟩
+          elseBody ← `(DStmt.seq $stmtTSyntax $elseBody)
+        pure elseBody
+      else
+        -- Single statement - check if it's arr.set
+        if elseBranch.raw.getKind == ``Lean.Parser.Term.app then
+          let fn := elseBranch.raw.getArg 0
+          if fn.isIdent then
+            let fullName := fn.getId
+            let components := fullName.components
+            if components.length >= 2 && components.getLast! == `set then
+              -- This is arr.set pattern
+              let arrName := components[components.length - 2]!
+              let actualArrayName := newCtx.arrayMap.getD (arrName.toString) arrName
+              let args := elseBranch.raw.getArg 1
+              if args.getKind == `null && args.getNumArgs >= 2 then
+                let idx := args.getArg 0
+                let val := args.getArg 1
+                let idxDExpr ← exprToDExpr idx
+                let valDExpr ← exprToDExpr val
+                let idxTSyntax : TSyntax `term := ⟨idxDExpr⟩
+                let valTSyntax : TSyntax `term := ⟨valDExpr⟩
+                `(DStmt.store (DExpr.var $(quote actualArrayName.toString))
+                   $idxTSyntax $valTSyntax)
+              else
+                `(DStmt.skip)
+            else
+              `(DStmt.skip)
+          else
+            `(DStmt.skip)
+        else
+          `(DStmt.skip)
+
+      let thenStmtTSyntax : TSyntax `term := ⟨thenStmt⟩
+      let elseStmtTSyntax : TSyntax `term := ⟨elseStmt⟩
+      let dstmt ← `(DStmt.ite $condTSyntax $thenStmtTSyntax $elseStmtTSyntax)
+      dstmts := dstmts.push dstmt
+
+    -- PATTERN: for loop (for i in [lo:hi] do body)
+    | `(doElem| for $id:ident in [$lo:term : $hi:term] do $body:term) =>
+      let loopVar := id.getId.toString
+      -- Extract loop bounds
+      let loDExpr ← exprToDExpr lo
+      let hiDExpr ← exprToDExpr hi
+      let loTSyntax : TSyntax `term := ⟨loDExpr⟩
+      let hiTSyntax : TSyntax `term := ⟨hiDExpr⟩
+
+      -- Recursively extract loop body
+      let bodyStmt ← if body.raw.getKind == ``Lean.Parser.Term.do then
+        -- Body is do-notation, recursively extract
+        let bodyDoSeq := body.raw[1]
+        let bodyItems := if bodyDoSeq.getKind == ``Lean.Parser.Term.doSeqIndent ||
+                            bodyDoSeq.getKind == ``Lean.Parser.Term.doSeqBracketed then
+          if bodyDoSeq.getNumArgs > 0 then bodyDoSeq[0].getArgs else #[]
+        else #[]
+        let (bodyStmts, bodyCtx) ← extractDoItems bodyItems newCtx
+        newCtx := bodyCtx
+        -- Build sequence of body statements
+        let mut bodySeq ← `(DStmt.skip)
+        for stmt in bodyStmts.reverse do
+          let stmtTSyntax : TSyntax `term := ⟨stmt⟩
+          bodySeq ← `(DStmt.seq $stmtTSyntax $bodySeq)
+        pure bodySeq
+      else
+        -- Single statement - check if it's arr.set
+        if body.raw.getKind == ``Lean.Parser.Term.app then
+          let fn := body.raw.getArg 0
+          if fn.isIdent then
+            let fullName := fn.getId
+            let components := fullName.components
+            if components.length >= 2 && components.getLast! == `set then
+              -- This is arr.set pattern
+              let arrName := components[components.length - 2]!
+              let actualArrayName := newCtx.arrayMap.getD (arrName.toString) arrName
+              let args := body.raw.getArg 1
+              if args.getKind == `null && args.getNumArgs >= 2 then
+                let idx := args.getArg 0
+                let val := args.getArg 1
+                let idxDExpr ← exprToDExpr idx
+                let valDExpr ← exprToDExpr val
+                let idxTSyntax : TSyntax `term := ⟨idxDExpr⟩
+                let valTSyntax : TSyntax `term := ⟨valDExpr⟩
+                `(DStmt.store (DExpr.var $(quote actualArrayName.toString))
+                   $idxTSyntax $valTSyntax)
+              else
+                `(DStmt.skip)
+            else
+              `(DStmt.skip)
+          else
+            `(DStmt.skip)
+        else
+          `(DStmt.skip)
+
+      let bodyStmtTSyntax : TSyntax `term := ⟨bodyStmt⟩
+      let dstmt ← `(DStmt.for $(quote loopVar) $loTSyntax $hiTSyntax $bodyStmtTSyntax)
+      dstmts := dstmts.push dstmt
+
     -- Check arr.set pattern separately (can't use quotation pattern for doExpr)
     | _ =>
-      -- dbg_trace s!"✗ No pattern matched, checking arr.set in default case"
-      if doElem.getKind == ``Lean.Parser.Term.doExpr then
+      -- dbg_trace s!"✗ No pattern matched, checking doIf and arr.set in default case"
+      -- Handle doIf (if-then and if-then-else)
+      if doElem.getKind == ``Lean.Parser.Term.doIf then
+        -- doIf structure: doIf := "if" term "then" term ("else" term)?
+        -- Args: [0]=if keyword, [1]=cond, [2]=then keyword, [3]=then branch, [4]=(else keyword), [5]=(else branch)
+        let cond := doElem.getArg 1
+        let thenBranch := doElem.getArg 3
+        let hasElse := doElem.getNumArgs > 5
+
+        -- dbg_trace s!"doIf: cond kind={cond.getKind}, numArgs={cond.getNumArgs}, cond={cond}"
+        -- Extract condition (unwrap doIfProp if needed)
+        let actualCond := if cond.getKind == ``Lean.Parser.Term.doIfProp then
+          cond.getArg 1  -- The actual condition is at index 1
+        else
+          cond
+        let condDExpr ← exprToDExpr actualCond
+        let condTSyntax : TSyntax `term := ⟨condDExpr⟩
+
+        -- Extract then branch
+        -- dbg_trace s!"doIf: thenBranch kind={thenBranch.getKind}, numArgs={thenBranch.getNumArgs}"
+        let thenStmt ← if thenBranch.getKind == ``Lean.Parser.Term.doSeqIndent ||
+                           thenBranch.getKind == ``Lean.Parser.Term.doSeqBracketed then
+          -- Then branch is directly a doSeqIndent/doSeqBracketed (implicit do in if-then)
+          let thenItems := if thenBranch.getNumArgs > 0 then thenBranch[0].getArgs else #[]
+          -- dbg_trace s!"  thenItems.size={thenItems.size}"
+          let (thenStmts, thenCtx) ← extractDoItems thenItems newCtx
+          newCtx := thenCtx
+          -- dbg_trace s!"  thenStmts.size={thenStmts.size}"
+          -- Build sequence of then statements
+          let mut thenBody ← `(DStmt.skip)
+          for stmt in thenStmts.reverse do
+            let stmtTSyntax : TSyntax `term := ⟨stmt⟩
+            thenBody ← `(DStmt.seq $stmtTSyntax $thenBody)
+          pure thenBody
+        else if thenBranch.getKind == ``Lean.Parser.Term.do then
+          -- Then branch has explicit do keyword, recursively extract
+          let thenDoSeq := thenBranch[1]
+          dbg_trace s!"  thenDoSeq kind={thenDoSeq.getKind}, numArgs={thenDoSeq.getNumArgs}"
+          let thenItems := if thenDoSeq.getKind == ``Lean.Parser.Term.doSeqIndent ||
+                              thenDoSeq.getKind == ``Lean.Parser.Term.doSeqBracketed then
+            if thenDoSeq.getNumArgs > 0 then thenDoSeq[0].getArgs else #[]
+          else #[]
+          let (thenStmts, thenCtx) ← extractDoItems thenItems newCtx
+          newCtx := thenCtx
+          -- Build sequence of then statements
+          let mut thenBody ← `(DStmt.skip)
+          for stmt in thenStmts.reverse do
+            let stmtTSyntax : TSyntax `term := ⟨stmt⟩
+            thenBody ← `(DStmt.seq $stmtTSyntax $thenBody)
+          pure thenBody
+        else
+          -- Single statement - check if it's arr.set
+          if thenBranch.getKind == ``Lean.Parser.Term.app then
+            let fn := thenBranch.getArg 0
+            if fn.isIdent then
+              let fullName := fn.getId
+              let components := fullName.components
+              if components.length >= 2 && components.getLast! == `set then
+                -- This is arr.set pattern
+                let arrName := components[components.length - 2]!
+                let actualArrayName := newCtx.arrayMap.getD (arrName.toString) arrName
+                let args := thenBranch.getArg 1
+                if args.getKind == `null && args.getNumArgs >= 2 then
+                  let idx := args.getArg 0
+                  let val := args.getArg 1
+                  let idxDExpr ← exprToDExpr idx
+                  let valDExpr ← exprToDExpr val
+                  let idxTSyntax : TSyntax `term := ⟨idxDExpr⟩
+                  let valTSyntax : TSyntax `term := ⟨valDExpr⟩
+                  `(DStmt.store (DExpr.var $(quote actualArrayName.toString))
+                     $idxTSyntax $valTSyntax)
+                else
+                  `(DStmt.skip)
+              else
+                `(DStmt.skip)
+            else
+              `(DStmt.skip)
+          else
+            `(DStmt.skip)
+
+        -- Extract else branch if present
+        let elseStmt ← if hasElse then
+          let elseBranch := doElem.getArg 5
+          if elseBranch.getKind == ``Lean.Parser.Term.doSeqIndent ||
+             elseBranch.getKind == ``Lean.Parser.Term.doSeqBracketed then
+            -- Else branch is directly a doSeqIndent/doSeqBracketed
+            let elseItems := if elseBranch.getNumArgs > 0 then elseBranch[0].getArgs else #[]
+            let (elseStmts, elseCtx) ← extractDoItems elseItems newCtx
+            newCtx := elseCtx
+            -- Build sequence of else statements
+            let mut elseBody ← `(DStmt.skip)
+            for stmt in elseStmts.reverse do
+              let stmtTSyntax : TSyntax `term := ⟨stmt⟩
+              elseBody ← `(DStmt.seq $stmtTSyntax $elseBody)
+            pure elseBody
+          else if elseBranch.getKind == ``Lean.Parser.Term.do then
+            -- Else branch has explicit do keyword, recursively extract
+            let elseDoSeq := elseBranch[1]
+            let elseItems := if elseDoSeq.getKind == ``Lean.Parser.Term.doSeqIndent ||
+                                elseDoSeq.getKind == ``Lean.Parser.Term.doSeqBracketed then
+              if elseDoSeq.getNumArgs > 0 then elseDoSeq[0].getArgs else #[]
+            else #[]
+            let (elseStmts, elseCtx) ← extractDoItems elseItems newCtx
+            newCtx := elseCtx
+            -- Build sequence of else statements
+            let mut elseBody ← `(DStmt.skip)
+            for stmt in elseStmts.reverse do
+              let stmtTSyntax : TSyntax `term := ⟨stmt⟩
+              elseBody ← `(DStmt.seq $stmtTSyntax $elseBody)
+            pure elseBody
+          else
+            -- Single statement - check if it's arr.set
+            if elseBranch.getKind == ``Lean.Parser.Term.app then
+              let fn := elseBranch.getArg 0
+              if fn.isIdent then
+                let fullName := fn.getId
+                let components := fullName.components
+                if components.length >= 2 && components.getLast! == `set then
+                  -- This is arr.set pattern
+                  let arrName := components[components.length - 2]!
+                  let actualArrayName := newCtx.arrayMap.getD (arrName.toString) arrName
+                  let args := elseBranch.getArg 1
+                  if args.getKind == `null && args.getNumArgs >= 2 then
+                    let idx := args.getArg 0
+                    let val := args.getArg 1
+                    let idxDExpr ← exprToDExpr idx
+                    let valDExpr ← exprToDExpr val
+                    let idxTSyntax : TSyntax `term := ⟨idxDExpr⟩
+                    let valTSyntax : TSyntax `term := ⟨valDExpr⟩
+                    `(DStmt.store (DExpr.var $(quote actualArrayName.toString))
+                       $idxTSyntax $valTSyntax)
+                  else
+                    `(DStmt.skip)
+                else
+                  `(DStmt.skip)
+              else
+                `(DStmt.skip)
+            else
+              `(DStmt.skip)
+        else
+          -- No else branch, use skip
+          `(DStmt.skip)
+
+        let thenStmtTSyntax : TSyntax `term := ⟨thenStmt⟩
+        let elseStmtTSyntax : TSyntax `term := ⟨elseStmt⟩
+        let dstmt ← `(DStmt.ite $condTSyntax $thenStmtTSyntax $elseStmtTSyntax)
+        dstmts := dstmts.push dstmt
+      -- Handle doNested - nested do blocks
+      else if doElem.getKind == ``Lean.Parser.Term.doNested then
+        -- doNested wraps a do-block: doNested := "do" (doSeqIndent | doSeqBracketed)
+        -- Extract the nested do sequence
+        let nestedDoSeq := doElem.getArg 1  -- The do sequence is at index 1
+        -- dbg_trace s!"  doNested: nestedDoSeq kind={nestedDoSeq.getKind}, numArgs={nestedDoSeq.getNumArgs}"
+        let nestedItems := if nestedDoSeq.getKind == ``Lean.Parser.Term.doSeqIndent ||
+                              nestedDoSeq.getKind == ``Lean.Parser.Term.doSeqBracketed then
+          if nestedDoSeq.getNumArgs > 0 then nestedDoSeq[0].getArgs else #[]
+        else #[]
+        -- dbg_trace s!"  doNested: nestedItems.size={nestedItems.size}"
+        -- Recursively extract nested statements
+        let (nestedStmts, nestedCtx) ← extractDoItems nestedItems newCtx
+        newCtx := nestedCtx
+        -- Add all nested statements to our list
+        dstmts := dstmts ++ nestedStmts
+      else if doElem.getKind == ``Lean.Parser.Term.doExpr then
         let expr := doElem.getArg 0
         -- Check if it's arr.set idx val
         if expr.getKind == ``Lean.Parser.Term.app then
@@ -276,12 +713,15 @@ def extractKernelFromSyntax (kernelName : Name) (kernelBody : TSyntax `Lean.Pars
   let globalArraysList ← finalCtx.globalArrays.mapM fun name =>
     `({ name := $(quote name.toString), ty := DType.array DType.float, space := MemorySpace.global })
 
+  let sharedArraysList ← finalCtx.sharedArrays.mapM fun name =>
+    `({ name := $(quote name.toString), ty := DType.array DType.float, space := MemorySpace.shared })
+
   -- Build the kernel structure
   `({ name := $(quote kernelName.toString),
       params := [],  -- TODO: extract from args type
       locals := [],  -- TODO: track locals with types
       globalArrays := [$(globalArraysList),*],
-      sharedArrays := [],
+      sharedArrays := [$(sharedArraysList),*],
       body := $body : Kernel })
 
 /-! ## Device Kernel Macro -/
@@ -353,6 +793,11 @@ macro "device_kernel " name:ident sig:optDeclSig val:declVal : command => do
     let s ← `({ name := $(quote arrName.toString), ty := DType.array DType.float, space := MemorySpace.global })
     globalArraySyntax := globalArraySyntax.push s
 
+  let mut sharedArraySyntax : Array (TSyntax `term) := #[]
+  for arrName in finalCtx.sharedArrays do
+    let s ← `({ name := $(quote arrName.toString), ty := DType.array DType.float, space := MemorySpace.shared })
+    sharedArraySyntax := sharedArraySyntax.push s
+
   -- Build the body by sequencing statements
   let mut bodyExpr ← `(DStmt.skip)
   for stmt in stmts.reverse do
@@ -369,7 +814,7 @@ macro "device_kernel " name:ident sig:optDeclSig val:declVal : command => do
       params := []
       locals := []
       globalArrays := [$globalArraySyntax,*]
-      sharedArrays := []
+      sharedArrays := [$sharedArraySyntax,*]
       body := $bodyExpr
     }
   )

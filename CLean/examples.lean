@@ -1,9 +1,6 @@
 import CLean.GPU
-import CLean.VerifyIR
-import CLean.Extract
-import CLean.CodeGen
 
-open Lean GpuDSL CLean.Extract --SciLean
+open Lean GpuDSL
 
 
 namespace Saxpy
