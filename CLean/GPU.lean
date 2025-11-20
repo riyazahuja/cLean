@@ -683,7 +683,7 @@ open Lean Elab Command Parser in
     let styStr := Format.pretty (← liftCoreM <| PrettyPrinter.ppCategory `term sty)
     structStr := structStr ++ s!"  {sid.getId} : {styStr}\n"
   for id in allMemFields do
-    structStr := structStr ++ s!"  {id.getId} : Name\n"
+    structStr := structStr ++ s!"  {id.getId} : Lean.Name\n"
   structStr := structStr ++ "  deriving Repr"
 
   -- Parse and elaborate structure

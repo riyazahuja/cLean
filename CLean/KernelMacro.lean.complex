@@ -134,7 +134,7 @@ def getDoSeqItems (branch : TSyntax `Lean.Parser.Term.doSeq) : Array Syntax :=
     #[]
 
 /-- Extract VStmt list from do-sequence items -/
-def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (Array Syntax × ExtractCtx) := do
+partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (Array Syntax × ExtractCtx) := do
   let mut vstmts : Array Syntax := #[]
   let mut newCtx := ctx
 
@@ -230,21 +230,16 @@ def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (Array Syn
               let idx := args.getArg 0
               let idxVExpr ← exprToVExpr (TSyntax.mk idx)
               -- Build memory location and read statement
-              let isShared := newCtx.sharedArrays.contains actualArrayName
-              let vstmt ← if isShared then
-                `({ stmt := VStmtKind.read
-                      { array := $(quote actualArrayName),
-                        index := $(pure idxVExpr),
-                        memorySpace := MemorySpace.shared }
-                      $(quote valName),
-                    predicate := VExpr.constBool true })
+              let memSpace := if newCtx.sharedArrays.contains actualArrayName then
+                `(MemorySpace.shared)
               else
-                `({ stmt := VStmtKind.read
-                      { array := $(quote actualArrayName),
-                        index := $(pure idxVExpr),
-                        memorySpace := MemorySpace.global }
-                      $(quote valName),
-                    predicate := VExpr.constBool true })
+                `(MemorySpace.global)
+              let vstmt ← `({ stmt := VStmtKind.read
+                                { array := $(quote actualArrayName),
+                                  index := $(pure idxVExpr),
+                                  memorySpace := $memSpace }
+                                $(quote valName),
+                              predicate := VExpr.constBool true })
               vstmts := vstmts.push vstmt
               newCtx := { newCtx with localVars := newCtx.localVars.push valName }
             else
@@ -295,22 +290,16 @@ def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (Array Syn
               let val := args.getArg 1
               let idxVExpr ← exprToVExpr (TSyntax.mk idx)
               let valVExpr ← exprToVExpr (TSyntax.mk val)
-              -- Determine memory space
-              let isShared := newCtx.sharedArrays.contains actualArrayName
-              let vstmt ← if isShared then
-                `({ stmt := VStmtKind.write
-                      { array := $(quote actualArrayName),
-                        index := $(pure idxVExpr),
-                        memorySpace := MemorySpace.shared }
-                      $(pure valVExpr),
-                    predicate := VExpr.constBool true })
+              let memSpace := if newCtx.sharedArrays.contains actualArrayName then
+                `(MemorySpace.shared)
               else
-                `({ stmt := VStmtKind.write
-                      { array := $(quote actualArrayName),
-                        index := $(pure idxVExpr),
-                        memorySpace := MemorySpace.global }
-                      $(pure valVExpr),
-                    predicate := VExpr.constBool true })
+                `(MemorySpace.global)
+              let vstmt ← `({ stmt := VStmtKind.write
+                                { array := $(quote actualArrayName),
+                                  index := $(pure idxVExpr),
+                                  memorySpace := $memSpace }
+                                $(pure valVExpr),
+                              predicate := VExpr.constBool true })
               vstmts := vstmts.push vstmt
             else
               pure ()
@@ -322,11 +311,41 @@ def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (Array Syn
         pure ()
 
     -- If-then-else: if cond then ... else ...
-    -- TODO: Re-enable recursive extraction of branches once we fix the partial def issue
-    else if let `(doElem| if $_:term then $_:term $[else $_:term]?) := doElem then
-      -- For now, skip if-then-else statements
-      -- We'll add support for them after getting basic functionality working
-      pure ()
+    else if let `(doElem| if $cond:term then $thenBranch:term $[else $elseBranch:term]?) := doElem then
+      let condVExpr ← exprToVExpr cond
+
+      -- Extract then branch statements
+      let (thenStmts, _) ← if thenBranch.raw.getKind == ``Lean.Parser.Term.do then
+        let items := getDoSeqItems ⟨thenBranch.raw⟩
+        extractDoItems items newCtx
+      else
+        -- Single statement, not a do block - skip for now
+        pure (#[], newCtx)
+
+      -- Extract else branch statements if present
+      let elseStmts ← match elseBranch with
+        | some eb => do
+          let (stmts, _) ← if eb.raw.getKind == ``Lean.Parser.Term.do then
+            let items := getDoSeqItems ⟨eb.raw⟩
+            extractDoItems items newCtx
+          else
+            pure (#[], newCtx)
+          pure stmts
+        | none => pure #[]
+
+      -- Build if-then-else statement
+      -- Build list syntax from arrays (stmt is already Syntax)
+      let mut thenListStx ← `([])
+      for stmt in thenStmts.reverse do
+        let stmtTSyntax : TSyntax `term := ⟨stmt⟩
+        thenListStx ← `($stmtTSyntax :: $thenListStx)
+      let mut elseListStx ← `([])
+      for stmt in elseStmts.reverse do
+        let stmtTSyntax : TSyntax `term := ⟨stmt⟩
+        elseListStx ← `($stmtTSyntax :: $elseListStx)
+      let vstmt ← `({ stmt := VStmtKind.ite $(pure condVExpr) $thenListStx $elseListStx,
+                      predicate := VExpr.constBool true })
+      vstmts := vstmts.push vstmt
 
     else
       -- Skip other patterns for now
@@ -355,7 +374,7 @@ macro "gpu_kernel " name:ident sig:optDeclSig val:declVal : command => do
       #[]
 
   -- Extract statements and track arrays/vars
-  let (vstmts, extractCtx) ← CLean.KernelMacro.extractDoItems items {}
+  let (vstmts, extractCtx) ← extractDoItems items {}
 
   -- Build VarInfo syntax for global arrays
   let mut globalArraySyntax : Array Syntax := #[]
