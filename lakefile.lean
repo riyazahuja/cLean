@@ -14,6 +14,11 @@ package cLean {
   -- moreLinkArgs := linkArgs
   -- Add include path for local cblas.h symlink
   -- moreLeancArgs := #["-I./.local/include"]
+
+  -- Link CUDA FFI library
+  moreLinkArgs := #["-L.lake/build/lib", "-lcuda_ffi",
+                     "-L/usr/local/cuda/lib64", "-L/usr/lib64",
+                     "-lcudart", "-lcuda", "-lnvrtc"]
 }
 require mathlib from git "https://github.com/leanprover-community/mathlib4" @ "v4.20.1"
 -- require scilean from git "https://github.com/lecopivo/SciLean" @ "v4.20.1"
@@ -25,5 +30,15 @@ lean_lib CLean {
 
 lean_exe examples {
   root := `CLean.examples
+  supportInterpreter := true
+}
+
+lean_exe test_ffi_basic {
+  root := `test_ffi_basic
+  supportInterpreter := true
+}
+
+lean_exe test_gpu_e2e {
+  root := `test_gpu_e2e
   supportInterpreter := true
 }
