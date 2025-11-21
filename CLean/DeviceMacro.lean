@@ -23,6 +23,24 @@ structure ExtractCtx where
   globalArrays : Array Name := #[]  -- Track global array names
   sharedArrays : Array Name := #[]  -- Track shared array names
   arrayMap : Std.HashMap String Name := {}  -- Map local var to actual array name
+  -- Track parameters extracted from args.* assignments
+  params : Array (String × String) := #[]  -- (name, type as string)
+  -- Track local variable types
+  localTypes : Std.HashMap String String := {}  -- var name -> type string
+
+/-! ## Type Inference Helpers -/
+
+/-- Infer CUDA type from variable name (simple heuristic) -/
+def inferCudaType (varName : String) : String :=
+  -- Simple heuristics based on common naming patterns
+  if varName == "N" || varName == "length" || varName.endsWith "Idx" || varName.endsWith "idx" then
+    "int"
+  else if varName.startsWith "alpha" || varName.startsWith "beta" || varName.endsWith "Weight" then
+    "float"
+  else if varName.endsWith "d" || varName.endsWith "1" then
+    "int"  -- twod, twod1, etc.
+  else
+    "float"  -- Default to float
 
 /-! ## Expression Conversion -/
 
@@ -254,11 +272,41 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
             arrayMap := newCtx.arrayMap.insert (varName.toString) fieldName
           }
 
-    -- PATTERN: let x := expr (scalar assignments)
+    -- PATTERN: let x := obj.field (check if obj is args for parameter extraction)
+    | `(doElem| let $id:ident := $obj:ident.$field:ident) =>
+      let varName := id.getId.toString
+      -- Check if this is args.field (parameter extraction)
+      if obj.getId == `args then
+        let fieldName := field.getId.toString
+        let ty := inferCudaType fieldName
+        dbg_trace s!"✓ Extracted param: {fieldName} : {ty}"
+        newCtx := { newCtx with params := newCtx.params.push (fieldName, ty) }
+
+      -- Still generate the assignment for the IR
+      let rhsExpr ← `(DExpr.var $(quote field.getId.toString))
+      let dstmt ← `(DStmt.assign $(quote varName) $rhsExpr)
+      dstmts := dstmts.push dstmt
+
+    -- PATTERN: let x := expr (scalar assignments - general case)
     | `(doElem| let $id:ident := $rhs:term) =>
       let varName := id.getId.toString
+
+      -- Check if this is args.field using antiquotation pattern match
+      -- This works because the TSyntax preserves the structure even if raw is simplified
+      try
+        match rhs with
+        | `($obj:ident.$field:ident) =>
+          if obj.getId == `args then
+            let fieldName := field.getId.toString
+            let ty := inferCudaType fieldName
+            dbg_trace s!"✓ Extracted param: {fieldName} : {ty}"
+            newCtx := { newCtx with params := newCtx.params.push (fieldName, ty) }
+        | _ => pure ()
+      catch _ =>
+        pure ()
+
       -- Try to convert the RHS to a DExpr
-      -- This handles: projections (args.N), binary ops (a * b), literals, etc.
+      -- This handles: binary ops (a * b), literals, etc.
       let rhsExpr ← exprToDExpr rhs
       let rhsTSyntax : TSyntax `term := ⟨rhsExpr⟩
       let dstmt ← `(DStmt.assign $(quote varName) $rhsTSyntax)
@@ -763,9 +811,17 @@ def extractKernelFromSyntax (kernelName : Name) (kernelBody : TSyntax `Lean.Pars
   let sharedArraysList ← finalCtx.sharedArrays.mapM fun name =>
     `({ name := $(quote name.toString), ty := DType.array DType.float, space := MemorySpace.shared })
 
+  -- Extract parameters from context
+  let uniqueParams := finalCtx.params.toList.eraseDups
+  let mut paramsListSyntax : Array (TSyntax `term) := #[]
+  for (paramName, paramType) in uniqueParams do
+    let typeIdent := mkIdent (Name.mkSimple paramType)
+    let paramDecl ← `({ name := $(quote paramName), ty := DType.$typeIdent : VarDecl })
+    paramsListSyntax := paramsListSyntax.push paramDecl
+
   -- Build the kernel structure
   `({ name := $(quote kernelName.toString),
-      params := [],  -- TODO: extract from args type
+      params := [$paramsListSyntax,*],
       locals := [],  -- TODO: track locals with types
       globalArrays := [$(globalArraysList),*],
       sharedArrays := [$(sharedArraysList),*],
@@ -851,6 +907,15 @@ macro "device_kernel " name:ident sig:optDeclSig val:declVal : command => do
     let stmtTSyntax : TSyntax `term := ⟨stmt⟩
     bodyExpr ← `(DStmt.seq $stmtTSyntax $bodyExpr)
 
+  -- Extract parameters from context and build params list
+  let mut paramsSyntax : Array (TSyntax `term) := #[]
+  -- Get unique params (avoid duplicates from multiple assignments)
+  let uniqueParams := finalCtx.params.toList.eraseDups
+  for (paramName, paramType) in uniqueParams do
+    let typeIdent := mkIdent (Name.mkSimple paramType)
+    let paramVarDecl ← `({ name := $(quote paramName), ty := DType.$typeIdent : VarDecl })
+    paramsSyntax := paramsSyntax.push paramVarDecl
+
   -- Generate DeviceIR Kernel definition
   let irName := Lean.mkIdent (name.getId.appendAfter "IR")
   let nameQuote := quote name.getId.toString
@@ -858,7 +923,7 @@ macro "device_kernel " name:ident sig:optDeclSig val:declVal : command => do
   let kernelIRDefStx ← `(
     def $irName : DeviceIR.Kernel := {
       name := $nameQuote
-      params := []
+      params := [$paramsSyntax,*]
       locals := []
       globalArrays := [$globalArraySyntax,*]
       sharedArrays := [$sharedArraySyntax,*]

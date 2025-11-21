@@ -87,4 +87,141 @@ def getDeviceFn? (name : Lean.Name) : Lean.CoreM (Option DStmt) := do
   let env ← Lean.getEnv
   return (deviceFnExt.getState env).find? name
 
+/-! ## Translation Registry System
+
+This section provides an extensible registry for operator and function translations.
+Instead of hard-coding patterns in the macro, translations are registered via
+`initialize` blocks and looked up at macro expansion time.
+-/
+
+-- Binary operator translation rule
+structure BinOpTranslation where
+  /-- The syntax kind for the operator (e.g., `«term_+_»`, `«term_&&_»`)
+      Or the function name for function-style ops (e.g., `HAdd.hAdd`) -/
+  syntaxKind : Name
+  /-- The corresponding DeviceIR binary operator -/
+  deviceOp : BinOp
+  /-- Types this operator is valid for (e.g., [``Nat, ``Int, ``Float]) -/
+  validTypes : List Name := []  -- Empty list means valid for all types
+  deriving Inhabited
+
+-- Unary operator translation rule
+structure UnOpTranslation where
+  /-- The syntax kind for the operator (e.g., `«term_-_»`)
+      Or the function name for function-style ops (e.g., `Neg.neg`) -/
+  syntaxKind : Name
+  /-- The corresponding DeviceIR unary operator -/
+  deviceOp : UnOp
+  /-- Types this operator is valid for -/
+  validTypes : List Name := []
+  deriving Inhabited
+
+-- Function translation rule variants
+inductive FnTranslationRule where
+  /-- Direct translation: generates a DExpr with no arguments
+      Example: globalIdxX → DExpr.binop ... -/
+  | direct : (Unit → MacroM Syntax) → FnTranslationRule
+
+  /-- Expression with arguments: takes function arguments, returns DExpr
+      Example: arr.get idx → DExpr.index arr idx -/
+  | exprWithArgs : (Array Syntax → MacroM Syntax) → FnTranslationRule
+
+  /-- Statement-level: generates a DStmt
+      Example: arr.set idx val → DStmt.store arr idx val -/
+  | stmt : (Array Syntax → MacroM Syntax) → FnTranslationRule
+
+  /-- Custom: full control over translation, can inspect syntax
+      Example: .toNat?.getD pattern matching -/
+  | custom : (Syntax → MacroM (Option Syntax)) → FnTranslationRule
+
+-- Function translation entry
+structure FnTranslationEntry where
+  /-- The function name -/
+  name : Name
+  /-- The translation rule -/
+  rule : FnTranslationRule
+  /-- Priority for resolving conflicts (higher = preferred) -/
+  priority : Nat := 10
+
+-- Inhabited instance for FnTranslationRule (default case)
+instance : Inhabited FnTranslationRule where
+  default := .direct fun () => `(DExpr.var "unknown")
+
+-- Inhabited instance for FnTranslationEntry
+instance : Inhabited FnTranslationEntry where
+  default := ⟨`default, .direct fun () => `(DExpr.var "unknown"), 0⟩
+
+/-! ## Global Registries
+
+These registries are populated by `initialize` blocks across the codebase.
+They provide O(1) lookup during macro expansion.
+-/
+
+-- Registry for binary operators
+initialize binOpRegistry : IO.Ref (Std.HashMap Name BinOpTranslation) ←
+  IO.mkRef {}
+
+-- Registry for unary operators
+initialize unOpRegistry : IO.Ref (Std.HashMap Name UnOpTranslation) ←
+  IO.mkRef {}
+
+-- Registry for function translations
+initialize fnRegistry : IO.Ref (Std.HashMap Name FnTranslationEntry) ←
+  IO.mkRef {}
+
+/-! ## Registration API
+
+These functions are used to register translations, typically in `initialize` blocks.
+-/
+
+-- Register a binary operator translation
+def registerBinOp (trans : BinOpTranslation) : IO Unit := do
+  binOpRegistry.modify (·.insert trans.syntaxKind trans)
+
+-- Register a unary operator translation
+def registerUnOp (trans : UnOpTranslation) : IO Unit := do
+  unOpRegistry.modify (·.insert trans.syntaxKind trans)
+
+-- Register a function translation
+def registerFn (entry : FnTranslationEntry) : IO Unit := do
+  fnRegistry.modify fun registry =>
+    -- If there's a conflict, keep the higher priority entry
+    match Std.HashMap.get? registry entry.name with
+    | some existing =>
+      if entry.priority > existing.priority then
+        Std.HashMap.insert registry entry.name entry
+      else
+        registry
+    | none => Std.HashMap.insert registry entry.name entry
+
+/-! ## Lookup API
+
+These functions are used during macro expansion to find registered translations.
+-/
+
+-- Lookup a binary operator translation
+def lookupBinOp? (name : Name) : IO (Option BinOpTranslation) := do
+  let registry ← binOpRegistry.get
+  return Std.HashMap.get? registry name
+
+-- Lookup a unary operator translation
+def lookupUnOp? (name : Name) : IO (Option UnOpTranslation) := do
+  let registry ← unOpRegistry.get
+  return Std.HashMap.get? registry name
+
+-- Lookup a function translation
+def lookupFn? (name : Name) : IO (Option FnTranslationEntry) := do
+  let registry ← fnRegistry.get
+  return Std.HashMap.get? registry name
+
+-- Debug: Get all registered binary operators
+def getAllBinOps : IO (List Name) := do
+  let registry ← binOpRegistry.get
+  return registry.toList.map (·.1)
+
+-- Debug: Get all registered functions
+def getAllFns : IO (List Name) := do
+  let registry ← fnRegistry.get
+  return registry.toList.map (·.1)
+
 end DeviceTranslation

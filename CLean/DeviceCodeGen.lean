@@ -75,6 +75,36 @@ partial def exprToCuda : DExpr → String
 
 /-! ## Statement Code Generation -/
 
+/-- Infer CUDA type from expression -/
+partial def inferExprType (expr : DExpr) : String :=
+  match expr with
+  | .intLit _ => "int"
+  | .floatLit _ => "float"
+  | .boolLit _ => "bool"
+  | .binop op a b =>
+    match op with
+    | .lt | .le | .gt | .ge | .eq | .ne | .and | .or => "bool"
+    | .mod => "int"
+    | .add | .sub | .mul | .div =>
+      -- If both operands are int-typed, result is int; otherwise float
+      let aType := inferExprType a
+      let bType := inferExprType b
+      if aType == "int" && bType == "int" then "int" else "float"
+  | .unop op a =>
+    match op with
+    | .not => "bool"
+    | .neg => inferExprType a  -- Preserve type
+  | .threadIdx _ | .blockIdx _ | .blockDim _ | .gridDim _ => "int"
+  | .index _ _ => "float"  -- Array element, assume float
+  | .var name =>
+    -- Simple heuristic based on name
+    if name.endsWith "Idx" || name.endsWith "idx" || name == "i" || name == "j" ||
+       name == "k" || name == "N" || name == "length" then
+      "int"
+    else
+      "float"
+  | _ => "float"  -- Default
+
 /-- Convert DStmt to CUDA C statement string with proper indentation -/
 partial def stmtToCuda (indent : String := "  ") : DStmt → String
   | .skip => ""
@@ -85,8 +115,9 @@ partial def stmtToCuda (indent : String := "  ") : DStmt → String
     if exprStr.startsWith "args." then
       ""
     else
-      -- Add type declaration for first assignment
-      s!"{indent}float {varName} = {exprStr};\n"
+      -- Infer type from expression
+      let ty := inferExprType expr
+      s!"{indent}{ty} {varName} = {exprStr};\n"
 
   | .store arr idx val =>
     s!"{indent}{exprToCuda arr}[{exprToCuda idx}] = {exprToCuda val};\n"
@@ -128,6 +159,56 @@ partial def stmtToCuda (indent : String := "  ") : DStmt → String
 
 /-! ## Kernel Code Generation -/
 
+/-- Extract scalar params from expressions -/
+partial def extractScalarParamsFromExpr (expr : DExpr) : List (String × String) :=
+  match expr with
+  | .var exprName =>
+    if exprName.startsWith "args." then
+      let fieldName := exprName.drop 5
+      let ty := if fieldName == "N" || fieldName.endsWith "Idx" || fieldName.endsWith "d" ||
+                    fieldName.endsWith "1" || fieldName == "length" then "int" else "float"
+      [(fieldName, ty)]
+    else
+      []
+  | .binop _ a b => extractScalarParamsFromExpr a ++ extractScalarParamsFromExpr b
+  | .unop _ a => extractScalarParamsFromExpr a
+  | .index arr idx => extractScalarParamsFromExpr arr ++ extractScalarParamsFromExpr idx
+  | .field obj _ => extractScalarParamsFromExpr obj
+  | _ => []
+
+/-- Extract scalar parameter names from kernel body by looking for args.* references -/
+partial def extractScalarParams (stmt : DStmt) : List (String × String) :=
+  match stmt with
+  | .skip => []
+  | .assign varName (DExpr.var exprName) =>
+    -- Check if this is an args.field reference
+    if exprName.startsWith "args." then
+      let fieldName := exprName.drop 5  -- Remove "args." prefix
+      -- Infer type from name (simple heuristic)
+      let ty := if fieldName == "N" || fieldName.endsWith "Idx" || fieldName.endsWith "idx" ||
+                    fieldName.endsWith "d" || fieldName.endsWith "1" || fieldName == "length" then
+        "int"
+      else if fieldName.startsWith "alpha" || fieldName.startsWith "beta" then
+        "float"
+      else
+        "float"  -- default
+      [(fieldName, ty)]
+    else
+      []
+  | .assign _ expr => extractScalarParamsFromExpr expr
+  | .store arr idx val =>
+    extractScalarParamsFromExpr arr ++ extractScalarParamsFromExpr idx ++ extractScalarParamsFromExpr val
+  | .seq s1 s2 => extractScalarParams s1 ++ extractScalarParams s2
+  | .ite cond thenBranch elseBranch =>
+    extractScalarParamsFromExpr cond ++ extractScalarParams thenBranch ++ extractScalarParams elseBranch
+  | .for _ lo hi body =>
+    extractScalarParamsFromExpr lo ++ extractScalarParamsFromExpr hi ++ extractScalarParams body
+  | .whileLoop cond body =>
+    extractScalarParamsFromExpr cond ++ extractScalarParams body
+  | .barrier => []
+  | .call _ args => args.bind extractScalarParamsFromExpr
+  | .assert cond _ => extractScalarParamsFromExpr cond
+
 /-- Generate parameter declaration for kernel signature -/
 def genParamDecl (v : VarDecl) : String :=
   let typeStr := dtypeToCuda v.ty
@@ -154,15 +235,16 @@ def genLocalDecl (v : VarDecl) : String :=
 
 /-- Generate complete CUDA kernel from DeviceIR.Kernel -/
 def kernelToCuda (k : Kernel) (sharedMemSize : Nat := 256) : String :=
-  -- Kernel signature with parameters and global arrays
-  let params := k.params ++ k.globalArrays.map (fun arr =>
-    { name := arr.name, ty := arr.ty : VarDecl })
+  -- Extract scalar parameters from kernel body by scanning for args.* references
+  let scalarParamsRaw := extractScalarParams k.body
+  let scalarParamsUnique := scalarParamsRaw.eraseDups
+  let scalarParamDecls := scalarParamsUnique.map fun (name, ty) => s!"{ty} {name}"
 
-  let paramDecls := params.map genParamDecl
+  -- Generate array parameter declarations
   let globalArrayDecls := k.globalArrays.map genArrayParamDecl
-  -- Add common scalar parameters that might be used
-  let scalarParams := ["int N", "float alpha", "float beta"]
-  let allParamDecls := scalarParams ++ globalArrayDecls
+
+  -- Combine scalar params and array params
+  let allParamDecls := scalarParamDecls ++ globalArrayDecls
   let paramList := String.intercalate ", " allParamDecls
 
   let signature := s!"__global__ void {k.name}({paramList})"
@@ -270,10 +352,16 @@ def genCompleteCudaProgram (k : Kernel) (config : LaunchConfig) (sharedMemSize :
   ) ""
 
   -- Launch kernel
-  let blockSize := config.blockDim.1
+  let blockSize := config.gridDim.1
   let deviceArrayNames := k.globalArrays.map (fun arr => s!"d_{arr.name}")
-  let scalarArgs := ["N", "2.5f", "1.0f"]  -- N, alpha, beta as defaults
-  let allArgs := scalarArgs ++ deviceArrayNames
+
+  -- Extract scalar params from kernel body
+  let scalarParamsRaw := extractScalarParams k.body
+  let scalarParamsUnique := scalarParamsRaw.eraseDups
+  -- Use actual variable names for scalar args (they're already assigned from args.*)
+  let scalarArgNames := scalarParamsUnique.map (·.1)
+
+  let allArgs := scalarArgNames ++ deviceArrayNames
   let launchCode :=
     "  // Launch kernel\n" ++
     "  printf(\"Launching kernel with %d blocks, %d threads per block\\n\", " ++
