@@ -42,3 +42,8 @@ lean_exe test_gpu_e2e {
   root := `test_gpu_e2e
   supportInterpreter := true
 }
+
+lean_exe test_minimal_ffi {
+  root := `test_minimal_ffi
+  supportInterpreter := true
+}

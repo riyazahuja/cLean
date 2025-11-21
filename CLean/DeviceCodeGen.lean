@@ -247,7 +247,7 @@ def kernelToCuda (k : Kernel) (sharedMemSize : Nat := 256) : String :=
   let allParamDecls := scalarParamDecls ++ globalArrayDecls
   let paramList := String.intercalate ", " allParamDecls
 
-  let signature := s!"__global__ void {k.name}({paramList})"
+  let signature := s!"extern \"C\" __global__ void {k.name}({paramList})"
 
   -- Shared memory declarations
   let sharedDecls := k.sharedArrays.foldl
