@@ -99,13 +99,60 @@ partial def exprToDExpr (stx : Syntax) : MacroM Syntax := do
     let beTSyntax : TSyntax `term := ⟨be⟩
     `(DExpr.binop BinOp.eq $aeTSyntax $beTSyntax)
 
+  -- Logical operators
+  | `($a:term && $b:term) => do
+    let ae ← exprToDExpr a
+    let be ← exprToDExpr b
+    let aeTSyntax : TSyntax `term := ⟨ae⟩
+    let beTSyntax : TSyntax `term := ⟨be⟩
+    `(DExpr.binop BinOp.and $aeTSyntax $beTSyntax)
+
+  | `($a:term || $b:term) => do
+    let ae ← exprToDExpr a
+    let be ← exprToDExpr b
+    let aeTSyntax : TSyntax `term := ⟨ae⟩
+    let beTSyntax : TSyntax `term := ⟨be⟩
+    `(DExpr.binop BinOp.or $aeTSyntax $beTSyntax)
+
   -- Parenthesized expressions
   | `(($e:term)) => exprToDExpr e
 
-  -- Default: treat as variable
+  -- Default: check for special patterns, otherwise treat as variable
   | _ =>
-    -- dbg_trace s!"exprToDExpr: unhandled syntax kind: {stx.getKind}"
-    `(DExpr.var "unknown")
+    -- Check for .toNat?.getD pattern: (expr).toNat?.getD defaultVal
+    -- This is represented as: Term.app with function being a projection chain
+    if stx.getKind == ``Lean.Parser.Term.app then
+      -- Get the function and arguments
+      let fn := stx.getArg 0
+      let args := stx.getArg 1
+
+      -- dbg_trace s!"exprToDExpr app: fn.kind={fn.getKind}, fn.isIdent={fn.isIdent}, args.kind={args.getKind}"
+
+      -- Check if function is a projection (method call like .getD or .toNat?.getD)
+      if fn.getKind == ``Lean.Parser.Term.proj then
+        -- Get the method name from the projection
+        -- Projection structure: [0]=receiver, [1]=dot, [2]=field name
+        let methodName := fn.getArg 2
+        -- dbg_trace s!"  projection method: {methodName}, methodName.getId={methodName.getId}"
+
+        -- Check if this is .toNat?.getD (combined projection)
+        -- The syntax parser combines chained projections into a single identifier like `toNat?.getD`
+        if methodName.isIdent && methodName.getId == `toNat?.getD then
+          -- dbg_trace s!"  Found .toNat?.getD call"
+          -- Extract the base expression (receiver before the projection chain)
+          let base := fn.getArg 0
+          -- Recursively convert the base expression
+          exprToDExpr base
+        else
+          -- Not a .toNat?.getD call, treat as unknown
+          `(DExpr.var "unknown")
+      else
+        -- Not a projection, treat as unknown
+        -- dbg_trace s!"exprToDExpr: unhandled syntax kind: {stx.getKind}"
+        `(DExpr.var "unknown")
+    else
+      -- dbg_trace s!"exprToDExpr: unhandled syntax kind: {stx.getKind}"
+      `(DExpr.var "unknown")
 
 /-! ## Statement Extraction -/
 
@@ -365,7 +412,7 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
                 let idxTSyntax : TSyntax `term := ⟨idxDExpr⟩
                 let valTSyntax : TSyntax `term := ⟨valDExpr⟩
                 `(DStmt.store (DExpr.var $(quote actualArrayName.toString))
-                   $idxTSyntax $valTSyntax)
+                  $idxTSyntax $valTSyntax)
               else
                 `(DStmt.skip)
             else
@@ -411,7 +458,7 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
                 let idxTSyntax : TSyntax `term := ⟨idxDExpr⟩
                 let valTSyntax : TSyntax `term := ⟨valDExpr⟩
                 `(DStmt.store (DExpr.var $(quote actualArrayName.toString))
-                   $idxTSyntax $valTSyntax)
+                  $idxTSyntax $valTSyntax)
               else
                 `(DStmt.skip)
             else
@@ -557,7 +604,7 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
                   let idxTSyntax : TSyntax `term := ⟨idxDExpr⟩
                   let valTSyntax : TSyntax `term := ⟨valDExpr⟩
                   `(DStmt.store (DExpr.var $(quote actualArrayName.toString))
-                     $idxTSyntax $valTSyntax)
+                    $idxTSyntax $valTSyntax)
                 else
                   `(DStmt.skip)
               else
@@ -571,7 +618,7 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
         let elseStmt ← if hasElse then
           let elseBranch := doElem.getArg 5
           if elseBranch.getKind == ``Lean.Parser.Term.doSeqIndent ||
-             elseBranch.getKind == ``Lean.Parser.Term.doSeqBracketed then
+            elseBranch.getKind == ``Lean.Parser.Term.doSeqBracketed then
             -- Else branch is directly a doSeqIndent/doSeqBracketed
             let elseItems := if elseBranch.getNumArgs > 0 then elseBranch[0].getArgs else #[]
             let (elseStmts, elseCtx) ← extractDoItems elseItems newCtx
@@ -617,7 +664,7 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
                     let idxTSyntax : TSyntax `term := ⟨idxDExpr⟩
                     let valTSyntax : TSyntax `term := ⟨valDExpr⟩
                     `(DStmt.store (DExpr.var $(quote actualArrayName.toString))
-                       $idxTSyntax $valTSyntax)
+                      $idxTSyntax $valTSyntax)
                   else
                     `(DStmt.skip)
                 else
