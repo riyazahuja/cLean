@@ -13,7 +13,7 @@ structure Dim3 where
   x : Nat
   y : Nat
   z : Nat
-deriving Repr
+deriving Repr, Inhabited
 
 -- structure GlobalArray (α : Type) where
 --   data : Array α
@@ -172,6 +172,8 @@ instance : FromKernelValue Nat where
     | .nat a => some a
     | _ => none
 
+attribute [ext] Dim3 KernelCtx WriteBuffer KernelState
+
 /-! ## Heaps: helpers to get/put arrays and scalars by name -/
 
 @[inline] def setGlobal {Args α} [ToKernelValue α]
@@ -294,6 +296,8 @@ structure GlobalScalar (α : Type) where
 /-- Typed reference to a shared scalar value -/
 structure SharedScalar (α : Type) where
   name : Name
+
+attribute [ext] GlobalArray GlobalScalar SharedArray SharedScalar
 
 namespace GlobalArray
 

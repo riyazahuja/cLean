@@ -25,8 +25,6 @@ def saxpyKernel : KernelM saxpyArgs Unit := do
     let yi ← y.get i
     r.set i (alpha * xi + yi)
 
-
-
 def saxpy (n : Nat)
     (α : Float)
     (x y : Array Float) : IO (Array Float) := do

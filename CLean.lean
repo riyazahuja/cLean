@@ -1,4 +1,8 @@
 import CLean.GPU
-import CLean.VerifyIR
-import CLean.Extract
-import CLean.CodeGen
+import CLean.VerificationIR
+import CLean.DeviceCodeGen
+import CLean.ToVerificationIR
+import CLean.Verification.SafetyProperties
+import CLean.Verification.VCGen
+import CLean.Verification.Tactics
+import CLean.DeviceMacro

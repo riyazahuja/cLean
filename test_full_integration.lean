@@ -37,7 +37,7 @@ def main : IO Unit := do
 
   -- Test data
   let n := 8
-  let alpha := 2.5
+  let alpha := 3
   let x := #[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
   let y := #[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
   let expected := #[3.5, 6.0, 8.5, 11.0, 13.5, 16.0, 18.5, 21.0]
@@ -126,3 +126,5 @@ def main : IO Unit := do
   IO.println "\n╔════════════════════════════════════════════════════════╗"
   IO.println "║              Integration Test Complete                 ║"
   IO.println "╚════════════════════════════════════════════════════════╝"
+
+#eval main
