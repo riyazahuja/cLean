@@ -59,13 +59,11 @@ axiom increment_translation_correct :
 
 /-! ## Step 4: Prove Safety Automatically! -/
 
-theorem increment_race_free : RaceFree incrementSpec := by
-  apply identity_kernel_race_free
-  exact increment_translation_correct
 
 theorem increment_safe : KernelSafe incrementSpec := by
   constructor
-  · exact increment_race_free
+  · apply identity_kernel_race_free
+    exact increment_translation_correct
   · unfold BarrierUniform; intros; trivial
 
 /-! ## Step 5: Demonstration -/
@@ -95,6 +93,4 @@ def main : IO Unit := do
 
 -- Note: #eval disabled due to axiom. Run the example to see output.
 -- The important part is that the theorems type-check!
-
-#check increment_race_free
 #check increment_safe
