@@ -1,2 +1,6 @@
 /.lake
-CLAUDE.md
+OpenBLAS
+.gpuverify
+gpuverify/
+logs/
+.cache/

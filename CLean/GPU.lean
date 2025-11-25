@@ -1,9 +1,10 @@
 import Lean
 import Lean.Elab.Command
-import Mathlib.Tactic
+import Lean.Data.Json
+import Mathlib.Tactic.TypeStar
 import Std.Data.HashMap
-import SciLean.Data.DataArray
-open Lean Lean.Elab Lean.Elab.Command Meta SciLean
+-- import SciLean.Data.DataArray
+open Lean Lean.Elab Lean.Elab.Command Meta --SciLean
 
 namespace GpuDSL
 
@@ -13,7 +14,7 @@ structure Dim3 where
   x : Nat
   y : Nat
   z : Nat
-deriving Repr
+deriving Repr, Inhabited
 
 -- structure GlobalArray (α : Type) where
 --   data : Array α
@@ -172,6 +173,8 @@ instance : FromKernelValue Nat where
     | .nat a => some a
     | _ => none
 
+attribute [ext] Dim3 KernelCtx WriteBuffer KernelState
+
 /-! ## Heaps: helpers to get/put arrays and scalars by name -/
 
 @[inline] def setGlobal {Args α} [ToKernelValue α]
@@ -272,6 +275,10 @@ instance : FromKernelValue Nat where
   let c ← readCtx
   pure (c.blockIdx.y * c.blockDim.y + c.threadIdx.y)
 
+@[inline] def globalIdxZ {Args} : KernelM Args Nat := do
+  let c ← readCtx
+  pure (c.blockIdx.z * c.blockDim.z + c.threadIdx.z)
+
 
 /-! ## Wrapper types for clean syntax -/
 
@@ -290,6 +297,8 @@ structure GlobalScalar (α : Type) where
 /-- Typed reference to a shared scalar value -/
 structure SharedScalar (α : Type) where
   name : Name
+
+attribute [ext] GlobalArray GlobalScalar SharedArray SharedScalar
 
 namespace GlobalArray
 
@@ -683,12 +692,62 @@ open Lean Elab Command Parser in
     let styStr := Format.pretty (← liftCoreM <| PrettyPrinter.ppCategory `term sty)
     structStr := structStr ++ s!"  {sid.getId} : {styStr}\n"
   for id in allMemFields do
-    structStr := structStr ++ s!"  {id.getId} : Name\n"
+    structStr := structStr ++ s!"  {id.getId} : Lean.Name\n"
   structStr := structStr ++ "  deriving Repr"
 
   -- Parse and elaborate structure
   match runParserCategory (← getEnv) `command structStr with
   | Except.ok structSyntax => elabCommand structSyntax
   | Except.error err => throwError "Failed to parse structure: {err}"
+
+  -- Generate response structure for global arrays only
+  -- Response contains Array Float for each global array
+  let responseName := mkIdent (name.getId.appendAfter "Response")
+
+  -- Collect global array field names
+  let mut globalFields := #[]
+  for globalDecl in globalDecls.getArgs do
+    if globalDecl.getNumArgs >= 5 then
+      let ids := globalDecl[2]
+      let idArray := if ids.isOfKind `ident then #[ids] else ids.getArgs
+      for id in idArray do
+        if !id.isOfKind nullKind then
+          globalFields := globalFields.push id
+
+  -- Generate response structure
+  let mut responseStr := s!"structure {responseName.getId} where\n"
+  for id in globalFields do
+    responseStr := responseStr ++ s!"  {id.getId} : Array Float\n"
+  responseStr := responseStr ++ "  deriving Repr"
+
+  match runParserCategory (← getEnv) `command responseStr with
+  | Except.ok responseSyntax => elabCommand responseSyntax
+  | Except.error err => throwError "Failed to parse response structure: {err}"
+
+  -- Generate FromJson instance for response structure
+  let mut fromJsonStr := s!"instance : Lean.FromJson {responseName.getId} where\n"
+  fromJsonStr := fromJsonStr ++ "  fromJson? json := do\n"
+  fromJsonStr := fromJsonStr ++ "    -- Parse the nested JSON structure\n"
+  fromJsonStr := fromJsonStr ++ "    let resultsObj ← json.getObjVal? \"results\"\n"
+
+  -- Extract each global array field from JSON
+  for id in globalFields do
+    let fieldName := id.getId.toString
+    fromJsonStr := fromJsonStr ++ s!"    let {id.getId}Json ← resultsObj.getObjVal? \"{fieldName}\"\n"
+    fromJsonStr := fromJsonStr ++ s!"    let {id.getId} : Array Float ← Lean.fromJson? {id.getId}Json\n"
+
+  -- Construct response object
+  fromJsonStr := fromJsonStr ++ "    pure { "
+  for i in [:globalFields.size] do
+    let id := globalFields[i]!
+    fromJsonStr := fromJsonStr ++ s!"{id.getId} := {id.getId}"
+    if i < globalFields.size - 1 then
+      fromJsonStr := fromJsonStr ++ ", "
+  fromJsonStr := fromJsonStr ++ " }"
+
+  match runParserCategory (← getEnv) `command fromJsonStr with
+  | Except.ok fromJsonSyntax => elabCommand fromJsonSyntax
+  | Except.error err => throwError "Failed to parse FromJson instance: {err}"
+
 
 end GpuDSL
