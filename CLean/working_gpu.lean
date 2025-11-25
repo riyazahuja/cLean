@@ -15,6 +15,8 @@ open CLean.GPU.ProcessLauncher
 -- Simple SAXPY kernel
 kernelArgs TestArgs(N: Nat, alpha: Float)
   global[x y r: Array Float]
+#print TestArgs
+#print TestArgsResponse
 
 device_kernel testKernel : KernelM TestArgs Unit := do
   let args ← getArgs
@@ -30,6 +32,9 @@ device_kernel testKernel : KernelM TestArgs Unit := do
     let yi ← y.get i
     r.set i (alpha * xi + yi)
 
+#eval testKernelIR
+#eval kernelToCuda testKernelIR
+
 def main : IO Unit := do
   IO.println "╔════════════════════════════════════════════════════════╗"
   IO.println "║     cLean Full Integration Test: Lean → GPU            ║"
@@ -37,7 +42,7 @@ def main : IO Unit := do
 
   -- Test data
   let n := 8
-  let alpha := 3
+  let alpha := 2.5
   let x := #[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
   let y := #[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
   let expected := #[3.5, 6.0, 8.5, 11.0, 13.5, 16.0, 18.5, 21.0]
@@ -58,11 +63,12 @@ def main : IO Unit := do
   IO.println "\n[Step 2] Building JSON input..."
   let scalarParams := #[Float.ofNat n, alpha]
   let arrays := [
-    (`X, x),
-    (`Y, y),
-    (`R, Array.replicate n 0.0)
+    (`x, x),
+    (`y, y),
+    (`r, Array.replicate n 0.0)
   ]
   let jsonInput := buildLauncherInput scalarParams arrays
+  IO.println s!"  JSON Input: {jsonInput}"
   IO.println s!"  JSON size: {jsonInput.length} bytes"
 
   -- Step 3: Spawn launcher process
@@ -117,14 +123,43 @@ def main : IO Unit := do
 
   if exitCode == 0 then
     IO.println "\n✅ SUCCESS: GPU kernel executed successfully!"
-    IO.println "\nTo verify:"
-    IO.println s!"  Expected: {expected}"
-    IO.println "  Check if R values match in the output above"
+
+    -- Parse JSON response
+    IO.println "\n[Parsing JSON Response]"
+    match Lean.Json.parse stdoutContent with
+    | Except.error err =>
+      IO.println s!"❌ JSON Parse Error: {err}"
+    | Except.ok json =>
+      match @Lean.fromJson? TestArgsResponse _ json with
+      | Except.error err =>
+        IO.println s!"❌ JSON Decode Error: {err}"
+      | Except.ok response =>
+        IO.println "✅ Successfully parsed JSON into TestResponse"
+        IO.println s!"\nParsed Results:"
+        IO.println s!"  X: {response.x}"
+        IO.println s!"  Y: {response.y}"
+        IO.println s!"  R: {response.r}"
+
+        -- Validate results
+        IO.println "\n[Validation]"
+        IO.println s!"  Expected: {expected}"
+
+        let isMatch := response.r == expected
+        if isMatch then
+          IO.println "  ✅ Results match expected values!"
+        else
+          IO.println "  ❌ Results DO NOT match expected values"
+          -- Show element-wise comparison
+          for i in [:expected.size] do
+            if i < response.r.size then
+              let diff := response.r[i]! - expected[i]!
+              IO.println s!"    [{i}]: got {response.r[i]!}, expected {expected[i]!}, diff = {diff}"
   else
     IO.println "\n❌ FAILURE: GPU execution failed"
 
   IO.println "\n╔════════════════════════════════════════════════════════╗"
   IO.println "║              Integration Test Complete                 ║"
   IO.println "╚════════════════════════════════════════════════════════╝"
+
 
 #eval main

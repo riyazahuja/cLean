@@ -17,11 +17,33 @@ namespace CLean.Verification.GPUVerify
 
 /-! ## Core Definitions -/
 
+/-- Concrete representation of address patterns -/
+inductive AddressPattern where
+  | identity : AddressPattern                    -- tid ↦ tid
+  | constant (n : Nat) : AddressPattern         -- tid ↦ n
+  | offset (base : Nat) : AddressPattern        -- tid ↦ tid + base
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Convert AddressPattern to function for semantic evaluation -/
+def AddressPattern.eval (ap : AddressPattern) : Nat → Nat :=
+  match ap with
+  | identity => id
+  | constant n => fun _ => n
+  | offset base => fun tid => tid + base
+
 /-- Access pattern for a single thread (symbolic) -/
 inductive AccessPattern where
-  | read (addr : Nat → Nat) (location : Nat)
-  | write (addr : Nat → Nat) (location : Nat)
+  | read (addr : AddressPattern) (location : Nat)
+  | write (addr : AddressPattern) (location : Nat)
   deriving Inhabited
+
+instance : Repr AccessPattern where
+  reprPrec ap _ :=
+    match ap with
+    | AccessPattern.read addr loc =>
+        s!".read [{repr addr}] [loc {loc}]"
+    | AccessPattern.write addr loc =>
+        s!".write [{repr addr}] [loc {loc}]"
 
 /-- Simplified kernel specification for verification -/
 structure KernelSpec where
@@ -29,8 +51,7 @@ structure KernelSpec where
   gridSize : Nat := 1  -- Default to single block
   accesses : List AccessPattern
   barriers : List Nat  -- Program locations of barriers
-  deriving Inhabited
-
+  deriving Inhabited, Repr
 /-! ## Thread Reasoning -/
 
 /-- Two threads are distinct if they have different IDs within bounds -/
@@ -48,11 +69,11 @@ def AccessPattern.isWrite : AccessPattern → Bool
 def HasRace (a1 a2 : AccessPattern) (tid1 tid2 : Nat) : Prop :=
   match a1, a2 with
   | AccessPattern.read addr1 _, AccessPattern.write addr2 _ =>
-      addr1 tid1 = addr2 tid2  -- Same location
+      addr1.eval tid1 = addr2.eval tid2  -- Same location
   | AccessPattern.write addr1 _, AccessPattern.read addr2 _ =>
-      addr1 tid1 = addr2 tid2
+      addr1.eval tid1 = addr2.eval tid2
   | AccessPattern.write addr1 _, AccessPattern.write addr2 _ =>
-      addr1 tid1 = addr2 tid2
+      addr1.eval tid1 = addr2.eval tid2
   | AccessPattern.read _ _, AccessPattern.read _ _ =>
       False  -- Read-read is not a race
 
@@ -88,16 +109,16 @@ def KernelSafe (k : KernelSpec) : Prop :=
 
 /-! ## Proof Helpers -/
 
-/-- If threads access different locations via identity function, they don't race -/
+/-- If threads access different locations via identity pattern, they don't race -/
 theorem identity_access_no_race {blockSize : Nat} {loc1 loc2 : Nat}
     (a1 : AccessPattern) (a2 : AccessPattern)
-    (h_a1 : a1 = AccessPattern.read id loc1 ∨ a1 = AccessPattern.write id loc1)
-    (h_a2 : a2 = AccessPattern.read id loc2 ∨ a2 = AccessPattern.write id loc2) :
+    (h_a1 : a1 = AccessPattern.read AddressPattern.identity loc1 ∨ a1 = AccessPattern.write AddressPattern.identity loc1)
+    (h_a2 : a2 = AccessPattern.read AddressPattern.identity loc2 ∨ a2 = AccessPattern.write AddressPattern.identity loc2) :
     ∀ tid1 tid2 : Nat,
       DistinctThreads tid1 tid2 blockSize →
       ¬HasRace a1 a2 tid1 tid2 := by
   intro tid1 tid2 ⟨_, _, h_neq⟩
-  unfold HasRace
+  unfold HasRace AddressPattern.eval
   cases h_a1 with
   | inl h1 => cases h_a2 with
     | inl h2 => simp [h1, h2, id]  -- read-read: no race
@@ -108,7 +129,7 @@ theorem identity_access_no_race {blockSize : Nat} {loc1 loc2 : Nat}
 
 /-- Simplified proof obligation for kernels with identity access patterns -/
 theorem identity_kernel_race_free {k : KernelSpec}
-    (h_identity : ∀ a ∈ k.accesses, ∃ loc, a = AccessPattern.read id loc ∨ a = AccessPattern.write id loc) :
+    (h_identity : ∀ a ∈ k.accesses, ∃ loc, a = AccessPattern.read AddressPattern.identity loc ∨ a = AccessPattern.write AddressPattern.identity loc) :
     RaceFree k := by
   unfold RaceFree
   intro tid1 tid2 h_distinct a1 a2 h_mem1 h_mem2

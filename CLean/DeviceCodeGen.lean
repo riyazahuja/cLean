@@ -235,10 +235,8 @@ def genLocalDecl (v : VarDecl) : String :=
 
 /-- Generate complete CUDA kernel from DeviceIR.Kernel -/
 def kernelToCuda (k : Kernel) (sharedMemSize : Nat := 256) : String :=
-  -- Extract scalar parameters from kernel body by scanning for args.* references
-  let scalarParamsRaw := extractScalarParams k.body
-  let scalarParamsUnique := scalarParamsRaw.eraseDups
-  let scalarParamDecls := scalarParamsUnique.map fun (name, ty) => s!"{ty} {name}"
+  -- Use scalar parameters directly from k.params
+  let scalarParamDecls := k.params.map genParamDecl
 
   -- Generate array parameter declarations
   let globalArrayDecls := k.globalArrays.map genArrayParamDecl
@@ -355,11 +353,8 @@ def genCompleteCudaProgram (k : Kernel) (config : LaunchConfig) (sharedMemSize :
   let blockSize := config.gridDim.1
   let deviceArrayNames := k.globalArrays.map (fun arr => s!"d_{arr.name}")
 
-  -- Extract scalar params from kernel body
-  let scalarParamsRaw := extractScalarParams k.body
-  let scalarParamsUnique := scalarParamsRaw.eraseDups
-  -- Use actual variable names for scalar args (they're already assigned from args.*)
-  let scalarArgNames := scalarParamsUnique.map (·.1)
+  -- Use scalar params directly from k.params
+  let scalarArgNames := k.params.map (·.name)
 
   let allArgs := scalarArgNames ++ deviceArrayNames
   let launchCode :=

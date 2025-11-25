@@ -34,7 +34,7 @@ structure CachedKernel where
   deriving Repr, Inhabited
 
 /-- Get cached kernel or compile if needed -/
-def getCachedKernel (kernel : Kernel) (nvccPath : String := "/usr/local/cuda-12.2/bin/nvcc") : IO CachedKernel := do
+def getCachedKernel (kernel : Kernel) (nvccPath : String := "nvcc") : IO CachedKernel := do
   -- Generate CUDA source
   let cudaSource := kernelToCuda kernel
   let kernelHash := hashString cudaSource
@@ -66,7 +66,7 @@ def getCachedKernel (kernel : Kernel) (nvccPath : String := "/usr/local/cuda-12.
   }
 
 /-- Compile CUDA source to PTX using nvcc -/
-def compileToPTX (cached : CachedKernel) (nvccPath : String := "/usr/local/cuda-12.2/bin/nvcc") : IO Unit := do
+def compileToPTX (cached : CachedKernel) (nvccPath : String := "nvcc") : IO Unit := do
   -- Check if PTX already exists
   let ptxExists ← cached.ptxPath.pathExists
   if ptxExists then

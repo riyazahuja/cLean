@@ -53,15 +53,15 @@ def extractGlobalArrays (kernel : Kernel) (state : KernelState) : List (Name × 
   return result.reverse
 
 /-- JSON encoder for Float arrays -/
-def floatArrayToJson (arr : Array Float) : String :=
+def floatArrayToJson {α : Type} [ToString α] (arr : Array α) : String :=
   "[" ++ String.intercalate "," (arr.map toString |>.toList) ++ "]"
 
 /-- JSON encoder for named array -/
-def namedArrayToJson (name : String) (arr : Array Float) : String :=
+def namedArrayToJson {α : Type} [ToString α] (name : String) (arr : Array α) : String :=
   s!"\"{name}\":{floatArrayToJson arr}"
 
 /-- Build JSON payload for launcher -/
-def buildLauncherInput (scalarParams : Array Float) (arrays : List (Name × Array Float)) : String :=
+def buildLauncherInput {α : Type} [ToString α] (scalarParams : Array α) (arrays : List (Name × Array α)) : String :=
   let scalarsJson := floatArrayToJson scalarParams
   let arraysJson := String.intercalate "," (arrays.map fun (name, arr) =>
     namedArrayToJson (toString name) arr)
@@ -87,7 +87,7 @@ def compileKernelToPTX (kernel : Kernel) : IO CachedKernel := do
     IO.println s!"[GPU] Compiling {kernel.name} to PTX..."
 
     -- Compile using nvcc
-    let nvccPath := "/usr/local/cuda-12.2/bin/nvcc"
+    let nvccPath := "nvcc"
     let args := #[
       "-ptx",
       "-O3",
@@ -95,11 +95,12 @@ def compileKernelToPTX (kernel : Kernel) : IO CachedKernel := do
       "-o", cached.ptxPath.toString,
       cached.cudaSourcePath.toString
     ]
-
+    IO.println s!"[nvcc] {nvccPath} {String.intercalate " " args.toList}"
     let output ← IO.Process.run {
       cmd := nvccPath
       args := args
     }
+
 
     if !output.trim.isEmpty then
       IO.eprintln s!"[nvcc] {output}"

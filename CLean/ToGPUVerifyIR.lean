@@ -25,7 +25,7 @@ open GpuDSL
 /-! ## Expression Analysis -/
 
 /-- Determine if an expression is thread-dependent (uses threadIdx) -/
-partial def isThreadDependent (e : DExpr) : Bool :=
+def isThreadDependent (e : DExpr) : Bool :=
   match e with
   | DExpr.threadIdx _ => true
   | DExpr.binop _ e1 e2 => isThreadDependent e1 || isThreadDependent e2
@@ -33,50 +33,56 @@ partial def isThreadDependent (e : DExpr) : Bool :=
   | DExpr.index e1 e2 => isThreadDependent e1 || isThreadDependent e2
   | _ => false
 
-/-- Convert a DExpr to a symbolic address function (Nat → Nat)
+/-- Convert a DExpr to a symbolic AddressPattern
 
     Maps common patterns:
-    - threadIdx.x → id (identity function)
-    - threadIdx.x + c → fun tid => tid + c
-    - blockIdx.x * blockDim.x + threadIdx.x → id (within-block view)
-    - constant c → fun _ => c
+    - threadIdx.x → AddressPattern.identity
+    - threadIdx.x + c → AddressPattern.offset c
+    - blockIdx.x * blockDim.x + threadIdx.x → AddressPattern.identity (within-block view)
+    - constant c → AddressPattern.constant c
+    - variable name → look up CACHED pattern in varEnv (no recursion!)
 -/
-partial def dexprToAddressFun (e : DExpr) (blockDim : Dim3) : Nat → Nat :=
+def dexprToAddressPattern (e : DExpr) (blockDim : Dim3) (varEnv : List (String × AddressPattern)) : AddressPattern :=
   match e with
   -- Literal constant
-  | DExpr.intLit n => fun _ => n.toNat
+  | DExpr.intLit n => AddressPattern.constant n.toNat
 
   -- Thread index (identity)
-  | DExpr.threadIdx Dim.x => id
-  | DExpr.threadIdx Dim.y => fun tid => tid
-  | DExpr.threadIdx Dim.z => fun tid => tid
+  | DExpr.threadIdx _ => AddressPattern.identity
 
-  -- Variable (assume thread-independent, treat as constant 0)
-  | DExpr.var _ => fun _ => 0
+  -- Variable: look up CACHED pattern (no recursive evaluation!)
+  | DExpr.var varName =>
+      match varEnv.lookup varName with
+      | some cachedPattern => cachedPattern  -- Just return the cached pattern!
+      | none => AddressPattern.constant 0  -- Not found, treat as parameter/constant
 
   -- Binary operations
   | DExpr.binop BinOp.add e1 e2 =>
       -- Special case: blockIdx.x * blockDim.x + threadIdx.x
       match e1, e2 with
       | DExpr.binop BinOp.mul (DExpr.blockIdx Dim.x) (DExpr.blockDim Dim.x), DExpr.threadIdx Dim.x =>
-          id  -- Global index, but we focus on within-block (two-thread reduction)
+          AddressPattern.identity  -- Global index, but we focus on within-block (two-thread reduction)
       | _, _ =>
-          let f1 := dexprToAddressFun e1 blockDim
-          let f2 := dexprToAddressFun e2 blockDim
-          fun tid => f1 tid + f2 tid
-
-  | DExpr.binop BinOp.sub e1 e2 =>
-      let f1 := dexprToAddressFun e1 blockDim
-      let f2 := dexprToAddressFun e2 blockDim
-      fun tid => f1 tid - f2 tid
+          -- Try to construct offset pattern
+          let p1 := dexprToAddressPattern e1 blockDim varEnv
+          let p2 := dexprToAddressPattern e2 blockDim varEnv
+          match p1, p2 with
+          | AddressPattern.identity, AddressPattern.constant n => AddressPattern.offset n
+          | AddressPattern.constant n, AddressPattern.identity => AddressPattern.offset n
+          | AddressPattern.offset base, AddressPattern.constant n => AddressPattern.offset (base + n)
+          | AddressPattern.constant n, AddressPattern.offset base => AddressPattern.offset (n + base)
+          | AddressPattern.constant n1, AddressPattern.constant n2 => AddressPattern.constant (n1 + n2)
+          | _, _ => AddressPattern.constant 0  -- Conservative: unknown pattern
 
   | DExpr.binop BinOp.mul e1 e2 =>
-      let f1 := dexprToAddressFun e1 blockDim
-      let f2 := dexprToAddressFun e2 blockDim
-      fun tid => f1 tid * f2 tid
+      let p1 := dexprToAddressPattern e1 blockDim varEnv
+      let p2 := dexprToAddressPattern e2 blockDim varEnv
+      match p1, p2 with
+      | AddressPattern.constant n1, AddressPattern.constant n2 => AddressPattern.constant (n1 * n2)
+      | _, _ => AddressPattern.constant 0  -- Conservative
 
   -- Fallback: treat as constant 0
-  | _ => fun _ => 0
+  | _ => AddressPattern.constant 0
 
 /-! ## Statement Analysis for Access Extraction -/
 
@@ -84,10 +90,11 @@ structure AccessExtractor where
   accesses : List AccessPattern
   location : Nat
   barriers : List Nat
+  varEnv : List (String × AddressPattern)  -- Cache computed address patterns, not expressions!
   deriving Inhabited
 
 /-- Check if a DExpr contains an array store pattern -/
-partial def expressionHasArrayAccess (e : DExpr) : Bool :=
+def expressionHasArrayAccess (e : DExpr) : Bool :=
   match e with
   | DExpr.index _ _ => true
   | DExpr.binop _ e1 e2 => expressionHasArrayAccess e1 || expressionHasArrayAccess e2
@@ -95,12 +102,12 @@ partial def expressionHasArrayAccess (e : DExpr) : Bool :=
   | _ => false
 
 /-- Extract read accesses from an expression (array indexing in RHS) -/
-partial def extractReadsFromExpr (e : DExpr) (state : AccessExtractor) (blockDim : Dim3) : AccessExtractor :=
+def extractReadsFromExpr (e : DExpr) (state : AccessExtractor) (blockDim : Dim3) : AccessExtractor :=
   match e with
   | DExpr.index _ idx =>
       -- Array read: arr[idx]
-      let addrFun := dexprToAddressFun idx blockDim
-      let access := AccessPattern.read addrFun state.location
+      let addrPat := dexprToAddressPattern idx blockDim state.varEnv
+      let access := AccessPattern.read addrPat state.location
       { state with accesses := access :: state.accesses }
 
   | DExpr.binop _ e1 e2 =>
@@ -113,23 +120,25 @@ partial def extractReadsFromExpr (e : DExpr) (state : AccessExtractor) (blockDim
   | _ => state
 
 /-- Extract access patterns from a single statement -/
-partial def extractFromStmt (stmt : DStmt) (state : AccessExtractor) (blockDim : Dim3) : AccessExtractor :=
+def extractFromStmt (stmt : DStmt) (state : AccessExtractor) (blockDim : Dim3) : AccessExtractor :=
   match stmt with
   | DStmt.skip => state
 
-  | DStmt.assign _ rhs =>
-      -- Local assignment may contain reads
-      extractReadsFromExpr rhs state blockDim
+  | DStmt.assign varName rhs =>
+      -- Compute and cache the address pattern for this variable
+      let state1 := extractReadsFromExpr rhs state blockDim
+      let addrPattern := dexprToAddressPattern rhs blockDim state1.varEnv
+      { state1 with varEnv := (varName, addrPattern) :: state1.varEnv }
 
-  | DStmt.store arr idx val =>
+  | DStmt.store _ idx val =>
       -- Store: arr[idx] := val
       -- 1. Extract reads from the value expression
       let state1 := extractReadsFromExpr val state blockDim
       -- 2. Extract reads from index expression if it contains array accesses
       let state2 := extractReadsFromExpr idx state1 blockDim
       -- 3. Add the write access
-      let addrFun := dexprToAddressFun idx blockDim
-      let access := AccessPattern.write addrFun state2.location
+      let addrPat := dexprToAddressPattern idx blockDim state2.varEnv
+      let access := AccessPattern.write addrPat state2.location
       { state2 with
         accesses := access :: state2.accesses
         location := state2.location + 1 }
@@ -181,6 +190,7 @@ def deviceIRToKernelSpec (kernel : Kernel) (blockDim gridDim : Dim3) : KernelSpe
     accesses := []
     location := 0
     barriers := []
+    varEnv := []
   }
 
   let finalState := extractFromStmt kernel.body initialState blockDim

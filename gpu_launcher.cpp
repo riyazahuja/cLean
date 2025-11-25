@@ -55,56 +55,111 @@ std::string readStdin() {
     return line;
 }
 
-// Parse simple JSON (very basic - just for our use case)
-LaunchParams parseInput(const std::string& input) {
-    LaunchParams params;
+// Simple JSON Tokenizer
+enum TokenType { TOKEN_LBRACE, TOKEN_RBRACE, TOKEN_LBRACKET, TOKEN_RBRACKET, TOKEN_COLON, TOKEN_COMMA, TOKEN_STRING, TOKEN_NUMBER, TOKEN_EOF };
 
-    // Parse scalar params: look for "scalars": [1.0, 2.0, ...]
-    size_t scalarsPos = input.find("\"scalars\":");
-    if (scalarsPos != std::string::npos) {
-        size_t startBracket = input.find('[', scalarsPos);
-        size_t endBracket = input.find(']', startBracket);
-        std::string scalarsStr = input.substr(startBracket + 1, endBracket - startBracket - 1);
+struct Token {
+    TokenType type;
+    std::string value;
+    size_t pos;
+};
 
-        std::stringstream ss(scalarsStr);
-        std::string token;
-        while (std::getline(ss, token, ',')) {
-            params.scalarParams.push_back(std::stof(token));
+std::vector<Token> tokenize(const std::string& input) {
+    std::vector<Token> tokens;
+    size_t i = 0;
+    while (i < input.length()) {
+        char c = input[i];
+        if (isspace(c)) {
+            i++;
+            continue;
+        }
+        if (c == '{') tokens.push_back({TOKEN_LBRACE, "{", i++});
+        else if (c == '}') tokens.push_back({TOKEN_RBRACE, "}", i++});
+        else if (c == '[') tokens.push_back({TOKEN_LBRACKET, "[", i++});
+        else if (c == ']') tokens.push_back({TOKEN_RBRACKET, "]", i++});
+        else if (c == ':') tokens.push_back({TOKEN_COLON, ":", i++});
+        else if (c == ',') tokens.push_back({TOKEN_COMMA, ",", i++});
+        else if (c == '"') {
+            size_t start = ++i;
+            while (i < input.length() && input[i] != '"') i++;
+            tokens.push_back({TOKEN_STRING, input.substr(start, i - start), start});
+            if (i < input.length()) i++;
+        } else {
+            size_t start = i;
+            while (i < input.length() && (isdigit(input[i]) || input[i] == '.' || input[i] == '-' || input[i] == 'e' || input[i] == 'E' || input[i] == '+')) i++;
+            tokens.push_back({TOKEN_NUMBER, input.substr(start, i - start), start});
         }
     }
+    tokens.push_back({TOKEN_EOF, "", i});
+    return tokens;
+}
 
-    // Parse arrays: look for "arrays": {"name": [data], ...}
-    size_t arraysPos = input.find("\"arrays\":");
-    if (arraysPos != std::string::npos) {
-        // Simple parser: find array name and data
-        size_t pos = arraysPos;
-        while (true) {
-            pos = input.find("\"", pos + 1);
-            if (pos == std::string::npos || pos > input.find('}', arraysPos)) break;
+// Robust JSON Parser
+LaunchParams parseInput(const std::string& input) {
+    LaunchParams params;
+    auto tokens = tokenize(input);
+    size_t current = 0;
 
-            size_t nameEnd = input.find("\"", pos + 1);
-            std::string name = input.substr(pos + 1, nameEnd - pos - 1);
-
-            // Skip if this is a JSON key like "arrays"
-            if (name == "arrays" || name == "scalars") continue;
-
-            // Find the array data
-            size_t dataStart = input.find('[', nameEnd);
-            if (dataStart == std::string::npos) break;
-            size_t dataEnd = input.find(']', dataStart);
-
-            std::string dataStr = input.substr(dataStart + 1, dataEnd - dataStart - 1);
-
-            std::vector<float> data;
-            std::stringstream ss(dataStr);
-            std::string token;
-            while (std::getline(ss, token, ',')) {
-                data.push_back(std::stof(token));
-            }
-
-            params.arrays.push_back({name, data});
-            pos = dataEnd;
+    auto expect = [&](TokenType type) {
+        if (current < tokens.size() && tokens[current].type == type) {
+            current++;
+            return true;
         }
+        return false;
+    };
+
+    auto consume = [&]() {
+        if (current < tokens.size()) current++;
+    };
+
+    if (!expect(TOKEN_LBRACE)) return params;
+
+    while (current < tokens.size() && tokens[current].type != TOKEN_RBRACE) {
+        if (tokens[current].type != TOKEN_STRING) break;
+        std::string key = tokens[current].value;
+        consume(); // key
+        expect(TOKEN_COLON);
+
+        if (key == "scalars") {
+            expect(TOKEN_LBRACKET);
+            while (current < tokens.size() && tokens[current].type != TOKEN_RBRACKET) {
+                if (tokens[current].type == TOKEN_NUMBER) {
+                    params.scalarParams.push_back(std::stof(tokens[current].value));
+                    consume();
+                }
+                if (tokens[current].type == TOKEN_COMMA) consume();
+            }
+            expect(TOKEN_RBRACKET);
+        } else if (key == "arrays") {
+            expect(TOKEN_LBRACE);
+            while (current < tokens.size() && tokens[current].type != TOKEN_RBRACE) {
+                if (tokens[current].type == TOKEN_STRING) {
+                    std::string arrName = tokens[current].value;
+                    consume(); // name
+                    expect(TOKEN_COLON);
+                    expect(TOKEN_LBRACKET);
+                    std::vector<float> data;
+                    while (current < tokens.size() && tokens[current].type != TOKEN_RBRACKET) {
+                        if (tokens[current].type == TOKEN_NUMBER) {
+                            data.push_back(std::stof(tokens[current].value));
+                            consume();
+                        }
+                        if (tokens[current].type == TOKEN_COMMA) consume();
+                    }
+                    expect(TOKEN_RBRACKET);
+                    params.arrays.push_back({arrName, data});
+                }
+                if (tokens[current].type == TOKEN_COMMA) consume();
+            }
+            expect(TOKEN_RBRACE);
+        } else {
+            // Skip unknown value
+            // Simple skip logic: if {, skip until matching }. if [, skip until matching ]. else consume one.
+            // For now, just assume simple structure and consume one token
+            consume();
+        }
+
+        if (tokens[current].type == TOKEN_COMMA) consume();
     }
 
     return params;
