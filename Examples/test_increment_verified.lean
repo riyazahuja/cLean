@@ -124,7 +124,22 @@ def incrementSpec : KernelSpec :=
   deviceIRToKernelSpec incrementKernelIR incrementConfig incrementGrid
 
 
-theorem increment_safe : KernelSafe incrementSpec := by
+
+
+theorem increment_safe_direct : KernelSafe incrementSpec := by
+  constructor
+  · unfold RaceFree
+    intro tid1 tid2 h_distinct a1 a2 ha1 ha2
+    simp [incrementSpec, deviceIRToKernelSpec, incrementKernelIR, extractFromStmt, extractReadsFromExpr, dexprToAddressPattern, DistinctThreads, incrementConfig, List.lookup, HasRace, SeparatedByBarrier] at *
+    intro h_race
+    rcases h_distinct with ⟨_,_,h_neq⟩
+    rcases ha1 with ha1 | ha1 <;>
+    rcases ha2 with ha2 | ha2 <;>
+    simp [ha1, ha2,AddressPattern.eval] at h_race <;>
+    exact h_neq h_race
+  · unfold BarrierUniform; intros; trivial
+
+theorem increment_safe_clean : KernelSafe incrementSpec := by
   constructor
   · apply identity_kernel_race_free
     intro a ha
