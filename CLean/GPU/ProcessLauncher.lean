@@ -71,6 +71,26 @@ def scalarToJson : ScalarValue → String
   | .int i => "{\"type\":\"int\",\"value\":" ++ toString i ++ "}"
   | .float f => "{\"type\":\"float\",\"value\":" ++ toString f ++ "}"
 
+open Lean Json in
+instance : ToJson ScalarValue where
+  toJson sv := match sv with
+    | .int i => Json.mkObj [("type", Json.str "int"), ("value", Json.num (i))]
+    | .float f => Json.mkObj [("type", Json.str "float"), ("value", ToJson.toJson f)]
+
+class ToScalarValue (α : Type) where
+  toScalarValue : α → ScalarValue
+
+instance : ToScalarValue Float where
+  toScalarValue f := ScalarValue.float f
+instance : ToScalarValue Int where
+  toScalarValue i := ScalarValue.int i
+instance : ToScalarValue Nat where
+  toScalarValue n := ScalarValue.int (Int.ofNat n)
+instance : ToScalarValue ScalarValue where
+  toScalarValue sv := sv
+
+
+
 /-- Build JSON payload for launcher with explicit type info -/
 def buildLauncherInputTyped (scalarParams : Array ScalarValue) (arrays : List (Name × Array Float)) : String :=
   let scalarsJson := "[" ++ String.intercalate "," (scalarParams.map scalarToJson |>.toList) ++ "]"
@@ -86,6 +106,25 @@ def buildLauncherInput {α : Type} [ToString α] (scalarParams : Array α) (arra
     namedArrayToJson (toString name) arr)
 
   "{\"scalars\":" ++ scalarsJson ++ ",\"arrays\":{" ++ arraysJson ++ "}}"
+
+class ArrayElementType (α : Type) where
+  typeName : String
+
+instance : ArrayElementType Float where
+  typeName := "float"
+
+instance : ArrayElementType Int where
+  typeName := "int"
+
+open Lean Json in
+def buildLauncherInputBetter {α : Type} [ToJson α] [ArrayElementType α] (scalarParams : Array ScalarValue) (arrays : List (Name × Array α)) : String :=
+  let scalarsJson := (ToJson.toJson scalarParams).compress
+  -- Build arrays JSON manually to preserve order (Json.mkObj doesn't preserve order)
+  -- Include type info to avoid integer/float inference issues
+  let arrayTypeName := ArrayElementType.typeName (α := α)
+  let arraysJson := "{" ++ String.intercalate "," (arrays.map fun (name, a) =>
+    "\"" ++ toString name ++ "\":{\"type\":\"" ++ arrayTypeName ++ "\",\"data\":" ++ (ToJson.toJson a).compress ++ "}") ++ "}"
+  "{\"scalars\":" ++ scalarsJson ++ ",\"arrays\":" ++ arraysJson ++ "}"
 
 /-- Parse JSON output from launcher - STUB for now -/
 def parseLauncherOutput (output : String) : Except String (List (Name × Array Float)) := do
@@ -103,7 +142,7 @@ def compileKernelToPTX (kernel : Kernel) : IO CachedKernel := do
   let ptxExists ← cached.ptxPath.pathExists
 
   if !ptxExists then
-    IO.println s!"[GPU] Compiling {kernel.name} to PTX..."
+    -- IO.println s!"[GPU] Compiling {kernel.name} to PTX..."
 
     -- Compile using nvcc
     let nvccPath := "nvcc"
@@ -114,7 +153,7 @@ def compileKernelToPTX (kernel : Kernel) : IO CachedKernel := do
       "-o", cached.ptxPath.toString,
       cached.cudaSourcePath.toString
     ]
-    IO.println s!"[nvcc] {nvccPath} {String.intercalate " " args.toList}"
+    -- IO.println s!"[nvcc] {nvccPath} {String.intercalate " " args.toList}"
     let output ← IO.Process.run {
       cmd := nvccPath
       args := args
@@ -124,9 +163,9 @@ def compileKernelToPTX (kernel : Kernel) : IO CachedKernel := do
     if !output.trim.isEmpty then
       IO.eprintln s!"[nvcc] {output}"
 
-    IO.println "[GPU] Compilation complete!"
-  else
-    IO.println s!"[GPU] Using cached PTX for {kernel.name}"
+    -- IO.println "[GPU] Compilation complete!"
+  -- else
+    -- IO.println s!"[GPU] Using cached PTX for {kernel.name}"
 
   return cached
 
@@ -145,9 +184,9 @@ def executeKernel
   -- Build JSON input
   let jsonInput := buildLauncherInput scalarParams arrays
 
-  IO.println s!"[GPU] Launching {kernel.name}..."
-  IO.println s!"[GPU] Grid: {grid.x}x{grid.y}x{grid.z}"
-  IO.println s!"[GPU] Block: {block.x}x{block.y}x{block.z}"
+  -- IO.println s!"[GPU] Launching {kernel.name}..."
+  -- IO.println s!"[GPU] Grid: {grid.x}x{grid.y}x{grid.z}"
+  -- IO.println s!"[GPU] Block: {block.x}x{block.y}x{block.z}"
 
   -- Call launcher process
   let launcherArgs := #[
@@ -181,47 +220,80 @@ def executeKernel
   let exitCode ← child.wait
 
   let stdoutContent ← IO.ofExcept stdout.get
-  let stderrContent ← IO.ofExcept stderr.get
+  -- let stderrContent ← IO.ofExcept stderr.get
 
   -- Print stderr (diagnostics)
-  if !stderrContent.trim.isEmpty then
-    IO.println s!"[Launcher] {stderrContent}"
+  -- if !stderrContent.trim.isEmpty then
+    -- IO.println s!"[Launcher] {stderrContent}"
 
   if exitCode != 0 then
-    IO.eprintln s!"[GPU] Launcher failed with exit code {exitCode}"
+    -- IO.eprintln s!"[GPU] Launcher failed with exit code {exitCode}"
     throw <| IO.userError s!"GPU kernel execution failed"
 
   -- Parse output
   match parseLauncherOutput stdoutContent with
   | .ok results =>
-      IO.println s!"[GPU] Execution complete! Retrieved {results.length} arrays"
+      -- IO.println s!"[GPU] Execution complete! Retrieved {results.length} arrays"
       return results
   | .error msg =>
       IO.eprintln s!"[GPU] Failed to parse output: {msg}"
       IO.eprintln s!"[GPU] Output was: {stdoutContent}"
       throw <| IO.userError "Failed to parse launcher output"
 
-/-- Execute kernel using KernelState interface (compatible with runKernelCPU) -/
-def runKernelGPU_Process
-    (kernel : Kernel)
+
+open Lean Json
+def runKernelGPU {α β} [ToJson α] [ArrayElementType α] [ToScalarValue β]
+    (IR : Kernel)
+    (responseType : Type)
+    [FromJson responseType]
     (grid block : Dim3)
-    (initState : KernelState)
-    : IO KernelState := do
+    (scalarParams : Array β)
+    (arrays : List (Name × Array α))
+    : IO responseType := do
+  let cached ← compileKernelToPTX IR
+  let scalarParams' := scalarParams.map ToScalarValue.toScalarValue
+  let jsonInput := buildLauncherInputBetter scalarParams' arrays
+  -- IO.println s!"[GPU] Launching {IR.name}..."
+  -- IO.println s!"[GPU] Grid: {grid.x}x{grid.y}x{grid.z}"
+  -- IO.println s!"[GPU] Block: {block.x}x{block.y}x{block.z}"
+  IO.println s!"[GPU] Input JSON: {jsonInput}"
+  let launcherArgs := #[
+    cached.ptxPath.toString,
+    IR.name,
+    toString grid.x, toString grid.y, toString grid.z,
+    toString block.x, toString block.y, toString block.z
+  ]
+  let child ← IO.Process.spawn {
+    cmd := "./gpu_launcher"
+    args := launcherArgs
+    stdin := .piped
+    stdout := .piped
+    stderr := .piped
+  }
+  let stdin := child.stdin
+  stdin.putStr jsonInput
+  stdin.putStr "\n"
+  stdin.flush
 
-  -- Extract scalar parameters from kernel
-  let scalarParams := extractScalarParams kernel initState
+  let stderrContent ← child.stderr.readToEnd
+  let stdoutContent ← child.stdout.readToEnd
+  let exitCode ← child.wait
+  IO.println s!"[GPU] Stdout: {stdoutContent}"
+  IO.println s!"[GPU] Stderr: {stderrContent}"
 
-  -- Extract global arrays
-  let globalArrays := extractGlobalArrays kernel initState
+  if exitCode == 0 then
+    match Lean.Json.parse stdoutContent with
+    | Except.error err =>
+      throw <| IO.userError s!"JSON Parse Error: {err} \n Output was:\n{stdoutContent} \n Stderr was:\n{stderrContent}"
+    | Except.ok json =>
+      match @Lean.fromJson? responseType _ json with
+      | Except.error err =>
+        throw <| IO.userError s!"JSON Decode Error: {err} \n Output was:\n{stdoutContent} \n Stderr was:\n{stderrContent}"
+      | Except.ok response =>
+        return response
+  else
+    throw <| IO.userError s!"GPU execution failed: {stderrContent} \n Output was:\n{stdoutContent}"
 
-  -- Execute on GPU
-  let results ← executeKernel kernel grid block scalarParams globalArrays
 
-  -- Update state with results
-  let mut finalGlobals := initState.globals
-  for (name, arr) in results do
-    finalGlobals := finalGlobals.insert name (.arrayFloat arr)
-
-  return { initState with globals := finalGlobals }
 
 end CLean.GPU.ProcessLauncher

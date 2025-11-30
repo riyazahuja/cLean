@@ -54,9 +54,9 @@ def getCachedKernel (kernel : Kernel) (nvccPath : String := "nvcc") : IO CachedK
   if !ptxExists then
     -- Write CUDA source to disk
     IO.FS.writeFile cudaPath cudaSource
-    IO.println s!"[Cache] Compiled new kernel: {kernel.name} (hash: {kernelHash})"
-  else
-    IO.println s!"[Cache] Using cached kernel: {kernel.name} (hash: {kernelHash})"
+    -- IO.println s!"[Cache] Compiled new kernel: {kernel.name} (hash: {kernelHash})"
+  -- else
+    -- IO.println s!"[Cache] Using cached kernel: {kernel.name} (hash: {kernelHash})"
 
   return {
     hash := kernelHash

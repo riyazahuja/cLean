@@ -54,15 +54,14 @@ theorem saxpy_safe : ∀ (config grid : Dim3), KernelSafe (saxpySpec config grid
   · unfold BarrierUniform; intros; trivial
 
 
-
-
-
 def saxpyCPU (n : Nat)
     (α : Float)
     (x y : Array Float) : IO (Array Float) := do
+
+
   let initState := mkKernelState [
-    globalFloatArray `X x.toList.toArray,
-    globalFloatArray `Y y.toList.toArray,
+    globalFloatArray `X x,
+    globalFloatArray `Y y,
     globalFloatArray `R (Array.replicate n 0.0)
   ]
 
@@ -85,49 +84,19 @@ def saxpyGPU (n : Nat)
     (α : Float)
     (x y : Array Float) : IO (Array Float) := do
 
-  let cached ← compileKernelToPTX saxpyKernelIR
-
   let scalarParams := #[Float.ofNat n, α]
   let arrays := [
     (`x, x),
     (`y, y),
     (`r, Array.replicate n 0.0)
   ]
-  let jsonInput := buildLauncherInput scalarParams arrays
-  let grid : Dim3 := ⟨(n + 511) / 512, 1, 1⟩
-  let block : Dim3 := ⟨512, 1, 1⟩
 
-  let launcherArgs := #[
-    cached.ptxPath.toString,
-    saxpyKernelIR.name,
-    toString grid.x, toString grid.y, toString grid.z,
-    toString block.x, toString block.y, toString block.z
-  ]
-
-  let child ← IO.Process.spawn {
-    cmd := "./gpu_launcher"
-    args := launcherArgs
-    stdin := .piped
-    stdout := .piped
-    stderr := .piped
-  }
-  let stdin := child.stdin
-  stdin.putStr jsonInput
-  stdin.putStr "\n"
-  stdin.flush
-
-  let stdoutContent ← child.stdout.readToEnd
-  let exitCode ← child.wait
-
-  if exitCode == 0 then
-    match Lean.Json.parse stdoutContent with
-    | Except.error err => throw <| IO.userError s!"JSON Parse Error: {err}"
-    | Except.ok json =>
-      match @Lean.fromJson? saxpyArgsResponse _ json with
-      | Except.error err => throw <| IO.userError s!"JSON Decode Error: {err}"
-      | Except.ok response =>
-        return response.r
-  throw <| IO.userError s!"GPU execution failed"
+  let response ← runKernelGPU saxpyKernelIR saxpyArgsResponse
+    ⟨(n + 511) / 512, 1, 1⟩         -- grid
+    ⟨512, 1, 1⟩                     -- block
+    scalarParams
+    arrays
+  return response.r
 
 
 #eval do saxpyCPU 2 8.0 #[1.0, 1.0] #[2.0, 2.0]
@@ -274,7 +243,6 @@ def exclusiveScanGPU (input : Array Int) : IO (Array Int) := do
   else
     let roundedLength := nextPow2 n
     let paddedData := input.toList.toArray ++ (Array.replicate (roundedLength - n) (0 : Int))
-    let cached ← compileKernelToPTX upsweepKernelIR
 
     let mut upsweepData := paddedData
 
@@ -290,57 +258,21 @@ def exclusiveScanGPU (input : Array Int) : IO (Array Int) := do
         (`data, upsweepData)
       ]
 
-      let jsonInput := buildLauncherInput scalarParams arrays
       let grid :Dim3 := ⟨numBlocks, 1, 1⟩
       let block :Dim3 := ⟨numThreadsPerBlock, 1, 1⟩
-      IO.println s!"Launching Upsweep Kernel with grid={grid.x}, block={block.x}, twod={twod}, twod1={twod1}"
-      IO.println s!"Input Data: {jsonInput}"
-      let launcherArgs := #[
-        cached.ptxPath.toString,
-        upsweepKernelIR.name,
-        toString grid.x, toString grid.y, toString grid.z,
-        toString block.x, toString block.y, toString block.z,
-      ]
-      IO.println s!"Launcher Args: {launcherArgs}"
 
-      let child ← IO.Process.spawn {
-        cmd := "./gpu_launcher"
-        args := launcherArgs
-        stdin := .piped
-        stdout := .piped
-        stderr := .piped
-      }
-      let stdin := child.stdin
-      stdin.putStr jsonInput
-      stdin.putStr "\n"
-      stdin.flush
+      let response ← runKernelGPU upsweepKernelIR ScanArgsResponse
+        grid
+        block
+        scalarParams
+        arrays
 
-      let stderrContent ← child.stderr.readToEnd
-      let stdoutContent ← child.stdout.readToEnd
-      let exitCode ← child.wait
-
-      if exitCode != 0 then
-        throw <| IO.userError s!"❌ GPU Upsweep Error: {stderrContent}"
-
-      match Lean.Json.parse stdoutContent with
-      | Except.error err =>
-        throw <| IO.userError s!"❌ JSON Parse Error: {err}"
-      | Except.ok json =>
-        -- The auto-generated FromJson expects {"results":{"data":[...]}} format
-        match @Lean.fromJson? ScanArgsResponse _ json with
-        | Except.error err =>
-          throw <| IO.userError s!"❌ JSON Decode Error: {err}"
-        | Except.ok response =>
-          IO.println "✅ Successfully parsed JSON into TestResponse"
-          IO.println s!"\nParsed Results:"
-          IO.println s!"  Data: {response.data}"
-          upsweepData := response.data
-          twod := twod * 2
+      upsweepData := response.data
+      twod := twod * 2
 
     let zeroedOut := upsweepData.set! (roundedLength - 1) 0
 
     --Downsweep phase
-    let cached ← compileKernelToPTX downsweepKernelIR
     let mut downsweepData := zeroedOut
     twod := roundedLength / 2
     while twod >= 1 do
@@ -351,50 +283,17 @@ def exclusiveScanGPU (input : Array Int) : IO (Array Int) := do
         (`data, downsweepData)
       ]
 
-      let jsonInput := buildLauncherInput scalarParams arrays
       let grid : Dim3 := ⟨numBlocks, 1, 1⟩
       let block : Dim3 := ⟨numThreadsPerBlock, 1, 1⟩
 
-      let launcherArgs := #[
-        cached.ptxPath.toString,
-        downsweepKernelIR.name,
-        toString grid.x, toString grid.y, toString grid.z,
-        toString block.x, toString block.y, toString block.z,
-      ]
+      let response ← runKernelGPU downsweepKernelIR ScanArgsResponse
+        grid
+        block
+        scalarParams
+        arrays
 
-      let child ← IO.Process.spawn {
-        cmd := "./gpu_launcher"
-        args := launcherArgs
-        stdin := .piped
-        stdout := .piped
-        stderr := .piped
-      }
-      let stdin := child.stdin
-      stdin.putStr jsonInput
-      stdin.putStr "\n"
-      stdin.flush
-
-      let stderrContent ← child.stderr.readToEnd
-      let stdoutContent ← child.stdout.readToEnd
-      let exitCode ← child.wait
-
-      if exitCode != 0 then
-        throw <| IO.userError s!"❌ GPU Downsweep Error: {stderrContent}"
-
-      match Lean.Json.parse stdoutContent with
-      | Except.error err =>
-        throw <| IO.userError s!"❌ JSON Parse Error: {err}"
-      | Except.ok json =>
-        -- The auto-generated FromJson expects {"results":{"data":[...]}} format
-        match @Lean.fromJson? ScanArgsResponse _ json with
-        | Except.error err =>
-          throw <| IO.userError s!"❌ JSON Decode Error: {err}"
-        | Except.ok response =>
-          IO.println "✅ Successfully parsed JSON into TestResponse"
-          IO.println s!"\nParsed Results:"
-          IO.println s!"  Data: {response.data}"
-          downsweepData := response.data
-          twod := twod / 2
+      downsweepData := response.data
+      twod := twod / 2
 
     pure <| downsweepData.take (n+1)
 
@@ -446,7 +345,7 @@ theorem matmul_safe : ∀ (config grid : Dim3), KernelSafe (matmulSpec config gr
   · unfold BarrierUniform; intros; trivial
 
 
-def matmul (n : Nat)
+def matmulCPU (n : Nat)
     (A B : Array (Array Float)) : IO (Array (Array Float)) := do
   let flattened_A  := A.flatMap id
   let flattened_B  := B.flatMap id
@@ -489,80 +388,39 @@ def matmul (n : Nat)
     (A B : Array (Array Float)) : IO (Array (Array Float)) := do
     let flattened_A := A.flatMap id
     let flattened_B := B.flatMap id
-    IO.println s!"Flattened A: {flattened_A}"
-    IO.println s!"Flattened B: {flattened_B}"
-
-    let cached ← compileKernelToPTX matmulKernelIR
+    -- IO.println s!"Flattened A: {flattened_A}"
+    -- IO.println s!"Flattened B: {flattened_B}"
 
     -- Use typed scalars: N is int
-    let scalarParams := #[ScalarValue.int n]
+    let scalarParams := #[n]
     let arrays := [
     (`A, flattened_A),
     (`B, flattened_B),
     (`C, Array.replicate (n*n) 0.0)
     ]
-    let jsonInput := buildLauncherInputTyped scalarParams arrays
 
     let threadsPerBlock := 32
     let numBlocks := (n + threadsPerBlock - 1) / threadsPerBlock
     let grid : Dim3 := ⟨numBlocks, numBlocks, 1⟩
     let block : Dim3 := ⟨threadsPerBlock, threadsPerBlock, 1⟩
 
-    let launcherArgs := #[
-    cached.ptxPath.toString,
-    matmulKernelIR.name,
-    toString grid.x, toString grid.y, toString grid.z,
-    toString block.x, toString block.y, toString block.z
-    ]
-
-    let child ← IO.Process.spawn {
-    cmd := "./gpu_launcher"
-    args := launcherArgs
-    stdin := .piped
-    stdout := .piped
-    stderr := .piped
-    }
-    let stdin := child.stdin
-    stdin.putStr jsonInput
-    stdin.putStr "\n"
-    stdin.flush
-
-    let stderrContent ← child.stderr.readToEnd
-    let stdoutContent ← child.stdout.readToEnd
-    let exitCode ← child.wait
+    let response ← runKernelGPU matmulKernelIR MatMulArgsResponse
+      grid
+      block
+      scalarParams
+      arrays
 
 
-    if exitCode == 0 then
-    IO.println "\n✅ SUCCESS: GPU kernel executed successfully!"
-    IO.println stdoutContent
-    match Lean.Json.parse stdoutContent with
-    | Except.error err =>
-      IO.println s!"❌ JSON Parse Error: {err}"
-      return #[]
-    | Except.ok json =>
-      match @Lean.fromJson? MatMulArgsResponse _ json with
-      | Except.error err =>
-      IO.println s!"❌ JSON Decode Error: {err}"
-      return #[]
-      | Except.ok response =>
-      IO.println "✅ Successfully parsed JSON into MatMulArgsResponse"
-      IO.println s!"\nParsed Results:"
-      IO.println s!"  C: {response.C}"
-      let out := response.C
-      if out.size = n * n then
-        let result := Array.ofFn fun (i : Fin n) =>
-        Array.ofFn fun (j : Fin n) => out[i.val * n + j.val]!
-        return result
-      else
-        throw <| IO.userError s!"Size mismatch: {out.size} ≠ {n*n}"
+    let out := response.C
+    if out.size = n * n then
+      let result := Array.ofFn fun (i : Fin n) =>
+      Array.ofFn fun (j : Fin n) => out[i.val * n + j.val]!
+      return result
     else
-    IO.println "\n❌ FAILURE: GPU execution failed"
-    IO.println s!"Stderr: {stderrContent}"
-    IO.println s!"Stdout: {stdoutContent}"
-    return #[]
+      throw <| IO.userError s!"Size mismatch: {out.size} ≠ {n*n}"
 
-#eval do matmul 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[1.0,0.0],#[0.0,1.0]]
-#eval do matmul 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[5.0,6.0],#[7.0,8.0]]
+#eval do matmulCPU 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[1.0,0.0],#[0.0,1.0]]
+#eval do matmulCPU 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[5.0,6.0],#[7.0,8.0]]
 
 #eval do matmulGPU 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[1.0,0.0],#[0.0,1.0]]
 #eval do matmulGPU 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[5.0,6.0],#[7.0,8.0]]

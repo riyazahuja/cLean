@@ -3,6 +3,7 @@ import Lean.Elab.Command
 import Lean.Data.Json
 import Mathlib.Tactic.TypeStar
 import Std.Data.HashMap
+
 -- import SciLean.Data.DataArray
 open Lean Lean.Elab Lean.Elab.Command Meta --SciLean
 
@@ -544,6 +545,7 @@ def runKernelCPU
               phase := phase + 1
 
     return st
+
 
 
 -- /-! ## A fixed-length vector (for the host API) -/
