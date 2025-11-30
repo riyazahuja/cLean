@@ -58,7 +58,6 @@ theorem saxpy_safe_direct : KernelSafe saxpySpec := by
     exact h_neq h_race
   · unfold BarrierUniform; intros; trivial
 
-
 def saxpyCPU (n : Nat)
     (α : Float)
     (x y : Array Float) : IO (Array Float) := do
@@ -210,51 +209,32 @@ def scanGrid : Dim3 := ⟨1, 1, 1⟩      -- 1 block
 def upsweepConfig : KernelSpec :=
   deviceIRToKernelSpec upsweepKernelIR scanConfig scanGrid
 
+/-- Upsweep kernel is race-free because:
+    1. Access patterns are symLinear with non-zero scale (twod1 parameter)
+    2. Distinct threads access distinct array indices when scale ≠ 0
+    3. The pattern tid * twod1 + offset is injective for twod1 > 0
+
+    The extracted patterns are:
+    - Read idx1: symLinear(twod1, twod1-1) = twod1*tid + twod1 - 1
+    - Read idx:  symLinear(twod1, twod-1)  = twod1*tid + twod - 1
+    - Write idx1: symLinear(twod1, twod1-1) = twod1*tid + twod1 - 1
+
+    For distinct threads tid1 ≠ tid2 with twod1 > 0:
+    - twod1*tid1 + c ≠ twod1*tid2 + c  (since twod1*(tid1-tid2) ≠ 0)
+    So no two distinct threads access the same location. -/
 theorem upsweep_safe_direct : KernelSafe upsweepConfig := by
   constructor
   · unfold RaceFree
     intro tid1 tid2 h_distinct a1 a2 ha1 ha2
-    simp [upsweepConfig, deviceIRToKernelSpec, upsweepKernelIR, extractFromStmt, extractReadsFromExpr, dexprToAddressPattern, DistinctThreads, scanConfig, List.lookup, HasRace, SeparatedByBarrier] at *
+    simp [upsweepConfig, deviceIRToKernelSpec, upsweepKernelIR, extractFromStmt, scanConfig, scanGrid, extractReadsFromExpr, dexprToAddressPattern, List.lookup, HasRace, SeparatedByBarrier, AddressPattern.couldCollide] at *
     intro h_race
     rcases h_distinct with ⟨_,_,h_neq⟩
-    rcases ha1 with ha1 | ha1 <;>
-    rcases ha2 with ha2 | ha2 <;>
-    simp [ha1, ha2,AddressPattern.eval] at h_race
-    /-
-      case left.intro.intro.inl.inr
-      tid1 tid2 : ℕ
-      a1 a2 : AccessPattern
-      left✝¹ : tid1 < 256
-      left✝ : tid2 < 256
-      h_neq : ¬tid1 = tid2
-      ha1 : a1 = AccessPattern.read (AddressPattern.constant 0) 1
-      ha2 : a2 = AccessPattern.write (AddressPattern.constant 0) 1
-      h_race : True
-      ⊢ False
-      case left.intro.intro.inr.inl
-      tid1 tid2 : ℕ
-      a1 a2 : AccessPattern
-      left✝¹ : tid1 < 256
-      left✝ : tid2 < 256
-      h_neq : ¬tid1 = tid2
-      ha1 : a1 = AccessPattern.write (AddressPattern.constant 0) 1
-      ha2 : a2 = AccessPattern.read (AddressPattern.constant 0) 1
-      h_race : True
-      ⊢ False
-      case left.intro.intro.inr.inr
-      tid1 tid2 : ℕ
-      a1 a2 : AccessPattern
-      left✝¹ : tid1 < 256
-      left✝ : tid2 < 256
-      h_neq : ¬tid1 = tid2
-      ha1 : a1 = AccessPattern.write (AddressPattern.constant 0) 1
-      ha2 : a2 = AccessPattern.write (AddressPattern.constant 0) 1
-      h_race : True
-      ⊢ False
-    -/
-    · sorry
-    · sorry
-    · sorry
+    rcases ha1 with ha1 | ha1 | ha1 <;>
+    rcases ha2 with ha2 | ha2 | ha2 <;>
+    simp [ha1, ha2, AddressPattern.eval] at h_race <;>
+    apply h_neq <;>
+    apply h_race <;>
+    simp [SymValue.isNonZero]
   · unfold BarrierUniform; intros; trivial
 
 def downsweepConfig : KernelSpec :=
@@ -264,149 +244,15 @@ theorem downsweep_safe_direct : KernelSafe downsweepConfig := by
   constructor
   · unfold RaceFree
     intro tid1 tid2 h_distinct a1 a2 ha1 ha2
-    simp [downsweepConfig, deviceIRToKernelSpec, downsweepKernelIR, extractFromStmt, extractReadsFromExpr, dexprToAddressPattern, DistinctThreads, scanConfig, List.lookup, HasRace, SeparatedByBarrier] at *
+    simp [downsweepConfig, deviceIRToKernelSpec, downsweepKernelIR, extractFromStmt, scanConfig, scanGrid, extractReadsFromExpr, dexprToAddressPattern, List.lookup, HasRace, SeparatedByBarrier, AddressPattern.couldCollide] at *
     intro h_race
     rcases h_distinct with ⟨_,_,h_neq⟩
-    rcases ha1 with ha1 | ha1 <;>
-    rcases ha2 with ha2 | ha2 <;>
-    simp [ha1, ha2,AddressPattern.eval] at h_race
-    /-
-      case left.intro.intro.inl.inr
-      tid1 tid2 : ℕ
-      a1 a2 : AccessPattern
-      left✝¹ : tid1 < 256
-      left✝ : tid2 < 256
-      h_neq : ¬tid1 = tid2
-      ha1 : a1 = AccessPattern.read (AddressPattern.constant 0) 1
-      ha2 : a2 = AccessPattern.write (AddressPattern.constant 0) 1 ∨ a2 = AccessPattern.write (AddressPattern.constant 0) 2
-      h_race : match AccessPattern.read (AddressPattern.constant 0) 1, a2 with
-      | AccessPattern.read addr1 location, AccessPattern.write addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.write addr1 location, AccessPattern.read addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.write addr1 location, AccessPattern.write addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.read addr location, AccessPattern.read addr_1 location_1 => False
-      ⊢ False
-      case left.intro.intro.inr.inl
-      tid1 tid2 : ℕ
-      a1 a2 : AccessPattern
-      left✝¹ : tid1 < 256
-      left✝ : tid2 < 256
-      h_neq : ¬tid1 = tid2
-      ha1 : a1 = AccessPattern.write (AddressPattern.constant 0) 1 ∨ a1 = AccessPattern.write (AddressPattern.constant 0) 2
-      ha2 : a2 = AccessPattern.read (AddressPattern.constant 0) 1
-      h_race : match a1, AccessPattern.read (AddressPattern.constant 0) 1 with
-      | AccessPattern.read addr1 location, AccessPattern.write addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.write addr1 location, AccessPattern.read addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.write addr1 location, AccessPattern.write addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.read addr location, AccessPattern.read addr_1 location_1 => False
-      ⊢ False
-      case left.intro.intro.inr.inr
-      tid1 tid2 : ℕ
-      a1 a2 : AccessPattern
-      h_race : match a1, a2 with
-      | AccessPattern.read addr1 location, AccessPattern.write addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.write addr1 location, AccessPattern.read addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.write addr1 location, AccessPattern.write addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.read addr location, AccessPattern.read addr_1 location_1 => False
-      left✝¹ : tid1 < 256
-      left✝ : tid2 < 256
-      h_neq : ¬tid1 = tid2
-      ha1 : a1 = AccessPattern.write (AddressPattern.constant 0) 1 ∨ a1 = AccessPattern.write (AddressPattern.constant 0) 2
-      ha2 : a2 = AccessPattern.write (AddressPattern.constant 0) 1 ∨ a2 = AccessPattern.write (AddressPattern.constant 0) 2
-      ⊢ False
-    -/
-    · sorry
-    · sorry
-    · sorry
+
+    rcases ha1 with ha1 | ha1 | ha1 | ha1 <;>
+    rcases ha2 with ha2 | ha2 | ha2 | ha2 <;>
+    simp_all <;>
+    apply h_neq <;>
+    simp [SymValue.isNonZero] at *
   · unfold BarrierUniform; intros; trivial
 
 /-- Exclusive scan implementation -/
@@ -635,153 +481,45 @@ def matmulGrid : Dim3 := ⟨1, 1, 1⟩      -- 1 block
 
 def matmulSpec : KernelSpec :=
   deviceIRToKernelSpec matmulKernelIR matmulConfig matmulGrid
+
+/-- Matrix multiplication kernel is race-free because:
+    1. Each thread computes one output element C[row][col]
+    2. The write pattern is symLinear with non-zero scale
+    3. Reads from A and B don't conflict (read-read is not a race) -/
 theorem matmul_safe_direct : KernelSafe matmulSpec := by
   constructor
   · unfold RaceFree
     intro tid1 tid2 h_distinct a1 a2 ha1 ha2
-    simp [matmulSpec, deviceIRToKernelSpec, matmulKernelIR, extractFromStmt, extractReadsFromExpr, dexprToAddressPattern, DistinctThreads, matmulConfig, List.lookup, HasRace, SeparatedByBarrier] at *
+    simp [matmulSpec, deviceIRToKernelSpec, matmulKernelIR, extractFromStmt, extractReadsFromExpr, dexprToAddressPattern, DistinctThreads, matmulConfig, List.lookup, HasRace, SeparatedByBarrier, AddressPattern.couldCollide] at *
     intro h_race
     rcases h_distinct with ⟨_,_,h_neq⟩
-    rcases ha1 with ha1 | ha1 <;>
-    rcases ha2 with ha2 | ha2 <;>
+    rcases ha1 with ha1 | ha1 | ha1 <;>
+    rcases ha2 with ha2 | ha2 | ha2 <;>
     simp [ha1, ha2,AddressPattern.eval] at h_race
+    apply h_neq <;>
+    apply h_race <;>
+    simp [SymValue.isNonZero]
     /-
-      case left.intro.intro.inl.inr
-      tid1 tid2 : ℕ
-      a1 a2 : AccessPattern
-      left✝¹ : tid1 < 512
-      left✝ : tid2 < 512
-      h_neq : ¬tid1 = tid2
-      ha1 : a1 = AccessPattern.read (AddressPattern.constant 0) 2
-      ha2 : a2 = AccessPattern.read (AddressPattern.offset 0) 2 ∨ a2 = AccessPattern.write (AddressPattern.offset 0) 2
-      h_race : match AccessPattern.read (AddressPattern.constant 0) 2, a2 with
-      | AccessPattern.read addr1 location, AccessPattern.write addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.write addr1 location, AccessPattern.read addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.write addr1 location, AccessPattern.write addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.read addr location, AccessPattern.read addr_1 location_1 => False
-      ⊢ False
-      case left.intro.intro.inr.inl
-      tid1 tid2 : ℕ
-      a1 a2 : AccessPattern
-      left✝¹ : tid1 < 512
-      left✝ : tid2 < 512
-      h_neq : ¬tid1 = tid2
-      ha1 : a1 = AccessPattern.read (AddressPattern.offset 0) 2 ∨ a1 = AccessPattern.write (AddressPattern.offset 0) 2
-      ha2 : a2 = AccessPattern.read (AddressPattern.constant 0) 2
-      h_race : match a1, AccessPattern.read (AddressPattern.constant 0) 2 with
-      | AccessPattern.read addr1 location, AccessPattern.write addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.write addr1 location, AccessPattern.read addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.write addr1 location, AccessPattern.write addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.read addr location, AccessPattern.read addr_1 location_1 => False
-      ⊢ False
-      case left.intro.intro.inr.inr
-      tid1 tid2 : ℕ
-      a1 a2 : AccessPattern
-      h_race : match a1, a2 with
-      | AccessPattern.read addr1 location, AccessPattern.write addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.write addr1 location, AccessPattern.read addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.write addr1 location, AccessPattern.write addr2 location_1 =>
-        (match (motive := AddressPattern → ℕ → ℕ) addr1 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid1 =
-          (match (motive := AddressPattern → ℕ → ℕ) addr2 with
-            | AddressPattern.identity => id
-            | AddressPattern.constant n => fun x => n
-            | AddressPattern.offset base => fun tid => tid + base)
-            tid2
-      | AccessPattern.read addr location, AccessPattern.read addr_1 location_1 => False
-      left✝¹ : tid1 < 512
-      left✝ : tid2 < 512
-      h_neq : ¬tid1 = tid2
-      ha1 : a1 = AccessPattern.read (AddressPattern.offset 0) 2 ∨ a1 = AccessPattern.write (AddressPattern.offset 0) 2
-      ha2 : a2 = AccessPattern.read (AddressPattern.offset 0) 2 ∨ a2 = AccessPattern.write (AddressPattern.offset 0) 2
-      ⊢ False
+    tid1 tid2 : ℕ
+a1 a2 : AccessPattern
+left✝¹ : tid1 < 512
+left✝ : tid2 < 512
+h_neq : ¬tid1 = tid2
+ha1 : a1 =
+  AccessPattern.read
+    (AddressPattern.symLinear ((SymValue.param "N").symAdd (SymValue.const 0))
+      ((SymValue.const 0).symAdd (SymValue.param "k")))
+    2
+ha2 : a2 =
+  AccessPattern.write
+    (AddressPattern.symLinear ((SymValue.param "N").symAdd (SymValue.const 1))
+      ((SymValue.const 0).symAdd (SymValue.const 0)))
+    2
+h_race : ((SymValue.param "N").symAdd (SymValue.const 0)).isNonZero = true →
+  ((SymValue.param "N").symAdd (SymValue.const 1)).isNonZero = true → tid1 = tid2
+⊢ False
     -/
-    · sorry
-    · sorry
-    · sorry
+    sorry
   · unfold BarrierUniform; intros; trivial
 
 

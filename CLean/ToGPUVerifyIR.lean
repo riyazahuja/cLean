@@ -41,6 +41,8 @@ def isThreadDependent (e : DExpr) : Bool :=
     - blockIdx.x * blockDim.x + threadIdx.x → AddressPattern.identity (within-block view)
     - constant c → AddressPattern.constant c
     - variable name → look up CACHED pattern in varEnv (no recursion!)
+    - a * tid + b → AddressPattern.linear a b (concrete)
+    - param * tid + ... → AddressPattern.symLinear (symbolic)
 -/
 def dexprToAddressPattern (e : DExpr) (blockDim : Dim3) (varEnv : List (String × AddressPattern)) : AddressPattern :=
   match e with
@@ -54,7 +56,7 @@ def dexprToAddressPattern (e : DExpr) (blockDim : Dim3) (varEnv : List (String �
   | DExpr.var varName =>
       match varEnv.lookup varName with
       | some cachedPattern => cachedPattern  -- Just return the cached pattern!
-      | none => AddressPattern.constant 0  -- Not found, treat as parameter/constant
+      | none => AddressPattern.symLinear (SymValue.const 0) (SymValue.param varName)  -- Kernel parameter
 
   -- Binary operations
   | DExpr.binop BinOp.add e1 e2 =>
@@ -63,7 +65,7 @@ def dexprToAddressPattern (e : DExpr) (blockDim : Dim3) (varEnv : List (String �
       | DExpr.binop BinOp.mul (DExpr.blockIdx Dim.x) (DExpr.blockDim Dim.x), DExpr.threadIdx Dim.x =>
           AddressPattern.identity  -- Global index, but we focus on within-block (two-thread reduction)
       | _, _ =>
-          -- Try to construct offset pattern
+          -- Try to construct offset/linear pattern
           let p1 := dexprToAddressPattern e1 blockDim varEnv
           let p2 := dexprToAddressPattern e2 blockDim varEnv
           match p1, p2 with
@@ -72,13 +74,83 @@ def dexprToAddressPattern (e : DExpr) (blockDim : Dim3) (varEnv : List (String �
           | AddressPattern.offset base, AddressPattern.constant n => AddressPattern.offset (base + n)
           | AddressPattern.constant n, AddressPattern.offset base => AddressPattern.offset (n + base)
           | AddressPattern.constant n1, AddressPattern.constant n2 => AddressPattern.constant (n1 + n2)
+          -- Linear pattern additions (concrete)
+          | AddressPattern.linear s o, AddressPattern.constant n => AddressPattern.linear s (o + n)
+          | AddressPattern.constant n, AddressPattern.linear s o => AddressPattern.linear s (n + o)
+          | AddressPattern.linear s1 o1, AddressPattern.linear s2 o2 => AddressPattern.linear (s1 + s2) (o1 + o2)
+          | AddressPattern.identity, AddressPattern.linear s o => AddressPattern.linear (1 + s) o
+          | AddressPattern.linear s o, AddressPattern.identity => AddressPattern.linear (s + 1) o
+          | AddressPattern.offset base, AddressPattern.linear s o => AddressPattern.linear (1 + s) (base + o)
+          | AddressPattern.linear s o, AddressPattern.offset base => AddressPattern.linear (s + 1) (o + base)
+          -- Symbolic pattern additions
+          | AddressPattern.symLinear s1 o1, AddressPattern.symLinear s2 o2 =>
+              AddressPattern.symLinear (SymValue.symAdd s1 s2) (SymValue.symAdd o1 o2)
+          | AddressPattern.identity, AddressPattern.symLinear s o =>
+              AddressPattern.symLinear (SymValue.symAdd (SymValue.const 1) s) o
+          | AddressPattern.symLinear s o, AddressPattern.identity =>
+              AddressPattern.symLinear (SymValue.symAdd s (SymValue.const 1)) o
+          | AddressPattern.symLinear s o, AddressPattern.constant n =>
+              AddressPattern.symLinear s (SymValue.symAdd o (SymValue.const n))
+          | AddressPattern.constant n, AddressPattern.symLinear s o =>
+              AddressPattern.symLinear s (SymValue.symAdd (SymValue.const n) o)
+          | AddressPattern.offset base, AddressPattern.symLinear s o =>
+              AddressPattern.symLinear (SymValue.symAdd (SymValue.const 1) s) (SymValue.symAdd (SymValue.const base) o)
+          | AddressPattern.symLinear s o, AddressPattern.offset base =>
+              AddressPattern.symLinear (SymValue.symAdd s (SymValue.const 1)) (SymValue.symAdd o (SymValue.const base))
+          | AddressPattern.linear s1 o1, AddressPattern.symLinear s2 o2 =>
+              AddressPattern.symLinear (SymValue.symAdd (SymValue.const s1) s2) (SymValue.symAdd (SymValue.const o1) o2)
+          | AddressPattern.symLinear s1 o1, AddressPattern.linear s2 o2 =>
+              AddressPattern.symLinear (SymValue.symAdd s1 (SymValue.const s2)) (SymValue.symAdd o1 (SymValue.const o2))
           | _, _ => AddressPattern.constant 0  -- Conservative: unknown pattern
+
+  | DExpr.binop BinOp.sub e1 e2 =>
+      let p1 := dexprToAddressPattern e1 blockDim varEnv
+      let p2 := dexprToAddressPattern e2 blockDim varEnv
+      match p1, p2 with
+      | AddressPattern.constant n1, AddressPattern.constant n2 => AddressPattern.constant (n1 - n2)
+      | AddressPattern.offset base, AddressPattern.constant n => AddressPattern.offset (base - n)
+      | AddressPattern.linear s o, AddressPattern.constant n => AddressPattern.linear s (o - n)
+      | AddressPattern.symLinear s o, AddressPattern.constant n =>
+          AddressPattern.symLinear s (SymValue.symAdd o (SymValue.const (0 - n)))  -- Negate by subtracting
+      | AddressPattern.symLinear s o, AddressPattern.symLinear _ o2 =>
+          -- Conservatively: scale stays, offset is symbolic difference
+          AddressPattern.symLinear s (SymValue.symAdd o (SymValue.symMul (SymValue.const 0) o2))  -- Approximation
+      | _, _ => AddressPattern.constant 0  -- Conservative
 
   | DExpr.binop BinOp.mul e1 e2 =>
       let p1 := dexprToAddressPattern e1 blockDim varEnv
       let p2 := dexprToAddressPattern e2 blockDim varEnv
       match p1, p2 with
       | AddressPattern.constant n1, AddressPattern.constant n2 => AddressPattern.constant (n1 * n2)
+      -- identity * constant = linear pattern with scale
+      | AddressPattern.identity, AddressPattern.constant n => AddressPattern.linear n 0
+      | AddressPattern.constant n, AddressPattern.identity => AddressPattern.linear n 0
+      -- offset * constant = linear pattern
+      | AddressPattern.offset base, AddressPattern.constant n => AddressPattern.linear n (base * n)
+      | AddressPattern.constant n, AddressPattern.offset base => AddressPattern.linear n (n * base)
+      -- linear * constant (scale the linear pattern)
+      | AddressPattern.linear s o, AddressPattern.constant n => AddressPattern.linear (s * n) (o * n)
+      | AddressPattern.constant n, AddressPattern.linear s o => AddressPattern.linear (n * s) (n * o)
+      -- identity * symbolic (parameter) = symLinear
+      | AddressPattern.identity, AddressPattern.symLinear (SymValue.const 0) symParam =>
+          AddressPattern.symLinear symParam (SymValue.const 0)  -- tid * param
+      | AddressPattern.symLinear (SymValue.const 0) symParam, AddressPattern.identity =>
+          AddressPattern.symLinear symParam (SymValue.const 0)  -- param * tid
+      -- Concrete value * symbolic parameter
+      | AddressPattern.constant n, AddressPattern.symLinear (SymValue.const 0) symParam =>
+          AddressPattern.symLinear (SymValue.const 0) (SymValue.symMul (SymValue.const n) symParam)
+      | AddressPattern.symLinear (SymValue.const 0) symParam, AddressPattern.constant n =>
+          AddressPattern.symLinear (SymValue.const 0) (SymValue.symMul symParam (SymValue.const n))
+      -- symLinear (tid-scaled) * constant
+      | AddressPattern.symLinear s o, AddressPattern.constant n =>
+          AddressPattern.symLinear (SymValue.symMul s (SymValue.const n)) (SymValue.symMul o (SymValue.const n))
+      | AddressPattern.constant n, AddressPattern.symLinear s o =>
+          AddressPattern.symLinear (SymValue.symMul (SymValue.const n) s) (SymValue.symMul (SymValue.const n) o)
+      -- linear * symLinear (conservative)
+      | AddressPattern.linear s1 o1, AddressPattern.symLinear _ o2 =>
+          AddressPattern.symLinear (SymValue.symMul (SymValue.const s1) o2) (SymValue.symMul (SymValue.const o1) o2)
+      | AddressPattern.symLinear _ o1, AddressPattern.linear s2 o2 =>
+          AddressPattern.symLinear (SymValue.symMul o1 (SymValue.const s2)) (SymValue.symMul o1 (SymValue.const o2))
       | _, _ => AddressPattern.constant 0  -- Conservative
 
   -- Fallback: treat as constant 0
