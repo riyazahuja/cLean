@@ -75,8 +75,23 @@ partial def exprToCuda : DExpr → String
 
 /-! ## Statement Code Generation -/
 
-/-- Infer CUDA type from expression -/
-partial def inferExprType (expr : DExpr) : String :=
+/-- Build a map from array name to element type -/
+def buildArrayTypeMap (globalArrays sharedArrays : List ArrayDecl) : Std.HashMap String String := Id.run do
+  let mut map := {}
+  for arr in globalArrays do
+    let elemType := match arr.ty with
+      | .array t => dtypeToCuda t
+      | t => dtypeToCuda t
+    map := map.insert arr.name elemType
+  for arr in sharedArrays do
+    let elemType := match arr.ty with
+      | .array t => dtypeToCuda t
+      | t => dtypeToCuda t
+    map := map.insert arr.name elemType
+  return map
+
+/-- Infer CUDA type from expression with array type context -/
+partial def inferExprType (arrayTypes : Std.HashMap String String) (expr : DExpr) : String :=
   match expr with
   | .intLit _ => "int"
   | .floatLit _ => "float"
@@ -87,75 +102,101 @@ partial def inferExprType (expr : DExpr) : String :=
     | .mod => "int"
     | .add | .sub | .mul | .div =>
       -- If both operands are int-typed, result is int; otherwise float
-      let aType := inferExprType a
-      let bType := inferExprType b
+      let aType := inferExprType arrayTypes a
+      let bType := inferExprType arrayTypes b
       if aType == "int" && bType == "int" then "int" else "float"
   | .unop op a =>
     match op with
     | .not => "bool"
-    | .neg => inferExprType a  -- Preserve type
+    | .neg => inferExprType arrayTypes a  -- Preserve type
   | .threadIdx _ | .blockIdx _ | .blockDim _ | .gridDim _ => "int"
-  | .index _ _ => "float"  -- Array element, assume float
+  | .index arr _ =>
+    -- Look up the array element type from the map
+    match arr with
+    | .var arrName => arrayTypes.getD arrName "float"
+    | _ => "float"  -- Default for complex array expressions
   | .var name =>
     -- Simple heuristic based on name
-    if name.endsWith "Idx" || name.endsWith "idx" || name == "i" || name == "j" ||
-       name == "k" || name == "N" || name == "length" then
+    if name.endsWith "Idx" || name.endsWith "idx" ||
+       name == "i" || name == "j" || name == "k" || name == "N" || name == "length" ||
+       name == "index" || name == "idx" || name == "idx1" || name == "idx2" ||
+       name == "twod" || name == "twod1" || name.endsWith "d1" then
       "int"
     else
       "float"
   | _ => "float"  -- Default
 
-/-- Convert DStmt to CUDA C statement string with proper indentation -/
-partial def stmtToCuda (indent : String := "  ") : DStmt → String
-  | .skip => ""
+/-- Convert DStmt to CUDA C statement string with proper indentation, tracking declared variables -/
+partial def stmtToCudaWithState (arrayTypes : Std.HashMap String String)
+    (indent : String := "  ")
+    (declared : Std.HashSet String := {}) : DStmt → (String × Std.HashSet String)
+  | .skip => ("", declared)
 
   | .assign varName expr =>
     -- Skip assignments from args.* (these are metadata, not actual computations)
     let exprStr := exprToCuda expr
     if exprStr.startsWith "args." then
-      ""
+      ("", declared)
     else
-      -- Infer type from expression
-      let ty := inferExprType expr
-      s!"{indent}{ty} {varName} = {exprStr};\n"
+      -- Check if variable is already declared
+      if declared.contains varName then
+        -- Reassignment - don't redeclare the type
+        (s!"{indent}{varName} = {exprStr};\n", declared)
+      else
+        -- First assignment - declare with type
+        let ty := inferExprType arrayTypes expr
+        (s!"{indent}{ty} {varName} = {exprStr};\n", declared.insert varName)
 
   | .store arr idx val =>
-    s!"{indent}{exprToCuda arr}[{exprToCuda idx}] = {exprToCuda val};\n"
+    (s!"{indent}{exprToCuda arr}[{exprToCuda idx}] = {exprToCuda val};\n", declared)
 
   | .seq s1 s2 =>
-    stmtToCuda indent s1 ++ stmtToCuda indent s2
+    let (code1, declared1) := stmtToCudaWithState arrayTypes indent declared s1
+    let (code2, declared2) := stmtToCudaWithState arrayTypes indent declared1 s2
+    (code1 ++ code2, declared2)
 
   | .ite cond thenBranch elseBranch =>
     let condStr := exprToCuda cond
-    let thenCode := stmtToCuda (indent ++ "  ") thenBranch
-    let elseCode := stmtToCuda (indent ++ "  ") elseBranch
-    if elseCode.trim.isEmpty then
+    -- Pass declared set into branches, but use same base declared for both
+    -- (variables declared in branches go out of scope)
+    let (thenCode, thenDeclared) := stmtToCudaWithState arrayTypes (indent ++ "  ") declared thenBranch
+    let (elseCode, elseDeclared) := stmtToCudaWithState arrayTypes (indent ++ "  ") thenDeclared elseBranch
+    let code := if elseCode.trim.isEmpty then
       s!"{indent}if ({condStr}) \{\n{thenCode}{indent}}\n"
     else
       s!"{indent}if ({condStr}) \{\n{thenCode}{indent}} else \{\n{elseCode}{indent}}\n"
+    -- Variables declared in branches are now known to outer scope
+    (code, elseDeclared)
 
   | .for varName lo hi body =>
     let loStr := exprToCuda lo
     let hiStr := exprToCuda hi
-    let bodyCode := stmtToCuda (indent ++ "  ") body
-    s!"{indent}for (int {varName} = {loStr}; {varName} < {hiStr}; {varName}++) \{\n{bodyCode}{indent}}\n"
+    -- Loop variable is scoped to the loop, but body may have declarations
+    let (bodyCode, bodyDeclared) := stmtToCudaWithState arrayTypes (indent ++ "  ") declared body
+    let code := s!"{indent}for (int {varName} = {loStr}; {varName} < {hiStr}; {varName}++) \{\n{bodyCode}{indent}}\n"
+    (code, bodyDeclared)
 
   | .whileLoop cond body =>
     let condStr := exprToCuda cond
-    let bodyCode := stmtToCuda (indent ++ "  ") body
-    s!"{indent}while ({condStr}) \{\n{bodyCode}{indent}}\n"
+    let (bodyCode, bodyDeclared) := stmtToCudaWithState arrayTypes (indent ++ "  ") declared body
+    let code := s!"{indent}while ({condStr}) \{\n{bodyCode}{indent}}\n"
+    (code, bodyDeclared)
 
   | .barrier =>
-    s!"{indent}__syncthreads();\n"
+    (s!"{indent}__syncthreads();\n", declared)
 
   | .call fnName args =>
     let argStrs := args.map exprToCuda
     let argList := String.intercalate ", " argStrs
-    s!"{indent}{fnName}({argList});\n"
+    (s!"{indent}{fnName}({argList});\n", declared)
 
   | .assert cond msg =>
     let condStr := exprToCuda cond
-    s!"{indent}assert({condStr});  // {msg}\n"
+    (s!"{indent}assert({condStr});  // {msg}\n", declared)
+
+/-- Convert DStmt to CUDA C statement string with proper indentation -/
+def stmtToCuda (arrayTypes : Std.HashMap String String) (indent : String := "  ") (stmt : DStmt) : String :=
+  (stmtToCudaWithState arrayTypes indent {} stmt).1
 
 /-! ## Kernel Code Generation -/
 
@@ -255,8 +296,11 @@ def kernelToCuda (k : Kernel) (sharedMemSize : Nat := 256) : String :=
   let localDecls := k.locals.foldl
     (fun acc v => acc ++ genLocalDecl v) ""
 
+  -- Build array type map for type inference
+  let arrayTypes := buildArrayTypeMap k.globalArrays k.sharedArrays
+
   -- Kernel body
-  let bodyCode := stmtToCuda "  " k.body
+  let bodyCode := stmtToCuda arrayTypes "  " k.body
 
   -- Combine everything
   s!"{signature} \{\n{sharedDecls}{localDecls}{bodyCode}}\n"

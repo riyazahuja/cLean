@@ -27,6 +27,8 @@ structure ExtractCtx where
   params : Array (String × String) := #[]  -- (name, type as string)
   -- Track local variable types
   localTypes : Std.HashMap String String := {}  -- var name -> type string
+  -- Track array element types (array name -> DType)
+  arrayTypes : Std.HashMap String DType := {}  -- array name -> element type
 
 /-! ## Type Inference Helpers -/
 
@@ -42,6 +44,36 @@ def inferCudaType (varName : String) : String :=
   else
     "float"  -- Default to float
 
+/-- Recursively extract scalar parameters from syntax (find all args.* references) -/
+partial def extractScalarParamsFromSyntax (stx : Syntax) : Array (String × String) := Id.run do
+  let mut params := #[]
+
+  -- Case 1: Qualified identifier like `args.field`
+  if stx.isIdent then
+    let full := stx.getId
+    let comps := full.components
+    if comps.length == 2 && comps[0]! == `args then
+      let fieldName := comps[1]!.toString
+      let ty := inferCudaType fieldName
+      -- dbg_trace s!"  [extractScalarParams] Found qualified ident: args.{fieldName} : {ty}"
+      params := params.push (fieldName, ty)
+
+  -- Case 2: Projection syntax `obj.field`
+  if stx.getKind == ``Lean.Parser.Term.proj then
+    let recv := stx.getArg 0
+    let field := stx.getArg 2
+    if recv.isIdent && recv.getId == `args && field.isIdent then
+      let fieldName := field.getId.toString
+      let ty := inferCudaType fieldName
+      -- dbg_trace s!"  [extractScalarParams] Found projection: args.{fieldName} : {ty}"
+      params := params.push (fieldName, ty)
+
+  -- Recursively process all child nodes
+  for arg in stx.getArgs do
+    params := params ++ extractScalarParamsFromSyntax arg
+
+  return params
+
 /-! ## Expression Conversion -/
 
 
@@ -56,7 +88,13 @@ partial def exprToDExpr (stx : Syntax) : MacroM Syntax := do
          (DExpr.binop BinOp.mul (DExpr.blockIdx Dim.x) (DExpr.blockDim Dim.x))
          (DExpr.threadIdx Dim.x))
     else
-      `(DExpr.var $(quote name.toString))
+      -- Check if it's a qualified identifier like `args.field`
+      let comps := name.components
+      if comps.length == 2 && comps[0]! == `args then
+        -- Strip args prefix, just use the field name
+        `(DExpr.var $(quote comps[1]!.toString))
+      else
+        `(DExpr.var $(quote name.toString))
 
   -- Numeric literals (integers)
   | `($n:num) =>
@@ -65,7 +103,11 @@ partial def exprToDExpr (stx : Syntax) : MacroM Syntax := do
 
   -- Field access (e.g., args.N)
   | `($obj:ident.$field:ident) =>
-    `(DExpr.var $(quote field.getId.toString))
+    -- If it's args.field, just use the field name (it's a parameter)
+    if obj.getId == `args then
+      `(DExpr.var $(quote field.getId.toString))
+    else
+      `(DExpr.var $(quote field.getId.toString))
 
   -- Binary operations
   | `($a:term + $b:term) => do
@@ -238,6 +280,8 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
   let mut dstmts : Array Syntax := #[]
   let mut newCtx := ctx
 
+  -- dbg_trace s!"[extractDoItems] Processing {items.size} items"
+
   for item in items do
     -- Each item is a doSeqItem, extract the doElem
     -- dbg_trace s!"  item kind: {item.getKind}"
@@ -284,9 +328,18 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
       dstmts := dstmts.push dstmt
 
     -- PATTERN: let x : GlobalArray T := ⟨args.field⟩
-    | `(doElem| let $id:ident : GlobalArray $_ := ⟨$rhs:term⟩) =>
+    | `(doElem| let $id:ident : GlobalArray $elemTy:ident := ⟨$rhs:term⟩) =>
       let varName := id.getId
       -- dbg_trace s!"✓ Matched GlobalArray pattern for {varName}, rhs kind: {rhs.raw.getKind}"
+
+      -- Parse element type
+      let dtype : DType :=
+        match elemTy.getId.toString with
+        | "Int" => DType.int
+        | "Nat" => DType.nat
+        | "Float" => DType.float
+        | "Bool" => DType.bool
+        | _ => DType.float  -- Default to float
 
       -- Check if rhs is just an ident (the field name directly)
       if rhs.raw.isIdent then
@@ -296,7 +349,8 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
         -- dbg_trace s!"✓ Tracked global array (direct ident): {fullName} → {fieldName}"
         newCtx := { newCtx with
           globalArrays := newCtx.globalArrays.push fieldName,
-          arrayMap := newCtx.arrayMap.insert (varName.toString) fieldName
+          arrayMap := newCtx.arrayMap.insert (varName.toString) fieldName,
+          arrayTypes := newCtx.arrayTypes.insert (fieldName.toString) dtype
         }
       -- Extract field name from args.field
       else if let `($argsId:ident.$field:ident) := rhs then
@@ -305,14 +359,25 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
           -- dbg_trace s!"✓ Tracked global array (projection): {fieldName}"
           newCtx := { newCtx with
             globalArrays := newCtx.globalArrays.push fieldName,
-            arrayMap := newCtx.arrayMap.insert (varName.toString) fieldName
+            arrayMap := newCtx.arrayMap.insert (varName.toString) fieldName,
+            arrayTypes := newCtx.arrayTypes.insert (fieldName.toString) dtype
           }
       -- else
         -- dbg_trace s!"✗ RHS did not match expected patterns"
 
     -- PATTERN: let x : SharedArray T := ⟨args.field⟩
-    | `(doElem| let $id:ident : SharedArray $_ := ⟨$rhs:term⟩) =>
+    | `(doElem| let $id:ident : SharedArray $elemTy:ident := ⟨$rhs:term⟩) =>
       let varName := id.getId
+
+      -- Parse element type
+      let dtype : DType :=
+        match elemTy.getId.toString with
+        | "Int" => DType.int
+        | "Nat" => DType.nat
+        | "Float" => DType.float
+        | "Bool" => DType.bool
+        | _ => DType.float  -- Default to float
+
       -- Check if rhs is just an ident (the field name directly)
       if rhs.raw.isIdent then
         let fullName := rhs.raw.getId
@@ -320,7 +385,8 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
         let fieldName := fullName.components.getLast!
         newCtx := { newCtx with
           sharedArrays := newCtx.sharedArrays.push fieldName,
-          arrayMap := newCtx.arrayMap.insert (varName.toString) fieldName
+          arrayMap := newCtx.arrayMap.insert (varName.toString) fieldName,
+          arrayTypes := newCtx.arrayTypes.insert (fieldName.toString) dtype
         }
       -- Extract field name from args.field
       else if let `($argsId:ident.$field:ident) := rhs then
@@ -328,7 +394,8 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
           let fieldName := field.getId
           newCtx := { newCtx with
             sharedArrays := newCtx.sharedArrays.push fieldName,
-            arrayMap := newCtx.arrayMap.insert (varName.toString) fieldName
+            arrayMap := newCtx.arrayMap.insert (varName.toString) fieldName,
+            arrayTypes := newCtx.arrayTypes.insert (fieldName.toString) dtype
           }
 
     -- PATTERN: let x := obj.field (check if obj is args for parameter extraction)
@@ -352,7 +419,7 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
     | `(doElem| let $id:ident ← $rhs:term) =>
       let valName := id.getId.toString
       let rhsRaw := rhs.raw
-      dbg_trace s!"✓ Extracted bind: {valName} : {rhs.raw}"
+      -- dbg_trace s!"✓ Extracted bind: {valName} : {rhs.raw}"
       -- ✅ skip any bind whose RHS contains getArgs anywhere
       -- ✅ skip any bind whose RHS is (possibly expanded) getArgs
       if containsGetArgs rhsRaw then
@@ -441,6 +508,16 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
       let mut isParam := false
 
       let rhsRaw := rhs.raw
+      -- dbg_trace s!"✓ Matched scalar assignment: {varName} := {rhsRaw.getKind}"
+
+      -- Extract parameters from RHS syntax recursively
+      let extractedParams := extractScalarParamsFromSyntax rhsRaw
+      -- dbg_trace s!"  Found {extractedParams.size} params in RHS"
+      for (paramName, paramType) in extractedParams do
+        -- Only add if not already in params list
+        if !(newCtx.params.any (fun (n, _) => n == paramName)) then
+          -- dbg_trace s!"✓ Extracted param from expression: {paramName} : {paramType}"
+          newCtx := { newCtx with params := newCtx.params.push (paramName, paramType) }
 
       -- Case 1: qualified identifier like `args.N`
       if rhsRaw.isIdent then
@@ -449,8 +526,9 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
         if comps.length == 2 && comps[0]! == `args then
           let fieldName := comps[1]!.toString
           let ty := inferCudaType fieldName
-          dbg_trace s!"✓ Extracted param (qualified ident): {fieldName} : {ty}"
-          newCtx := { newCtx with params := newCtx.params.push (fieldName, ty) }
+          -- dbg_trace s!"✓ Extracted param (qualified ident): {fieldName} : {ty}"
+          if !(newCtx.params.any (fun (n, _) => n == fieldName)) then
+            newCtx := { newCtx with params := newCtx.params.push (fieldName, ty) }
           isParam := true
 
       -- Case 2: projection syntax like `args.N` when parsed as proj
@@ -461,8 +539,9 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
             if obj.getId == `args then
               let fieldName := field.getId.toString
               let ty := inferCudaType fieldName
-              dbg_trace s!"✓ Extracted param (proj): {fieldName} : {ty}"
-              newCtx := { newCtx with params := newCtx.params.push (fieldName, ty) }
+          -- dbg_trace s!"✓ Extracted param (proj): {fieldName} : {ty}"
+              if !(newCtx.params.any (fun (n, _) => n == fieldName)) then
+                newCtx := { newCtx with params := newCtx.params.push (fieldName, ty) }
               isParam := true
           | _ => pure ()
         catch _ =>
@@ -474,6 +553,33 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
         let dstmt ← `(DStmt.assign $(quote varName) $rhsTSyntax)
         dstmts := dstmts.push dstmt
 
+    -- PATTERN: let mut x := expr (mutable variable initialization)
+    | `(doElem| let mut $id:ident := $rhs:term) =>
+      let varName := id.getId.toString
+      -- dbg_trace s!"✓ Matched let mut: {varName}"
+      let rhsExpr ← exprToDExpr rhs
+      let rhsTSyntax : TSyntax `term := ⟨rhsExpr⟩
+      let dstmt ← `(DStmt.assign $(quote varName) $rhsTSyntax)
+      dstmts := dstmts.push dstmt
+
+    -- PATTERN: let mut x : T := expr (mutable variable initialization with type annotation)
+    | `(doElem| let mut $id:ident : $_ := $rhs:term) =>
+      let varName := id.getId.toString
+      -- dbg_trace s!"✓ Matched let mut with type: {varName}"
+      let rhsExpr ← exprToDExpr rhs
+      let rhsTSyntax : TSyntax `term := ⟨rhsExpr⟩
+      let dstmt ← `(DStmt.assign $(quote varName) $rhsTSyntax)
+      dstmts := dstmts.push dstmt
+
+    -- PATTERN: x := expr (mutable variable reassignment)
+    | `(doElem| $id:ident := $rhs:term) =>
+      let varName := id.getId.toString
+      -- dbg_trace s!"✓ Matched reassignment: {varName}"
+      let rhsExpr ← exprToDExpr rhs
+      let rhsTSyntax : TSyntax `term := ⟨rhsExpr⟩
+      let dstmt ← `(DStmt.assign $(quote varName) $rhsTSyntax)
+      dstmts := dstmts.push dstmt
+
     -- PATTERN: barrier (synchronization)
     | `(doElem| barrier) =>
       let dstmt ← `(DStmt.barrier)
@@ -484,6 +590,13 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
 
     -- PATTERN: if-then-do (without else) - must come before if-then-else
     | `(doElem| if $cond:term then $thenBranch:term) =>
+      -- Extract parameters from condition
+      let condParams := extractScalarParamsFromSyntax cond.raw
+      for (paramName, paramType) in condParams do
+        if !(newCtx.params.any (fun (n, _) => n == paramName)) then
+          -- dbg_trace s!"✓ Extracted param from if condition: {paramName} : {paramType}"
+          newCtx := { newCtx with params := newCtx.params.push (paramName, paramType) }
+
       -- Extract condition
       let condDExpr ← exprToDExpr cond
       let condTSyntax : TSyntax `term := ⟨condDExpr⟩
@@ -544,6 +657,13 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
 
     -- PATTERN: if-then-else
     | `(doElem| if $cond:term then $thenBranch:term else $elseBranch:term) =>
+      -- Extract parameters from condition
+      let condParams := extractScalarParamsFromSyntax cond.raw
+      for (paramName, paramType) in condParams do
+        if !(newCtx.params.any (fun (n, _) => n == paramName)) then
+          -- dbg_trace s!"✓ Extracted param from if-else condition: {paramName} : {paramType}"
+          newCtx := { newCtx with params := newCtx.params.push (paramName, paramType) }
+
       -- Extract condition
       let condDExpr ← exprToDExpr cond
       let condTSyntax : TSyntax `term := ⟨condDExpr⟩
@@ -711,6 +831,7 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
       -- dbg_trace s!"✗ No pattern matched, checking doIf and arr.set in default case"
       -- Handle doIf (if-then and if-then-else)
       if doElem.getKind == ``Lean.Parser.Term.doIf then
+          -- dbg_trace s!"✓ Matched doIf pattern"
         -- doIf structure: doIf := "if" term "then" term ("else" term)?
         -- Args: [0]=if keyword, [1]=cond, [2]=then keyword, [3]=then branch, [4]=(else keyword), [5]=(else branch)
         let cond := doElem.getArg 1
@@ -723,6 +844,14 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
           cond.getArg 1  -- The actual condition is at index 1
         else
           cond
+
+        -- Extract parameters from condition
+        let condParams := extractScalarParamsFromSyntax actualCond
+        for (paramName, paramType) in condParams do
+          if !(newCtx.params.any (fun (n, _) => n == paramName)) then
+          -- dbg_trace s!"✓ Extracted param from doIf condition: {paramName} : {paramType}"
+            newCtx := { newCtx with params := newCtx.params.push (paramName, paramType) }
+
         let condDExpr ← exprToDExpr actualCond
         let condTSyntax : TSyntax `term := ⟨condDExpr⟩
 
@@ -745,7 +874,7 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
         else if thenBranch.getKind == ``Lean.Parser.Term.do then
           -- Then branch has explicit do keyword, recursively extract
           let thenDoSeq := thenBranch[1]
-          dbg_trace s!"  thenDoSeq kind={thenDoSeq.getKind}, numArgs={thenDoSeq.getNumArgs}"
+          -- dbg_trace s!"  thenDoSeq kind={thenDoSeq.getKind}, numArgs={thenDoSeq.getNumArgs}"
           let thenItems := if thenDoSeq.getKind == ``Lean.Parser.Term.doSeqIndent ||
                               thenDoSeq.getKind == ``Lean.Parser.Term.doSeqBracketed then
             if thenDoSeq.getNumArgs > 0 then thenDoSeq[0].getArgs else #[]
@@ -871,6 +1000,48 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
         newCtx := nestedCtx
         -- Add all nested statements to our list
         dstmts := dstmts ++ nestedStmts
+      -- Handle doFor - for loops
+      else if doElem.getKind == ``Lean.Parser.Term.doFor then
+        -- doFor structure: [0]="for", [1]=doForDecl list, [2]="do", [3]=body (doSeqIndent)
+        -- doForDecl contains: [] varName "in" range
+        let forDeclList := doElem.getArg 1
+        if forDeclList.getNumArgs > 0 then
+          let forDecl := forDeclList.getArg 0
+          -- forDecl structure: [0]=[] (empty), [1]=varName, [2]="in", [3]=range
+          let loopVarSyntax := forDecl.getArg 1
+          let loopVar := if loopVarSyntax.isIdent then loopVarSyntax.getId.toString else "i"
+          let rangeSyntax := forDecl.getArg 3
+
+          -- Extract range bounds from [lo:hi] syntax (Std.Range.«term[_:_]»)
+          -- Range structure: [0]="[", [1]=lo, [2]=":", [3]=hi, [4]="]"
+          let lo := if rangeSyntax.getNumArgs > 1 then rangeSyntax.getArg 1 else rangeSyntax
+          let hi := if rangeSyntax.getNumArgs > 3 then rangeSyntax.getArg 3 else rangeSyntax
+
+          let loDExpr ← exprToDExpr lo
+          let hiDExpr ← exprToDExpr hi
+          let loTSyntax : TSyntax `term := ⟨loDExpr⟩
+          let hiTSyntax : TSyntax `term := ⟨hiDExpr⟩
+
+          -- Extract loop body
+          let bodySeq := doElem.getArg 3
+          let bodyItems := if bodySeq.getKind == ``Lean.Parser.Term.doSeqIndent ||
+                              bodySeq.getKind == ``Lean.Parser.Term.doSeqBracketed then
+            if bodySeq.getNumArgs > 0 then bodySeq[0].getArgs else #[]
+          else #[]
+
+          let (bodyStmts, bodyCtx) ← extractDoItems bodyItems newCtx
+          newCtx := bodyCtx
+
+          -- Build sequence of body statements
+          let mut bodyStmt ← `(DStmt.skip)
+          for stmt in bodyStmts.reverse do
+            let stmtTSyntax : TSyntax `term := ⟨stmt⟩
+            bodyStmt ← `(DStmt.seq $stmtTSyntax $bodyStmt)
+
+          let bodyStmtTSyntax : TSyntax `term := ⟨bodyStmt⟩
+          let dstmt ← `(DStmt.for $(quote loopVar) $loTSyntax $hiTSyntax $bodyStmtTSyntax)
+          dstmts := dstmts.push dstmt
+
       else if doElem.getKind == ``Lean.Parser.Term.doExpr then
         let expr := doElem.getArg 0
         -- Check if it's arr.set idx val
@@ -972,12 +1143,30 @@ macro "device_kernel " name:ident sig:optDeclSig val:declVal : command => do
   -- Build arrays from finalCtx
   let mut globalArraySyntax : Array (TSyntax `term) := #[]
   for arrName in finalCtx.globalArrays do
-    let s ← `({ name := $(quote arrName.toString), ty := DType.array DType.float, space := MemorySpace.global })
+    -- Get the tracked element type, defaulting to Float if not found
+    let elemType := finalCtx.arrayTypes.getD (arrName.toString) DType.float
+    let elemTypeSyntax : TSyntax `term ←
+      match elemType with
+      | DType.int => `(DType.int)
+      | DType.nat => `(DType.nat)
+      | DType.float => `(DType.float)
+      | DType.bool => `(DType.bool)
+      | _ => `(DType.float)
+    let s ← `({ name := $(quote arrName.toString), ty := DType.array $elemTypeSyntax, space := MemorySpace.global })
     globalArraySyntax := globalArraySyntax.push s
 
   let mut sharedArraySyntax : Array (TSyntax `term) := #[]
   for arrName in finalCtx.sharedArrays do
-    let s ← `({ name := $(quote arrName.toString), ty := DType.array DType.float, space := MemorySpace.shared })
+    -- Get the tracked element type, defaulting to Float if not found
+    let elemType := finalCtx.arrayTypes.getD (arrName.toString) DType.float
+    let elemTypeSyntax : TSyntax `term ←
+      match elemType with
+      | DType.int => `(DType.int)
+      | DType.nat => `(DType.nat)
+      | DType.float => `(DType.float)
+      | DType.bool => `(DType.bool)
+      | _ => `(DType.float)
+    let s ← `({ name := $(quote arrName.toString), ty := DType.array $elemTypeSyntax, space := MemorySpace.shared })
     sharedArraySyntax := sharedArraySyntax.push s
 
   -- Build the body by sequencing statements

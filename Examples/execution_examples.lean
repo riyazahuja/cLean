@@ -229,7 +229,7 @@ def exclusiveScanCPU (input : Array Int) : IO (Array Int) := do
     pure <| out.take (n+1)
 
 
-/-- Exclusive scan implementation TODO!!!-/
+
 def exclusiveScanGPU (input : Array Int) : IO (Array Int) := do
   let n := input.size
   if n = 0 then
@@ -249,7 +249,10 @@ def exclusiveScanGPU (input : Array Int) : IO (Array Int) := do
       let twod1 := twod * 2
       let numBlocks := (roundedLength / twod1 + numThreadsPerBlock - 1) / numThreadsPerBlock
 
-      let scalarParams : Array Int := #[roundedLength, twod1, twod]
+      -- IMPORTANT: Scalar params must match the order in the generated CUDA kernel!
+      -- The kernel signature is: upsweepKernel(int twod1, int length, int twod, int* data)
+      -- Parameters are discovered in the order they appear in the kernel body.
+      let scalarParams : Array Int := #[twod1, roundedLength, twod]
       let arrays := [
         (`data, upsweepData)
       ]
@@ -257,13 +260,15 @@ def exclusiveScanGPU (input : Array Int) : IO (Array Int) := do
       let jsonInput := buildLauncherInput scalarParams arrays
       let grid :Dim3 := ⟨numBlocks, 1, 1⟩
       let block :Dim3 := ⟨numThreadsPerBlock, 1, 1⟩
-
+      IO.println s!"Launching Upsweep Kernel with grid={grid.x}, block={block.x}, twod={twod}, twod1={twod1}"
+      IO.println s!"Input Data: {jsonInput}"
       let launcherArgs := #[
         cached.ptxPath.toString,
         upsweepKernelIR.name,
         toString grid.x, toString grid.y, toString grid.z,
         toString block.x, toString block.y, toString block.z,
       ]
+      IO.println s!"Launcher Args: {launcherArgs}"
 
       let child ← IO.Process.spawn {
         cmd := "./gpu_launcher"
@@ -288,6 +293,7 @@ def exclusiveScanGPU (input : Array Int) : IO (Array Int) := do
       | Except.error err =>
         throw <| IO.userError s!"❌ JSON Parse Error: {err}"
       | Except.ok json =>
+        -- The auto-generated FromJson expects {"results":{"data":[...]}} format
         match @Lean.fromJson? ScanArgsResponse _ json with
         | Except.error err =>
           throw <| IO.userError s!"❌ JSON Decode Error: {err}"
@@ -295,10 +301,7 @@ def exclusiveScanGPU (input : Array Int) : IO (Array Int) := do
           IO.println "✅ Successfully parsed JSON into TestResponse"
           IO.println s!"\nParsed Results:"
           IO.println s!"  Data: {response.data}"
-          /-
-          TODO FIX WORKAROUND OF FLOAT PARSING
-          -/
-          upsweepData := response.data.map (fun x => x.toInt64.toInt)
+          upsweepData := response.data
           twod := twod * 2
 
     let zeroedOut := upsweepData.set! (roundedLength - 1) 0
@@ -311,7 +314,10 @@ def exclusiveScanGPU (input : Array Int) : IO (Array Int) := do
       let twod1 := twod * 2
       let numBlocks := (roundedLength / twod1 + numThreadsPerBlock - 1) / numThreadsPerBlock
 
-      let scalarParams : Array Int := #[roundedLength, twod1, twod]
+      -- IMPORTANT: Scalar params must match the order in the generated CUDA kernel!
+      -- The kernel signature is: downsweepKernel(int twod1, int twod, int length, int* data)
+      -- Parameters are discovered in the order they appear in the kernel body.
+      let scalarParams : Array Int := #[twod1, twod, roundedLength]
       let arrays := [
         (`data, downsweepData)
       ]
@@ -350,6 +356,7 @@ def exclusiveScanGPU (input : Array Int) : IO (Array Int) := do
       | Except.error err =>
         throw <| IO.userError s!"❌ JSON Parse Error: {err}"
       | Except.ok json =>
+        -- The auto-generated FromJson expects {"results":{"data":[...]}} format
         match @Lean.fromJson? ScanArgsResponse _ json with
         | Except.error err =>
           throw <| IO.userError s!"❌ JSON Decode Error: {err}"
@@ -357,15 +364,160 @@ def exclusiveScanGPU (input : Array Int) : IO (Array Int) := do
           IO.println "✅ Successfully parsed JSON into TestResponse"
           IO.println s!"\nParsed Results:"
           IO.println s!"  Data: {response.data}"
-          downsweepData := response.data.map (fun x => x.toInt64.toInt)
+          downsweepData := response.data
           twod := twod / 2
 
     pure <| downsweepData.take (n+1)
 
-
 #eval do exclusiveScanCPU #[1,2,3,4,5,6,7,8]
 #eval do exclusiveScanGPU #[1,2,3,4,5,6,7,8]
 
-
-
 end ExclusiveScan
+
+
+namespace BasicMatMul
+
+
+kernelArgs MatMulArgs(N: Nat)
+  global[A B C: Array Float]
+
+device_kernel matmulKernel : KernelM MatMulArgs Unit := do
+  let args ← getArgs
+  let N := args.N
+  let A : GlobalArray Float := ⟨args.A⟩
+  let B : GlobalArray Float := ⟨args.B⟩
+  let C : GlobalArray Float := ⟨args.C⟩
+
+  let row ← globalIdxX
+  let col ← globalIdxY
+
+  if row < N && col < N then
+    let mut result : Float := 0.0
+    for k in [0:N] do
+      let aVal ← A.get (row * N + k)
+      let bVal ← B.get (k * N + col)
+      result := result + aVal * bVal
+    C.set (row * N + col) result
+
+def matmul (n : Nat)
+    (A B : Array (Array Float)) : IO (Array (Array Float)) := do
+  let flattened_A  := A.flatMap id
+  let flattened_B  := B.flatMap id
+  IO.println s!"Flattened A: {flattened_A}"
+  IO.println s!"Flattened B: {flattened_B}"
+
+  let initState := mkKernelState [
+    globalFloatArray `A flattened_A,
+    globalFloatArray `B flattened_B,
+    globalFloatArray `C (Array.replicate (n*n) 0.0)
+  ]
+
+  let threadsPerBlock := 32
+  let numBlocks := (n + threadsPerBlock - 1) / threadsPerBlock
+
+  let finalState ←
+    runKernelCPU
+      ⟨numBlocks, numBlocks, 1⟩
+      ⟨threadsPerBlock, threadsPerBlock, 1⟩
+      ⟨n, `A, `B, `C⟩
+      initState
+      matmulKernel
+
+  let some (KernelValue.arrayFloat out) := finalState.globals.get? `C
+    | throw <| IO.userError "Result missing"
+  if out.size = n * n then
+    for i in [0:n] do
+      for j in [0:n] do
+        let val := out[i * n + j]!
+        IO.println s!"C[{i},{j}] = {val}"
+
+    let result := Array.ofFn fun (i : Fin n) =>
+      Array.ofFn fun (j : Fin n) => out[i.val * n + j.val]!
+    pure result
+  else
+    throw <| IO.userError s!"Size mismatch: {out.size} ≠ {n*n}"
+
+
+  def matmulGPU (n : Nat)
+    (A B : Array (Array Float)) : IO (Array (Array Float)) := do
+    let flattened_A := A.flatMap id
+    let flattened_B := B.flatMap id
+    IO.println s!"Flattened A: {flattened_A}"
+    IO.println s!"Flattened B: {flattened_B}"
+
+    let cached ← compileKernelToPTX matmulKernelIR
+
+    -- Use typed scalars: N is int
+    let scalarParams := #[ScalarValue.int n]
+    let arrays := [
+    (`A, flattened_A),
+    (`B, flattened_B),
+    (`C, Array.replicate (n*n) 0.0)
+    ]
+    let jsonInput := buildLauncherInputTyped scalarParams arrays
+
+    let threadsPerBlock := 32
+    let numBlocks := (n + threadsPerBlock - 1) / threadsPerBlock
+    let grid : Dim3 := ⟨numBlocks, numBlocks, 1⟩
+    let block : Dim3 := ⟨threadsPerBlock, threadsPerBlock, 1⟩
+
+    let launcherArgs := #[
+    cached.ptxPath.toString,
+    matmulKernelIR.name,
+    toString grid.x, toString grid.y, toString grid.z,
+    toString block.x, toString block.y, toString block.z
+    ]
+
+    let child ← IO.Process.spawn {
+    cmd := "./gpu_launcher"
+    args := launcherArgs
+    stdin := .piped
+    stdout := .piped
+    stderr := .piped
+    }
+    let stdin := child.stdin
+    stdin.putStr jsonInput
+    stdin.putStr "\n"
+    stdin.flush
+
+    let stderrContent ← child.stderr.readToEnd
+    let stdoutContent ← child.stdout.readToEnd
+    let exitCode ← child.wait
+
+
+    if exitCode == 0 then
+    IO.println "\n✅ SUCCESS: GPU kernel executed successfully!"
+    IO.println stdoutContent
+    match Lean.Json.parse stdoutContent with
+    | Except.error err =>
+      IO.println s!"❌ JSON Parse Error: {err}"
+      return #[]
+    | Except.ok json =>
+      match @Lean.fromJson? MatMulArgsResponse _ json with
+      | Except.error err =>
+      IO.println s!"❌ JSON Decode Error: {err}"
+      return #[]
+      | Except.ok response =>
+      IO.println "✅ Successfully parsed JSON into MatMulArgsResponse"
+      IO.println s!"\nParsed Results:"
+      IO.println s!"  C: {response.C}"
+      let out := response.C
+      if out.size = n * n then
+        let result := Array.ofFn fun (i : Fin n) =>
+        Array.ofFn fun (j : Fin n) => out[i.val * n + j.val]!
+        return result
+      else
+        throw <| IO.userError s!"Size mismatch: {out.size} ≠ {n*n}"
+    else
+    IO.println "\n❌ FAILURE: GPU execution failed"
+    IO.println s!"Stderr: {stderrContent}"
+    IO.println s!"Stdout: {stdoutContent}"
+    return #[]
+
+#eval do matmul 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[1.0,0.0],#[0.0,1.0]]
+#eval do matmul 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[5.0,6.0],#[7.0,8.0]]
+
+#eval do matmulGPU 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[1.0,0.0],#[0.0,1.0]]
+#eval do matmulGPU 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[5.0,6.0],#[7.0,8.0]]
+
+end BasicMatMul

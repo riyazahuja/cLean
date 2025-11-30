@@ -701,23 +701,28 @@ open Lean Elab Command Parser in
   | Except.error err => throwError "Failed to parse structure: {err}"
 
   -- Generate response structure for global arrays only
-  -- Response contains Array Float for each global array
+  -- Response contains the actual array types from the global declarations
   let responseName := mkIdent (name.getId.appendAfter "Response")
 
-  -- Collect global array field names
+  -- Collect global array field names with their types
   let mut globalFields := #[]
   for globalDecl in globalDecls.getArgs do
     if globalDecl.getNumArgs >= 5 then
       let ids := globalDecl[2]
+      let typeSyntax := globalDecl[4]  -- The type after the colon
       let idArray := if ids.isOfKind `ident then #[ids] else ids.getArgs
       for id in idArray do
         if !id.isOfKind nullKind then
-          globalFields := globalFields.push id
+          globalFields := globalFields.push (id, typeSyntax)
 
   -- Generate response structure
   let mut responseStr := s!"structure {responseName.getId} where\n"
-  for id in globalFields do
-    responseStr := responseStr ++ s!"  {id.getId} : Array Float\n"
+  for (id, typeSyntax) in globalFields do
+    -- Extract element type from "Array T" syntax
+    let typeStr ← liftCoreM <| do
+      let fmt ← PrettyPrinter.ppCategory `term typeSyntax
+      pure (Format.pretty fmt)
+    responseStr := responseStr ++ s!"  {id.getId} : {typeStr}\n"
   responseStr := responseStr ++ "  deriving Repr"
 
   match runParserCategory (← getEnv) `command responseStr with
@@ -731,15 +736,18 @@ open Lean Elab Command Parser in
   fromJsonStr := fromJsonStr ++ "    let resultsObj ← json.getObjVal? \"results\"\n"
 
   -- Extract each global array field from JSON
-  for id in globalFields do
+  for (id, typeSyntax) in globalFields do
     let fieldName := id.getId.toString
+    let typeStr ← liftCoreM <| do
+      let fmt ← PrettyPrinter.ppCategory `term typeSyntax
+      pure (Format.pretty fmt)
     fromJsonStr := fromJsonStr ++ s!"    let {id.getId}Json ← resultsObj.getObjVal? \"{fieldName}\"\n"
-    fromJsonStr := fromJsonStr ++ s!"    let {id.getId} : Array Float ← Lean.fromJson? {id.getId}Json\n"
+    fromJsonStr := fromJsonStr ++ s!"    let {id.getId} : {typeStr} ← Lean.fromJson? {id.getId}Json\n"
 
   -- Construct response object
   fromJsonStr := fromJsonStr ++ "    pure { "
   for i in [:globalFields.size] do
-    let id := globalFields[i]!
+    let (id, _) := globalFields[i]!
     fromJsonStr := fromJsonStr ++ s!"{id.getId} := {id.getId}"
     if i < globalFields.size - 1 then
       fromJsonStr := fromJsonStr ++ ", "

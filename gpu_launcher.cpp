@@ -19,11 +19,25 @@
 #include <string>
 #include <sstream>
 #include <cstdlib>
+#include <variant>
 
-// Minimal JSON parsing (just for simple float arrays and scalars)
+// Scalar can be either int or float
+struct ScalarParam {
+    std::variant<int, float> value;
+    bool isInt;
+};
+
+// Array can be either int or float
+struct ArrayParam {
+    std::string name;
+    std::variant<std::vector<int>, std::vector<float>> data;
+    bool isInt;
+};
+
+// JSON parsing results
 struct LaunchParams {
-    std::vector<float> scalarParams;
-    std::vector<std::pair<std::string, std::vector<float>>> arrays;
+    std::vector<ScalarParam> scalarParams;
+    std::vector<ArrayParam> arrays;
 };
 
 // CUDA error checking
@@ -94,6 +108,59 @@ std::vector<Token> tokenize(const std::string& input) {
     return tokens;
 }
 
+// Check if a number string represents an integer (no decimal point, no exponent)
+bool isIntegerString(const std::string& s) {
+    for (char c : s) {
+        if (c == '.' || c == 'e' || c == 'E') return false;
+    }
+    return true;
+}
+
+// Parse a scalar object with explicit type: {"type":"int","value":2}
+ScalarParam parseScalarObject(std::vector<Token>& tokens, size_t& current) {
+    ScalarParam sp;
+    sp.isInt = false; // default to float
+    
+    auto expect = [&](TokenType type) {
+        if (current < tokens.size() && tokens[current].type == type) {
+            current++;
+            return true;
+        }
+        return false;
+    };
+    auto consume = [&]() { if (current < tokens.size()) current++; };
+    
+    expect(TOKEN_LBRACE);
+    std::string typeStr = "float";
+    std::string valueStr = "0";
+    
+    while (current < tokens.size() && tokens[current].type != TOKEN_RBRACE) {
+        if (tokens[current].type == TOKEN_STRING) {
+            std::string key = tokens[current].value;
+            consume();
+            expect(TOKEN_COLON);
+            if (key == "type" && tokens[current].type == TOKEN_STRING) {
+                typeStr = tokens[current].value;
+                consume();
+            } else if (key == "value" && tokens[current].type == TOKEN_NUMBER) {
+                valueStr = tokens[current].value;
+                consume();
+            }
+        }
+        if (tokens[current].type == TOKEN_COMMA) consume();
+    }
+    expect(TOKEN_RBRACE);
+    
+    if (typeStr == "int") {
+        sp.isInt = true;
+        sp.value = std::stoi(valueStr);
+    } else {
+        sp.isInt = false;
+        sp.value = std::stof(valueStr);
+    }
+    return sp;
+}
+
 // Robust JSON Parser
 LaunchParams parseInput(const std::string& input) {
     LaunchParams params;
@@ -123,8 +190,23 @@ LaunchParams parseInput(const std::string& input) {
         if (key == "scalars") {
             expect(TOKEN_LBRACKET);
             while (current < tokens.size() && tokens[current].type != TOKEN_RBRACKET) {
-                if (tokens[current].type == TOKEN_NUMBER) {
-                    params.scalarParams.push_back(std::stof(tokens[current].value));
+                // Check if scalar is an object with type info or a plain number
+                if (tokens[current].type == TOKEN_LBRACE) {
+                    // New format: {"type":"int","value":2}
+                    ScalarParam sp = parseScalarObject(tokens, current);
+                    params.scalarParams.push_back(sp);
+                } else if (tokens[current].type == TOKEN_NUMBER) {
+                    // Legacy format: plain number, infer type from format
+                    const std::string& numStr = tokens[current].value;
+                    ScalarParam sp;
+                    if (isIntegerString(numStr)) {
+                        sp.value = std::stoi(numStr);
+                        sp.isInt = true;
+                    } else {
+                        sp.value = std::stof(numStr);
+                        sp.isInt = false;
+                    }
+                    params.scalarParams.push_back(sp);
                     consume();
                 }
                 if (tokens[current].type == TOKEN_COMMA) consume();
@@ -137,25 +219,77 @@ LaunchParams parseInput(const std::string& input) {
                     std::string arrName = tokens[current].value;
                     consume(); // name
                     expect(TOKEN_COLON);
+                    
+                    // Check if array has type info: {"type":"float","data":[...]}
+                    std::string arrType = "float"; // default
+                    bool hasTypeInfo = (tokens[current].type == TOKEN_LBRACE);
+                    
+                    if (hasTypeInfo) {
+                        expect(TOKEN_LBRACE);
+                        while (current < tokens.size() && tokens[current].type != TOKEN_RBRACE) {
+                            if (tokens[current].type == TOKEN_STRING) {
+                                std::string arrKey = tokens[current].value;
+                                consume();
+                                expect(TOKEN_COLON);
+                                if (arrKey == "type" && tokens[current].type == TOKEN_STRING) {
+                                    arrType = tokens[current].value;
+                                    consume();
+                                } else if (arrKey == "data") {
+                                    // Will parse the array below
+                                    break;
+                                }
+                            }
+                            if (tokens[current].type == TOKEN_COMMA) consume();
+                        }
+                    }
+                    
                     expect(TOKEN_LBRACKET);
-                    std::vector<float> data;
+                    
+                    // Collect all number strings
+                    std::vector<std::string> numStrings;
+                    // For explicit type: use the provided type; for inferred: start with true and set false if any float found
+                    bool allInts = hasTypeInfo ? (arrType == "int") : true;
                     while (current < tokens.size() && tokens[current].type != TOKEN_RBRACKET) {
                         if (tokens[current].type == TOKEN_NUMBER) {
-                            data.push_back(std::stof(tokens[current].value));
+                            numStrings.push_back(tokens[current].value);
+                            // Only infer from format if no explicit type given
+                            if (!hasTypeInfo && !isIntegerString(tokens[current].value)) {
+                                allInts = false;
+                            }
                             consume();
                         }
                         if (tokens[current].type == TOKEN_COMMA) consume();
                     }
                     expect(TOKEN_RBRACKET);
-                    params.arrays.push_back({arrName, data});
+                    
+                    // Close the type info object if present
+                    if (hasTypeInfo) {
+                        if (tokens[current].type == TOKEN_COMMA) consume();
+                        expect(TOKEN_RBRACE);
+                    }
+                    
+                    ArrayParam ap;
+                    ap.name = arrName;
+                    ap.isInt = allInts;
+                    if (allInts) {
+                        std::vector<int> intData;
+                        for (const auto& ns : numStrings) {
+                            intData.push_back(std::stoi(ns));
+                        }
+                        ap.data = intData;
+                    } else {
+                        std::vector<float> floatData;
+                        for (const auto& ns : numStrings) {
+                            floatData.push_back(std::stof(ns));
+                        }
+                        ap.data = floatData;
+                    }
+                    params.arrays.push_back(ap);
                 }
                 if (tokens[current].type == TOKEN_COMMA) consume();
             }
             expect(TOKEN_RBRACE);
         } else {
-            // Skip unknown value
-            // Simple skip logic: if {, skip until matching }. if [, skip until matching ]. else consume one.
-            // For now, just assume simple structure and consume one token
             consume();
         }
 
@@ -208,6 +342,16 @@ int main(int argc, char** argv) {
     std::cerr << "[Launcher] Scalars: " << params.scalarParams.size() << std::endl;
     std::cerr << "[Launcher] Arrays: " << params.arrays.size() << std::endl;
 
+    // Debug: print scalar types
+    for (size_t i = 0; i < params.scalarParams.size(); ++i) {
+        const auto& sp = params.scalarParams[i];
+        if (sp.isInt) {
+            std::cerr << "[Launcher] Scalar[" << i << "]: int = " << std::get<int>(sp.value) << std::endl;
+        } else {
+            std::cerr << "[Launcher] Scalar[" << i << "]: float = " << std::get<float>(sp.value) << std::endl;
+        }
+    }
+
     // Initialize CUDA driver API
     CU_CHECK(cuInit(0));
 
@@ -228,20 +372,56 @@ int main(int argc, char** argv) {
 
     // Allocate device memory for arrays
     std::vector<CUdeviceptr> deviceArrays;
+    std::vector<size_t> arraySizes;  // Track sizes for copy-back
+    std::vector<bool> arrayIsInt;    // Track types for copy-back
+    
     for (const auto& arr : params.arrays) {
         CUdeviceptr devPtr;
-        size_t sizeBytes = arr.second.size() * sizeof(float);
-        CU_CHECK(cuMemAlloc(&devPtr, sizeBytes));
-        CU_CHECK(cuMemcpyHtoD(devPtr, arr.second.data(), sizeBytes));
+        size_t numElements;
+        size_t sizeBytes;
+        
+        if (arr.isInt) {
+            const auto& intData = std::get<std::vector<int>>(arr.data);
+            numElements = intData.size();
+            sizeBytes = numElements * sizeof(int);
+            CU_CHECK(cuMemAlloc(&devPtr, sizeBytes));
+            CU_CHECK(cuMemcpyHtoD(devPtr, intData.data(), sizeBytes));
+        } else {
+            const auto& floatData = std::get<std::vector<float>>(arr.data);
+            numElements = floatData.size();
+            sizeBytes = numElements * sizeof(float);
+            CU_CHECK(cuMemAlloc(&devPtr, sizeBytes));
+            CU_CHECK(cuMemcpyHtoD(devPtr, floatData.data(), sizeBytes));
+        }
+        
         deviceArrays.push_back(devPtr);
+        arraySizes.push_back(numElements);
+        arrayIsInt.push_back(arr.isInt);
     }
 
     // Prepare kernel arguments
+    // We need stable storage for scalar values since we pass pointers
+    std::vector<int> intScalars;
+    std::vector<float> floatScalars;
     std::vector<void*> kernelArgs;
 
-    // Add scalar parameters
-    for (float& scalar : params.scalarParams) {
-        kernelArgs.push_back(&scalar);
+    // First, allocate storage for all scalars
+    for (const auto& sp : params.scalarParams) {
+        if (sp.isInt) {
+            intScalars.push_back(std::get<int>(sp.value));
+        } else {
+            floatScalars.push_back(std::get<float>(sp.value));
+        }
+    }
+
+    // Now build kernel args with stable pointers
+    size_t intIdx = 0, floatIdx = 0;
+    for (const auto& sp : params.scalarParams) {
+        if (sp.isInt) {
+            kernelArgs.push_back(&intScalars[intIdx++]);
+        } else {
+            kernelArgs.push_back(&floatScalars[floatIdx++]);
+        }
     }
 
     // Add array pointers
@@ -268,18 +448,30 @@ int main(int argc, char** argv) {
     bool first = true;
     for (size_t i = 0; i < params.arrays.size(); ++i) {
         const auto& arr = params.arrays[i];
-        std::vector<float> result(arr.second.size());
-
-        size_t sizeBytes = result.size() * sizeof(float);
-        CU_CHECK(cuMemcpyDtoH(result.data(), deviceArrays[i], sizeBytes));
 
         if (!first) std::cout << ",";
         first = false;
 
-        std::cout << "\"" << arr.first << "\":[";
-        for (size_t j = 0; j < result.size(); ++j) {
-            if (j > 0) std::cout << ",";
-            std::cout << result[j];
+        std::cout << "\"" << arr.name << "\":[";
+        
+        if (arrayIsInt[i]) {
+            std::vector<int> result(arraySizes[i]);
+            size_t sizeBytes = result.size() * sizeof(int);
+            CU_CHECK(cuMemcpyDtoH(result.data(), deviceArrays[i], sizeBytes));
+            
+            for (size_t j = 0; j < result.size(); ++j) {
+                if (j > 0) std::cout << ",";
+                std::cout << result[j];
+            }
+        } else {
+            std::vector<float> result(arraySizes[i]);
+            size_t sizeBytes = result.size() * sizeof(float);
+            CU_CHECK(cuMemcpyDtoH(result.data(), deviceArrays[i], sizeBytes));
+            
+            for (size_t j = 0; j < result.size(); ++j) {
+                if (j > 0) std::cout << ",";
+                std::cout << result[j];
+            }
         }
         std::cout << "]";
     }

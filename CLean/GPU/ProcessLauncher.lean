@@ -60,7 +60,26 @@ def floatArrayToJson {α : Type} [ToString α] (arr : Array α) : String :=
 def namedArrayToJson {α : Type} [ToString α] (name : String) (arr : Array α) : String :=
   s!"\"{name}\":{floatArrayToJson arr}"
 
-/-- Build JSON payload for launcher -/
+/-- Scalar parameter with type info -/
+inductive ScalarValue where
+  | int : Int → ScalarValue
+  | float : Float → ScalarValue
+  deriving Repr
+
+/-- Convert ScalarValue to JSON with type tag -/
+def scalarToJson : ScalarValue → String
+  | .int i => "{\"type\":\"int\",\"value\":" ++ toString i ++ "}"
+  | .float f => "{\"type\":\"float\",\"value\":" ++ toString f ++ "}"
+
+/-- Build JSON payload for launcher with explicit type info -/
+def buildLauncherInputTyped (scalarParams : Array ScalarValue) (arrays : List (Name × Array Float)) : String :=
+  let scalarsJson := "[" ++ String.intercalate "," (scalarParams.map scalarToJson |>.toList) ++ "]"
+  let arraysJson := String.intercalate "," (arrays.map fun (name, arr) =>
+    -- Arrays are always float for now, with explicit type tag
+    "\"" ++ toString name ++ "\":{\"type\":\"float\",\"data\":" ++ floatArrayToJson arr ++ "}")
+  "{\"scalars\":" ++ scalarsJson ++ ",\"arrays\":{" ++ arraysJson ++ "}}"
+
+/-- Build JSON payload for launcher (legacy, infers types from format) -/
 def buildLauncherInput {α : Type} [ToString α] (scalarParams : Array α) (arrays : List (Name × Array α)) : String :=
   let scalarsJson := floatArrayToJson scalarParams
   let arraysJson := String.intercalate "," (arrays.map fun (name, arr) =>
