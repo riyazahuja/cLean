@@ -21,9 +21,6 @@ namespace Saxpy
 kernelArgs saxpyArgs(N: Nat, alpha: Float)
   global[x y r: Array Float]
 
-#check saxpyArgs
-#print saxpyArgs
-
 device_kernel saxpyKernel : KernelM saxpyArgs Unit := do
   let args ← getArgs
   let N := args.N
@@ -39,24 +36,26 @@ device_kernel saxpyKernel : KernelM saxpyArgs Unit := do
     r.set i (alpha * xi + yi)
 
 
-def saxpyConfig : Dim3 := ⟨512, 1, 1⟩  -- 512 threads per block
-def saxpyGrid : Dim3 := ⟨1, 1, 1⟩      -- 1 block
+def saxpySpec (config grid: Dim3): KernelSpec :=
+  deviceIRToKernelSpec saxpyKernelIR config grid
 
-def saxpySpec : KernelSpec :=
-  deviceIRToKernelSpec saxpyKernelIR saxpyConfig saxpyGrid
-
-theorem saxpy_safe_direct : KernelSafe saxpySpec := by
+theorem saxpy_safe : ∀ (config grid : Dim3), KernelSafe (saxpySpec config grid) := by
+  intro config grid
   constructor
   · unfold RaceFree
     intro tid1 tid2 h_distinct a1 a2 ha1 ha2
-    simp [saxpySpec, deviceIRToKernelSpec, saxpyKernelIR, extractFromStmt, extractReadsFromExpr, dexprToAddressPattern, DistinctThreads, saxpyConfig, List.lookup, HasRace, SeparatedByBarrier] at *
+    simp [saxpySpec, deviceIRToKernelSpec, saxpyKernelIR, extractFromStmt, extractReadsFromExpr, dexprToAddressPattern, DistinctThreads, List.lookup, HasRace, SeparatedByBarrier, getArrayName, AccessExtractor.getArrayLocation] at *
     intro h_race
     rcases h_distinct with ⟨_,_,h_neq⟩
-    rcases ha1 with ha1 | ha1 <;>
-    rcases ha2 with ha2 | ha2 <;>
-    simp [ha1, ha2,AddressPattern.eval] at h_race <;>
+    rcases ha1 with ha1 | ha1 | ha1 <;>
+    rcases ha2 with ha2 | ha2 | ha2 <;>
+    simp_all [AddressPattern.eval, SymValue.isNonZero]
     exact h_neq h_race
   · unfold BarrierUniform; intros; trivial
+
+
+
+
 
 def saxpyCPU (n : Nat)
     (α : Float)
@@ -117,35 +116,18 @@ def saxpyGPU (n : Nat)
   stdin.putStr "\n"
   stdin.flush
 
-  let stderrContent ← child.stderr.readToEnd
   let stdoutContent ← child.stdout.readToEnd
   let exitCode ← child.wait
 
-  if !stderrContent.trim.isEmpty then
-    IO.println "\nDiagnostics:"
-    IO.println stderrContent
-
   if exitCode == 0 then
-    IO.println "\n✅ SUCCESS: GPU kernel executed successfully!"
-    IO.println stdoutContent
     match Lean.Json.parse stdoutContent with
-    | Except.error err =>
-      IO.println s!"❌ JSON Parse Error: {err}"
+    | Except.error err => throw <| IO.userError s!"JSON Parse Error: {err}"
     | Except.ok json =>
       match @Lean.fromJson? saxpyArgsResponse _ json with
-      | Except.error err =>
-        IO.println s!"❌ JSON Decode Error: {err}"
+      | Except.error err => throw <| IO.userError s!"JSON Decode Error: {err}"
       | Except.ok response =>
-        IO.println "✅ Successfully parsed JSON into TestResponse"
-        IO.println s!"\nParsed Results:"
-        IO.println s!"  X: {response.x}"
-        IO.println s!"  Y: {response.y}"
-        IO.println s!"  R: {response.r}"
         return response.r
-  else
-    IO.println "\n❌ FAILURE: GPU execution failed"
-
-  return #[]
+  throw <| IO.userError s!"GPU execution failed"
 
 
 #eval do saxpyCPU 2 8.0 #[1.0, 1.0] #[2.0, 2.0]
@@ -175,8 +157,6 @@ def nextPow2 (n : Nat) : Nat :=
 kernelArgs ScanArgs(length: Int, twod1: Int, twod: Int)
   global[data: Array Int]
 
-#print ScanArgsResponse
-
 device_kernel upsweepKernel : KernelM ScanArgs Unit := do
   let args ← getArgs
   let index ← globalIdxX
@@ -203,56 +183,36 @@ device_kernel downsweepKernel : KernelM ScanArgs Unit := do
     data.set idx val
     data.set idx1 (val + t)
 
-def scanConfig : Dim3 := ⟨256, 1, 1⟩  -- 256 threads per block
-def scanGrid : Dim3 := ⟨1, 1, 1⟩      -- 1 block
+def upsweepConfig (config grid : Dim3) : KernelSpec :=
+  deviceIRToKernelSpec upsweepKernelIR config grid
 
-def upsweepConfig : KernelSpec :=
-  deviceIRToKernelSpec upsweepKernelIR scanConfig scanGrid
-
-/-- Upsweep kernel is race-free because:
-    1. Access patterns are symLinear with non-zero scale (twod1 parameter)
-    2. Distinct threads access distinct array indices when scale ≠ 0
-    3. The pattern tid * twod1 + offset is injective for twod1 > 0
-
-    The extracted patterns are:
-    - Read idx1: symLinear(twod1, twod1-1) = twod1*tid + twod1 - 1
-    - Read idx:  symLinear(twod1, twod-1)  = twod1*tid + twod - 1
-    - Write idx1: symLinear(twod1, twod1-1) = twod1*tid + twod1 - 1
-
-    For distinct threads tid1 ≠ tid2 with twod1 > 0:
-    - twod1*tid1 + c ≠ twod1*tid2 + c  (since twod1*(tid1-tid2) ≠ 0)
-    So no two distinct threads access the same location. -/
-theorem upsweep_safe_direct : KernelSafe upsweepConfig := by
+theorem upsweep_safe : ∀ (config grid : Dim3), KernelSafe (deviceIRToKernelSpec upsweepKernelIR config grid) := by
+  intro config grid
   constructor
   · unfold RaceFree
     intro tid1 tid2 h_distinct a1 a2 ha1 ha2
-    simp [upsweepConfig, deviceIRToKernelSpec, upsweepKernelIR, extractFromStmt, scanConfig, scanGrid, extractReadsFromExpr, dexprToAddressPattern, List.lookup, HasRace, SeparatedByBarrier, AddressPattern.couldCollide] at *
+    simp [upsweepConfig, deviceIRToKernelSpec, upsweepKernelIR, extractFromStmt, extractReadsFromExpr, dexprToAddressPattern, List.lookup, HasRace, SeparatedByBarrier, AddressPattern.couldCollide, getArrayName, AccessExtractor.getArrayLocation] at *
     intro h_race
     rcases h_distinct with ⟨_,_,h_neq⟩
     rcases ha1 with ha1 | ha1 | ha1 <;>
     rcases ha2 with ha2 | ha2 | ha2 <;>
-    simp [ha1, ha2, AddressPattern.eval] at h_race <;>
-    apply h_neq <;>
-    apply h_race <;>
-    simp [SymValue.isNonZero]
+    simp_all [AddressPattern.eval, SymValue.isNonZero]
   · unfold BarrierUniform; intros; trivial
 
-def downsweepConfig : KernelSpec :=
-  deviceIRToKernelSpec downsweepKernelIR scanConfig scanGrid
+def downsweepConfig (config grid : Dim3) : KernelSpec :=
+  deviceIRToKernelSpec downsweepKernelIR config grid
 
-theorem downsweep_safe_direct : KernelSafe downsweepConfig := by
+theorem downsweep_safe : ∀ (config grid : Dim3), KernelSafe (deviceIRToKernelSpec downsweepKernelIR config grid) := by
+  intro config grid
   constructor
   · unfold RaceFree
     intro tid1 tid2 h_distinct a1 a2 ha1 ha2
-    simp [downsweepConfig, deviceIRToKernelSpec, downsweepKernelIR, extractFromStmt, scanConfig, scanGrid, extractReadsFromExpr, dexprToAddressPattern, List.lookup, HasRace, SeparatedByBarrier, AddressPattern.couldCollide] at *
+    simp [downsweepConfig, deviceIRToKernelSpec, downsweepKernelIR, extractFromStmt, extractReadsFromExpr, dexprToAddressPattern, List.lookup, HasRace, SeparatedByBarrier, AddressPattern.couldCollide, getArrayName, AccessExtractor.getArrayLocation] at *
     intro h_race
     rcases h_distinct with ⟨_,_,h_neq⟩
-
     rcases ha1 with ha1 | ha1 | ha1 | ha1 <;>
     rcases ha2 with ha2 | ha2 | ha2 | ha2 <;>
-    simp_all <;>
-    apply h_neq <;>
-    simp [SymValue.isNonZero] at *
+    simp_all [AddressPattern.eval, SymValue.isNonZero]
   · unfold BarrierUniform; intros; trivial
 
 /-- Exclusive scan implementation -/
@@ -325,10 +285,6 @@ def exclusiveScanGPU (input : Array Int) : IO (Array Int) := do
     while twod < roundedLength do
       let twod1 := twod * 2
       let numBlocks := (roundedLength / twod1 + numThreadsPerBlock - 1) / numThreadsPerBlock
-
-      -- IMPORTANT: Scalar params must match the order in the generated CUDA kernel!
-      -- The kernel signature is: upsweepKernel(int twod1, int length, int twod, int* data)
-      -- Parameters are discovered in the order they appear in the kernel body.
       let scalarParams : Array Int := #[twod1, roundedLength, twod]
       let arrays := [
         (`data, upsweepData)
@@ -390,10 +346,6 @@ def exclusiveScanGPU (input : Array Int) : IO (Array Int) := do
     while twod >= 1 do
       let twod1 := twod * 2
       let numBlocks := (roundedLength / twod1 + numThreadsPerBlock - 1) / numThreadsPerBlock
-
-      -- IMPORTANT: Scalar params must match the order in the generated CUDA kernel!
-      -- The kernel signature is: downsweepKernel(int twod1, int twod, int length, int* data)
-      -- Parameters are discovered in the order they appear in the kernel body.
       let scalarParams : Array Int := #[twod1, twod, roundedLength]
       let arrays := [
         (`data, downsweepData)
@@ -476,50 +428,21 @@ device_kernel matmulKernel : KernelM MatMulArgs Unit := do
       result := result + aVal * bVal
     C.set (row * N + col) result
 
-def matmulConfig : Dim3 := ⟨512, 1, 1⟩  -- 512 threads per block
-def matmulGrid : Dim3 := ⟨1, 1, 1⟩      -- 1 block
 
-def matmulSpec : KernelSpec :=
+def matmulSpec (matmulConfig matmulGrid: Dim3): KernelSpec :=
   deviceIRToKernelSpec matmulKernelIR matmulConfig matmulGrid
 
-/-- Matrix multiplication kernel is race-free because:
-    1. Each thread computes one output element C[row][col]
-    2. The write pattern is symLinear with non-zero scale
-    3. Reads from A and B don't conflict (read-read is not a race) -/
-theorem matmul_safe_direct : KernelSafe matmulSpec := by
+theorem matmul_safe : ∀ (config grid : Dim3), KernelSafe (matmulSpec config grid) := by
+  intro config grid
   constructor
   · unfold RaceFree
     intro tid1 tid2 h_distinct a1 a2 ha1 ha2
-    simp [matmulSpec, deviceIRToKernelSpec, matmulKernelIR, extractFromStmt, extractReadsFromExpr, dexprToAddressPattern, DistinctThreads, matmulConfig, List.lookup, HasRace, SeparatedByBarrier, AddressPattern.couldCollide] at *
+    simp_all [matmulSpec, deviceIRToKernelSpec, matmulKernelIR, extractFromStmt, extractReadsFromExpr, dexprToAddressPattern, DistinctThreads, List.lookup, HasRace, SeparatedByBarrier, AddressPattern.couldCollide, getArrayName, AccessExtractor.getArrayLocation]
     intro h_race
     rcases h_distinct with ⟨_,_,h_neq⟩
     rcases ha1 with ha1 | ha1 | ha1 <;>
     rcases ha2 with ha2 | ha2 | ha2 <;>
-    simp [ha1, ha2,AddressPattern.eval] at h_race
-    apply h_neq <;>
-    apply h_race <;>
-    simp [SymValue.isNonZero]
-    /-
-    tid1 tid2 : ℕ
-a1 a2 : AccessPattern
-left✝¹ : tid1 < 512
-left✝ : tid2 < 512
-h_neq : ¬tid1 = tid2
-ha1 : a1 =
-  AccessPattern.read
-    (AddressPattern.symLinear ((SymValue.param "N").symAdd (SymValue.const 0))
-      ((SymValue.const 0).symAdd (SymValue.param "k")))
-    2
-ha2 : a2 =
-  AccessPattern.write
-    (AddressPattern.symLinear ((SymValue.param "N").symAdd (SymValue.const 1))
-      ((SymValue.const 0).symAdd (SymValue.const 0)))
-    2
-h_race : ((SymValue.param "N").symAdd (SymValue.const 0)).isNonZero = true →
-  ((SymValue.param "N").symAdd (SymValue.const 1)).isNonZero = true → tid1 = tid2
-⊢ False
-    -/
-    sorry
+    simp_all [AddressPattern.eval, SymValue.isNonZero]
   · unfold BarrierUniform; intros; trivial
 
 

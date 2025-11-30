@@ -41,9 +41,9 @@ def SymValue.isNonZero : SymValue → Bool
   | SymValue.const n => n ≠ 0
   | SymValue.param _ => true   -- Assume parameters are non-zero (could be refined)
   | SymValue.symMul v1 v2 => v1.isNonZero && v2.isNonZero
-  -- Adding zero doesn't change non-zero status
-  | SymValue.symAdd v1 (SymValue.const 0) => v1.isNonZero
-  | SymValue.symAdd (SymValue.const 0) v2 => v2.isNonZero
+  -- Adding any constant to a non-zero value preserves non-zero (assuming non-negative constants)
+  | SymValue.symAdd v (SymValue.const _) => v.isNonZero
+  | SymValue.symAdd (SymValue.const _) v => v.isNonZero
   | SymValue.symAdd _ _ => false  -- Conservative for other cases
 
 /-- Convert AddressPattern to function for semantic evaluation (concrete only) -/
@@ -133,12 +133,12 @@ def AccessPattern.isWrite : AccessPattern → Bool
 /-- Two accesses have a race if they access the same location and at least one writes -/
 def HasRace (a1 a2 : AccessPattern) (tid1 tid2 : Nat) : Prop :=
   match a1, a2 with
-  | AccessPattern.read addr1 _, AccessPattern.write addr2 _ =>
-      addr1.couldCollide addr2 tid1 tid2  -- Could access same location
-  | AccessPattern.write addr1 _, AccessPattern.read addr2 _ =>
-      addr1.couldCollide addr2 tid1 tid2
-  | AccessPattern.write addr1 _, AccessPattern.write addr2 _ =>
-      addr1.couldCollide addr2 tid1 tid2
+  | AccessPattern.read addr1 loc1, AccessPattern.write addr2 loc2 =>
+      loc1 = loc2 ∧ addr1.couldCollide addr2 tid1 tid2  -- Same array AND could access same element
+  | AccessPattern.write addr1 loc1, AccessPattern.read addr2 loc2 =>
+      loc1 = loc2 ∧ addr1.couldCollide addr2 tid1 tid2
+  | AccessPattern.write addr1 loc1, AccessPattern.write addr2 loc2 =>
+      loc1 = loc2 ∧ addr1.couldCollide addr2 tid1 tid2
   | AccessPattern.read _ _, AccessPattern.read _ _ =>
       False  -- Read-read is not a race
 
@@ -187,10 +187,10 @@ theorem identity_access_no_race {blockSize : Nat} {loc1 loc2 : Nat}
   cases h_a1 with
   | inl h1 => cases h_a2 with
     | inl h2 => simp [h1, h2]  -- read-read: no race
-    | inr h2 => simp [h1, h2]; exact h_neq  -- read-write
+    | inr h2 => simp [h1, h2]; intro _; exact h_neq  -- read-write
   | inr h1 => cases h_a2 with
-    | inl h2 => simp [h1, h2]; exact h_neq  -- write-read
-    | inr h2 => simp [h1, h2]; exact h_neq  -- write-write
+    | inl h2 => simp [h1, h2]; intro _; exact h_neq  -- write-read
+    | inr h2 => simp [h1, h2]; intro _; exact h_neq  -- write-write
 
 /-- Simplified proof obligation for kernels with identity access patterns -/
 theorem identity_kernel_race_free {k : KernelSpec}
