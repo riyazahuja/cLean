@@ -5,6 +5,8 @@
 
 We are building a domain-specific language embedded in Lean 4 for writing CUDA-style GPU kernels, efficiently executing them on-device, and formally verifying their correctness and safety. Namely, our system includes a full language and transpiler for efficiently and easily writing GPU kernels integrated with the Lean 4 programming language and proof assistant, as well as a formal semantics and verification framework for proving safety properties about these kernels. Moreover, we implement an execution engine for running these kernels on both GPUs and on a CPU simulator - extending prior work on verified kernel programming (e.g. GPUVerify) by integrating with a higher-order fully-featured programming language and interactive theorem prover to not only speed up, but also provide stronger developer tooling for safe GPU programming.
 
+As of the milestone (Dec 1, 2025), the core end-to-end pipeline is implemented: users can write kernels in the Lean DSL, simulate them on a deterministic CPU interpreter, transpile to CUDA C++/PTX, run on actual NVIDIA GPUs via a small C++ launcher, and automatically prove safety (race-freedom and barrier uniformity) for a subset of representative kernels (e.g., SAXPY, prefix sum, matrix multiplication).
+
 ## Background
 
 GPU kernels are critical for modern high-performance computing, and as these kernels run at large scale and often manipulate shared memory across thousands of threads, safety (e.g., absence of data races, correct synchronization, etc) and correctness (the kernel actually 
@@ -38,8 +40,8 @@ With this system, we then will proceed to not only verify small benchmark kernel
 
 *   **Lean DSL for GPU**: Write kernels using familiar Lean syntax with a monadic interface (`KernelM`).
 *   **Automatic Verification**:
-    *   **Race Freedom**: Automatically proves that kernels are free from data races using GPUVerify-style logic.
-    *   **Functional Correctness**: Verify that your kernel implementation matches a high-level mathematical specification.
+    *   **Race Freedom**: Automatically proves that kernels are free from data races using a GPUVerify-style two-thread abstraction implemented entirely in Lean.
+    *   **(In Progress) Functional Correctness**: Prototype infrastructure for stating and proving that selected kernels match a high-level mathematical specification, with at least one end-to-end example planned for the final deliverable.
 *   **End-to-End Execution**:
     *   Automatic compilation of Lean kernels to PTX (Parallel Thread Execution).
     *   Execution on NVIDIA GPUs via a lightweight C++ launcher.
@@ -53,8 +55,9 @@ cLean operates through a multi-stage pipeline:
 1.  **DSL (`CLean/GPU.lean`)**: Users define kernels in Lean.
 2.  **DeviceIR (`CLean/DeviceIR.lean`)**: The DSL is elaborated into a simplified intermediate representation (DeviceIR).
 3.  **Verification (`CLean/Verification/`)**:
-    *   DeviceIR is translated to a verification-friendly IR (`KernelSpec`).
-    *   Verification Conditions (VCs) are generated and proved using Lean's tactic framework.
+    *   DeviceIR is translated to a verification-friendly IR (`KernelSpec`) used to reason about thread interactions and memory accesses.
+    *   Verification Conditions (VCs) for safety (race-freedom, barrier uniformity) are generated and proved using Lean's tactic framework.
+    *   Prototype support for functional correctness specifications is being built on top of the same semantic and IR layer.
 4.  **Code Generation (`CLean/DeviceCodeGen.lean`)**: DeviceIR is compiled to CUDA C++.
 5.  **Execution (`CLean/GPU/ProcessLauncher.lean`)**:
     *   The CUDA code is compiled to PTX using `nvcc`.
@@ -188,17 +191,16 @@ The core and minimal deliverables for this project are:
 	-	Measure compile time for our system (DSL/transpiler) and compare rough baseline compile time of hand-written CUDA and Python/Triton (for similar kernels).
 + Verification Framework
 	-	Build proof infrastructure inside Lean 4 to reason about safety properties (no data races, no barrier divergence) of DSL kernels.
-	-	Benchmark proof coverage: pick a small kernel benchmark set (e.g., from GPUVerify suite) and measure how many kernels we can successfully verify vs. how many prior tools could verify.
-+	Quantitative Evaluation
-  -	Performance comparison: As previously mentioned, for selected kernels in our testing dataset, measure execution time on (a) hand-written CUDA C++, (b) Python/Triton version (if available), (c) our DSL/transpiler version. We will report speed-up factors, compile time overhead, generated code overhead and hope to show that our system is competitive with hand-written CUDA while providing additional formal verification guarantees.
-  -	Proof comparison: report number of kernels verified, time to verify (or approximate) inside Lean, any proof automation we built (e.g., custom tactics).
-  - (For the poster/demo: show graphs of compile time vs kernel type, execution time across different systems, proof coverage percentages, and live examples of the workflow (DSL code → Lean proof → GPU run))
-
+  -   Benchmark proof coverage: construct a small curated kernel benchmark set and measure how many kernels we can successfully verify, comparing against GPUVerify on overlapping kernels where feasible.
++   Quantitative Evaluation
+  -   Performance comparison: for selected kernels in a small curated benchmark suite, measure execution time on (a) hand-written CUDA C++, (b) a Python/Triton version (if available), and (c) our DSL/transpiler version. We will report speed-up factors, compile-time overhead, and generated-code overhead, and aim to show that our system is competitive with hand-written CUDA while providing additional formal verification guarantees.
+  -   Proof comparison: report number of kernels verified, approximate verification time inside Lean, and any proof automation we built (e.g., custom tactics).
+  -   For the poster/demo: show graphs of execution time across different systems, simple compile-time statistics, proof coverage percentages on the curated suite, and live examples of the workflow (DSL code → Lean proof → GPU run).
 ### Hope to Achieve
 
 If work goes more quickly (stretch goals):
 -	Apply the system to the Gröbner basis ideal-membership workload: implement kernel, transpile it, run on GPU, measure speed-up vs CPU and other baselines, and verify correctness in Lean (even if partially).
--	Achieve proof coverage exceeding GPUVerify’s published coverage for the benchmark suite (for safety and, if possible, correctness). For example, where GPUVerify verified ~231/253 programs under candidate-based invariants.
+-	On a curated subset of kernels, demonstrate cases where Lean-based reasoning (cLean) can verify safety or partial correctness for kernels that are difficult for GPUVerify (e.g., requiring less invariant engineering or handling richer specifications).
 -	Extend to prove functional correctness properties for a small set of kernels: e.g., proving that the result equals the known sequential computation.
 	
 ## Platform Choice
@@ -208,10 +210,37 @@ If work goes more quickly (stretch goals):
 
 We moreover leverage these platforms as for our core goal of verifying GPU kernels, Lean 4's proof system provides the necessary expressiveness and interactivity that SMT-based tools lack, while CUDA provides the necessary low-level control and performance for GPU execution. Moreover, for an algorithm like Gröbner basis computation, which is highly parallelizable but also requires intricate reasoning about algebraic structures, the combination of Lean 4 for verification and CUDA for execution is particularly well-suited, whereas applying other parallelization platforms (i.e. OpenML, etc.) would not allow for the same level of integration between the algorithm in Lean, and the parallelized form, as well as the efficient execution of the matrix reduction steps.
 
-## Schedule
+## (Updated) Schedule
 
-- **Week 1 (Nov 17 – Nov 23):** Finalize DSL syntax and semantics and connect to GPU backend execution with transpiler. Connect transpiler to Lean metaprogramming framework for proving safety conditions.
-- **Week 2 (Nov 24 – Nov 30):** Optimize DSL framework for proving and write novel tactics for proving race-freedom and barrier-safety. Clean up transpiler backend and speed it up.
-- **Milestone Report (Dec 1):** Submit milestone report showing working basic examples of DSL to transpiler to GPU code, as well as safety proofs for simple kernels. Run evaluations on GPUVerify dataset and report coverage and compile time metrics.
-- **Week 3 (Dec 1 – Dec 7):** Continue polishing and bugfixing as needed, and if time, upgrade the DSL to handle functional correctness specifications and Gröbner basis ideal-membership kernel (first in regular C++, then in Lean). Generally finalize the system, make examples, finalize benchmarks, and write report.
-- **Final Submission (Dec 8):** Submit final report.
+- **Dec 2 – Dec 4**
+  - Functional correctness infrastructure:
+    - Finalize the translation from `DeviceIR` to a semantic representation suitable for functional specs.
+    - Implement a first end-to-end example:
+      - Define a pure Lean spec (e.g., `saxpy_spec`).
+      - Generate a correctness theorem for `saxpyKernel`.
+      - Write / refine tactics to prove it.
+  - Proof UX improvements:
+    - Add convenience tactics/macros (e.g., `prove_kernel_safety`, `prove_kernel_correct`).
+    - Improve error messages and VC structuring.
+
+- **Dec 5 – Dec 7**
+  - Benchmarking suite & safety evaluation:
+    - Design and implement a small suite of kernels with varying complexity (elementwise, shared-memory tiling, reductions).
+    - Run safety verification on this suite inside Lean.
+    - Where feasible, compare against GPUVerify on overlapping kernels.
+  - Performance evaluation:
+    - Implement timing harnesses for cLean-generated CUDA, hand-written CUDA, and CPU simulation.
+    - Collect performance data for selected kernels and parameter ranges.
+  - Gröbner basis kernel:
+    - Settle on the exact subroutine (e.g., a batched reduction step).
+    - Implement an initial GPU kernel for this subproblem in the cLean DSL.
+
+- **Dec 8**
+  - Finalize evaluation & plots:
+    - Finish experiments, clean data, and produce performance and verification graphs.
+    - Select key kernels for side-by-side comparison vs GPUVerify and highlight interesting cases.
+  - Finalization:
+    - Prepare demo scripts.
+    - Prepare poster.
+    - Write the final report.
+    - Clean up the website and repository (README, examples).
