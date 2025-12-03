@@ -142,7 +142,7 @@ def compileKernelToPTX (kernel : Kernel) : IO CachedKernel := do
   let ptxExists ← cached.ptxPath.pathExists
 
   if !ptxExists then
-    -- IO.println s!"[GPU] Compiling {kernel.name} to PTX..."
+    IO.println s!"[GPU] Compiling {kernel.name} to PTX..."
 
     -- Compile using nvcc
     let nvccPath := "nvcc"
@@ -153,7 +153,7 @@ def compileKernelToPTX (kernel : Kernel) : IO CachedKernel := do
       "-o", cached.ptxPath.toString,
       cached.cudaSourcePath.toString
     ]
-    -- IO.println s!"[nvcc] {nvccPath} {String.intercalate " " args.toList}"
+    IO.println s!"[nvcc] {nvccPath} {String.intercalate " " args.toList}"
     let output ← IO.Process.run {
       cmd := nvccPath
       args := args
@@ -163,9 +163,9 @@ def compileKernelToPTX (kernel : Kernel) : IO CachedKernel := do
     if !output.trim.isEmpty then
       IO.eprintln s!"[nvcc] {output}"
 
-    -- IO.println "[GPU] Compilation complete!"
-  -- else
-    -- IO.println s!"[GPU] Using cached PTX for {kernel.name}"
+    IO.println "[GPU] Compilation complete!"
+  else
+    IO.println s!"[GPU] Using cached PTX for {kernel.name}"
 
   return cached
 
@@ -253,9 +253,9 @@ def runKernelGPU {α β} [ToJson α] [ArrayElementType α] [ToScalarValue β]
   let cached ← compileKernelToPTX IR
   let scalarParams' := scalarParams.map ToScalarValue.toScalarValue
   let jsonInput := buildLauncherInputBetter scalarParams' arrays
-  -- IO.println s!"[GPU] Launching {IR.name}..."
-  -- IO.println s!"[GPU] Grid: {grid.x}x{grid.y}x{grid.z}"
-  -- IO.println s!"[GPU] Block: {block.x}x{block.y}x{block.z}"
+  IO.println s!"[GPU] Launching {IR.name}..."
+  IO.println s!"[GPU] Grid: {grid.x}x{grid.y}x{grid.z}"
+  IO.println s!"[GPU] Block: {block.x}x{block.y}x{block.z}"
   IO.println s!"[GPU] Input JSON: {jsonInput}"
   let launcherArgs := #[
     cached.ptxPath.toString,
