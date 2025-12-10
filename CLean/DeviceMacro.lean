@@ -35,14 +35,26 @@ structure ExtractCtx where
 /-- Infer CUDA type from variable name (simple heuristic) -/
 def inferCudaType (varName : String) : String :=
   -- Simple heuristics based on common naming patterns
+  -- Default to int (safer for indices), use float only when clearly needed
   if varName == "N" || varName == "length" || varName.endsWith "Idx" || varName.endsWith "idx" then
     "int"
   else if varName.startsWith "alpha" || varName.startsWith "beta" || varName.endsWith "Weight" then
     "float"
   else if varName.endsWith "d" || varName.endsWith "1" then
     "int"  -- twod, twod1, etc.
+  -- Common dimension/count names should be int
+  else if varName == "nrows" || varName == "ncols" || varName == "rows" || varName == "cols" then
+    "int"
+  else if varName == "size" || varName == "n" || varName == "m" || varName == "k" then
+    "int"
+  else if varName == "p" || varName == "prime" || varName == "mod" || varName == "modulus" then
+    "int"
+  else if varName.endsWith "Row" || varName.endsWith "Col" || varName.endsWith "Dim" then
+    "int"
+  else if varName.endsWith "Count" || varName.endsWith "Num" || varName.endsWith "Size" then
+    "int"
   else
-    "float"  -- Default to float
+    "int"  -- Default to int (safer for GPU kernels, most values are indices/counts)
 
 /-- Recursively extract scalar parameters from syntax (find all args.* references) -/
 partial def extractScalarParamsFromSyntax (stx : Syntax) : Array (String × String) := Id.run do
@@ -138,6 +150,13 @@ partial def exprToDExpr (stx : Syntax) : MacroM Syntax := do
     let beTSyntax : TSyntax `term := ⟨be⟩
     `(DExpr.binop BinOp.div $aeTSyntax $beTSyntax)
 
+  | `($a:term % $b:term) => do
+    let ae ← exprToDExpr a
+    let be ← exprToDExpr b
+    let aeTSyntax : TSyntax `term := ⟨ae⟩
+    let beTSyntax : TSyntax `term := ⟨be⟩
+    `(DExpr.binop BinOp.mod $aeTSyntax $beTSyntax)
+
   -- Comparisons
   | `($a:term < $b:term) => do
     let ae ← exprToDExpr a
@@ -146,6 +165,13 @@ partial def exprToDExpr (stx : Syntax) : MacroM Syntax := do
     let beTSyntax : TSyntax `term := ⟨be⟩
     `(DExpr.binop BinOp.lt $aeTSyntax $beTSyntax)
 
+  | `($a:term > $b:term) => do
+    let ae ← exprToDExpr a
+    let be ← exprToDExpr b
+    let aeTSyntax : TSyntax `term := ⟨ae⟩
+    let beTSyntax : TSyntax `term := ⟨be⟩
+    `(DExpr.binop BinOp.gt $aeTSyntax $beTSyntax)
+
   | `($a:term <= $b:term) => do
     let ae ← exprToDExpr a
     let be ← exprToDExpr b
@@ -153,12 +179,26 @@ partial def exprToDExpr (stx : Syntax) : MacroM Syntax := do
     let beTSyntax : TSyntax `term := ⟨be⟩
     `(DExpr.binop BinOp.le $aeTSyntax $beTSyntax)
 
+  | `($a:term >= $b:term) => do
+    let ae ← exprToDExpr a
+    let be ← exprToDExpr b
+    let aeTSyntax : TSyntax `term := ⟨ae⟩
+    let beTSyntax : TSyntax `term := ⟨be⟩
+    `(DExpr.binop BinOp.ge $aeTSyntax $beTSyntax)
+
   | `($a:term == $b:term) => do
     let ae ← exprToDExpr a
     let be ← exprToDExpr b
     let aeTSyntax : TSyntax `term := ⟨ae⟩
     let beTSyntax : TSyntax `term := ⟨be⟩
     `(DExpr.binop BinOp.eq $aeTSyntax $beTSyntax)
+
+  | `($a:term != $b:term) => do
+    let ae ← exprToDExpr a
+    let be ← exprToDExpr b
+    let aeTSyntax : TSyntax `term := ⟨ae⟩
+    let beTSyntax : TSyntax `term := ⟨be⟩
+    `(DExpr.binop BinOp.ne $aeTSyntax $beTSyntax)
 
   -- Logical operators
   | `($a:term && $b:term) => do
@@ -765,6 +805,62 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
       let dstmt ← `(DStmt.ite $condTSyntax $thenStmtTSyntax $elseStmtTSyntax)
       dstmts := dstmts.push dstmt
 
+    -- PATTERN: for loop with shorthand range (for i in [:hi] do body)
+    | `(doElem| for $id:ident in [:$hi:term] do $body:term) =>
+      let loopVar := id.getId.toString
+      -- Extract loop bounds (lo = 0 for shorthand)
+      let hiDExpr ← exprToDExpr hi
+      let loTSyntax : TSyntax `term ← `(DExpr.intLit 0)
+      let hiTSyntax : TSyntax `term := ⟨hiDExpr⟩
+
+      -- Recursively extract loop body
+      let bodyStmt ← if body.raw.getKind == ``Lean.Parser.Term.do then
+        -- Body is do-notation, recursively extract
+        let bodyDoSeq := body.raw[1]
+        let bodyItems := if bodyDoSeq.getKind == ``Lean.Parser.Term.doSeqIndent ||
+                            bodyDoSeq.getKind == ``Lean.Parser.Term.doSeqBracketed then
+          if bodyDoSeq.getNumArgs > 0 then bodyDoSeq[0].getArgs else #[]
+        else #[]
+        let (bodyStmts, bodyCtx) ← extractDoItems bodyItems newCtx
+        newCtx := bodyCtx
+        -- Build sequence of body statements
+        let mut bodySeq ← `(DStmt.skip)
+        for stmt in bodyStmts.reverse do
+          let stmtTSyntax : TSyntax `term := ⟨stmt⟩
+          bodySeq ← `(DStmt.seq $stmtTSyntax $bodySeq)
+        pure bodySeq
+      else
+        -- Single statement - check if it's arr.set
+        if body.raw.getKind == ``Lean.Parser.Term.app then
+          let fn := body.raw.getArg 0
+          if fn.isIdent then
+            let fullName := fn.getId
+            let components := fullName.components
+            if components.length >= 2 && components.getLast! == `set then
+              -- This is arr.set pattern
+              let arrName := components[components.length - 2]!
+              let actualArrayName := newCtx.arrayMap.getD (arrName.toString) arrName
+              let args := body.raw.getArg 1
+              if args.getKind == `null && args.getNumArgs >= 2 then
+                let idx := args.getArg 0
+                let val := args.getArg 1
+                let idxDExpr ← exprToDExpr idx
+                let valDExpr ← exprToDExpr val
+                let idxT : TSyntax `term := ⟨idxDExpr⟩
+                let valT : TSyntax `term := ⟨valDExpr⟩
+                `(DStmt.store (DExpr.var $(quote actualArrayName.toString)) $idxT $valT)
+              else
+                `(DStmt.skip)
+            else
+              `(DStmt.skip)
+          else
+            `(DStmt.skip)
+        else
+          `(DStmt.skip)
+      let bodyStmtTSyntax : TSyntax `term := ⟨bodyStmt⟩
+      let dstmt ← `(DStmt.for $(quote loopVar) $loTSyntax $hiTSyntax $bodyStmtTSyntax)
+      dstmts := dstmts.push dstmt
+
     -- PATTERN: for loop (for i in [lo:hi] do body)
     | `(doElem| for $id:ident in [$lo:term : $hi:term] do $body:term) =>
       let loopVar := id.getId.toString
@@ -1012,13 +1108,25 @@ partial def extractDoItems (items : Array Syntax) (ctx : ExtractCtx) : MacroM (A
           let loopVar := if loopVarSyntax.isIdent then loopVarSyntax.getId.toString else "i"
           let rangeSyntax := forDecl.getArg 3
 
-          -- Extract range bounds from [lo:hi] syntax (Std.Range.«term[_:_]»)
-          -- Range structure: [0]="[", [1]=lo, [2]=":", [3]=hi, [4]="]"
-          let lo := if rangeSyntax.getNumArgs > 1 then rangeSyntax.getArg 1 else rangeSyntax
-          let hi := if rangeSyntax.getNumArgs > 3 then rangeSyntax.getArg 3 else rangeSyntax
-
-          let loDExpr ← exprToDExpr lo
-          let hiDExpr ← exprToDExpr hi
+          -- Extract range bounds from range syntax
+          -- There are two cases:
+          -- 1. [lo:hi] syntax (Std.Range.«term[_:_]»): [0]="[", [1]=lo, [2]=":", [3]=hi, [4]="]" (5 args)
+          -- 2. [:hi] syntax (Std.Range.«term[:_]»): [0]="[", [1]=":", [2]=hi, [3]="]" (4 args)
+          let (loDExpr, hiDExpr) ← if rangeSyntax.getNumArgs >= 5 then
+            -- [lo:hi] case
+            let loD ← exprToDExpr (rangeSyntax.getArg 1)
+            let hiD ← exprToDExpr (rangeSyntax.getArg 3)
+            pure (loD, hiD)
+          else if rangeSyntax.getNumArgs >= 4 then
+            -- [:hi] case - lo is implicitly 0
+            let loD : Syntax ← `(DExpr.intLit 0)
+            let hiD ← exprToDExpr (rangeSyntax.getArg 2)
+            pure (loD, hiD)
+          else
+            -- Fallback
+            let loD ← exprToDExpr rangeSyntax
+            let hiD ← exprToDExpr rangeSyntax
+            pure (loD, hiD)
           let loTSyntax : TSyntax `term := ⟨loDExpr⟩
           let hiTSyntax : TSyntax `term := ⟨hiDExpr⟩
 
