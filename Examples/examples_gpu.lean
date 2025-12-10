@@ -4,8 +4,9 @@ import CLean.DeviceIR
 import CLean.DeviceCodeGen
 import CLean.DeviceTranslation
 import CLean.DeviceInstances
+import CLean.GPU.ProcessLauncher
 
-open Lean GpuDSL DeviceIR CLean.DeviceMacro CLean.DeviceCodeGen DeviceTranslation
+open Lean GpuDSL DeviceIR CLean.DeviceMacro CLean.DeviceCodeGen DeviceTranslation CLean.GPU.ProcessLauncher
 
 set_option maxHeartbeats 2000000
 
@@ -244,6 +245,41 @@ def transpose (n : Nat)
 
 
 #eval do transpose 4 #[#[1.0,2.0,3.0,4.0], #[5.0,6.0,7.0,8.0], #[9.0,10.0,11.0,12.0], #[13.0,14.0,15.0,16.0]]
+
+/-- GPU version of matrix transpose using shared memory -/
+def transposeGPU (n : Nat)
+    (mat : Array (Array Float)) : IO (Array (Array Float)) := do
+  let flattened := mat.flatMap id
+
+  -- Set up arrays - only global arrays are passed to GPU
+  -- Shared memory is allocated on-device based on kernel IR
+  let scalarParams := #[n]
+  let arrays := [
+    (`input, flattened),
+    (`output, Array.replicate (n*n) 0.0)
+  ]
+
+  let threadsPerBlock := 8
+  let numBlocks := (n + threadsPerBlock - 1) / threadsPerBlock
+  let grid : Dim3 := ⟨numBlocks, numBlocks, 1⟩
+  let block : Dim3 := ⟨threadsPerBlock, threadsPerBlock, 1⟩
+
+  let response ← runKernelGPU transposeKernelIR TransposeArgsResponse
+    grid
+    block
+    scalarParams
+    arrays
+
+  let out := response.output
+  if out.size = n * n then
+    pure (Array.ofFn fun (i : Fin n) =>
+      Array.ofFn fun (j : Fin n) => out[i.val * n + j.val]!)
+  else
+    throw <| IO.userError s!"Size mismatch: {out.size} ≠ {n*n}"
+
+-- Test transpose on GPU
+#eval do transposeGPU 4 #[#[1.0,2.0,3.0,4.0], #[5.0,6.0,7.0,8.0], #[9.0,10.0,11.0,12.0], #[13.0,14.0,15.0,16.0]]
+
 def transposeConfig : LaunchConfig := {
   gridDim := (4, 1, 1),       -- 4 blocks
   blockDim := (256, 1, 1),    -- 256 threads per block

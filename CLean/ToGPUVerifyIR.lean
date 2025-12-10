@@ -158,13 +158,30 @@ def dexprToAddressPattern (e : DExpr) (blockDim : Dim3) (varEnv : List (String �
 
 /-! ## Statement Analysis for Access Extraction -/
 
+/-- Barrier info for uniformity analysis -/
+structure BarrierInfo where
+  location : Nat
+  inConditional : Bool  -- True if barrier is inside an if/else block
+  deriving Inhabited, Repr
+
 structure AccessExtractor where
   accesses : List AccessPattern
   nextLocation : Nat  -- Counter for assigning new location IDs
   barriers : List Nat
+  barrierInfos : List BarrierInfo  -- Detailed barrier info for uniformity checking
   varEnv : List (String × AddressPattern)  -- Cache computed address patterns
   arrayLocations : List (String × Nat)  -- Map array names to location IDs
+  sharedArrays : List String  -- Names of arrays in shared memory
+  inConditional : Bool  -- Track if we're inside an if/else block
+  stmtCounter : Nat  -- Counter for statement indices (program counter)
   deriving Inhabited
+
+/-- Determine memory space for an array by checking if it's in sharedArrays list -/
+def AccessExtractor.getMemorySpace (state : AccessExtractor) (arrName : String) : Verification.GPUVerify.MemorySpace :=
+  if state.sharedArrays.contains arrName then
+    MemorySpace.shared
+  else
+    MemorySpace.global
 
 /-- Get or create a location ID for an array -/
 def AccessExtractor.getArrayLocation (state : AccessExtractor) (arrName : String) : (Nat × AccessExtractor) :=
@@ -189,17 +206,22 @@ def expressionHasArrayAccess (e : DExpr) : Bool :=
   | DExpr.unop _ e => expressionHasArrayAccess e
   | _ => false
 
-/-- Extract read accesses from an expression (array indexing in RHS) -/
+/-- Extract read accesses from an expression (array indexing in RHS)
+    Uses the current stmtCounter for the access's stmtIdx -/
 def extractReadsFromExpr (e : DExpr) (state : AccessExtractor) (blockDim : Dim3) : AccessExtractor :=
   match e with
   | DExpr.index arr idx =>
       -- Array read: arr[idx]
       let addrPat := dexprToAddressPattern idx blockDim state.varEnv
-      -- Get location ID for this array
-      let (loc, state') := match getArrayName arr with
-        | some name => state.getArrayLocation name
-        | none => (state.nextLocation, { state with nextLocation := state.nextLocation + 1 })
-      let access := AccessPattern.read addrPat loc
+      -- Get location ID and memory space for this array
+      let (loc, state', space) := match getArrayName arr with
+        | some name =>
+            let (loc, st) := state.getArrayLocation name
+            let sp := st.getMemorySpace name
+            (loc, st, sp)
+        | none => (state.nextLocation, { state with nextLocation := state.nextLocation + 1 }, MemorySpace.global)
+      -- Use current stmtCounter as the stmtIdx (all 4 positional args)
+      let access := AccessPattern.read addrPat loc space state'.stmtCounter
       { state' with accesses := access :: state'.accesses }
 
   | DExpr.binop _ e1 e2 =>
@@ -211,16 +233,21 @@ def extractReadsFromExpr (e : DExpr) (state : AccessExtractor) (blockDim : Dim3)
 
   | _ => state
 
-/-- Extract access patterns from a single statement -/
+/-- Extract access patterns from a single statement
+    Increments stmtCounter for each statement to track program order -/
 def extractFromStmt (stmt : DStmt) (state : AccessExtractor) (blockDim : Dim3) : AccessExtractor :=
   match stmt with
-  | DStmt.skip => state
+  | DStmt.skip =>
+      -- Increment counter even for skip to maintain ordering
+      { state with stmtCounter := state.stmtCounter + 1 }
 
   | DStmt.assign varName rhs =>
       -- Compute and cache the address pattern for this variable
       let state1 := extractReadsFromExpr rhs state blockDim
       let addrPattern := dexprToAddressPattern rhs blockDim state1.varEnv
-      { state1 with varEnv := (varName, addrPattern) :: state1.varEnv }
+      { state1 with
+        varEnv := (varName, addrPattern) :: state1.varEnv
+        stmtCounter := state1.stmtCounter + 1 }
 
   | DStmt.store arr idx val =>
       -- Store: arr[idx] := val
@@ -228,14 +255,20 @@ def extractFromStmt (stmt : DStmt) (state : AccessExtractor) (blockDim : Dim3) :
       let state1 := extractReadsFromExpr val state blockDim
       -- 2. Extract reads from index expression if it contains array accesses
       let state2 := extractReadsFromExpr idx state1 blockDim
-      -- 3. Get location ID for this array
-      let (loc, state3) := match getArrayName arr with
-        | some name => state2.getArrayLocation name
-        | none => (state2.nextLocation, { state2 with nextLocation := state2.nextLocation + 1 })
-      -- 4. Add the write access
+      -- 3. Get location ID and memory space for this array
+      let (loc, state3, space) := match getArrayName arr with
+        | some name =>
+            let (loc, st) := state2.getArrayLocation name
+            let sp := st.getMemorySpace name
+            (loc, st, sp)
+        | none => (state2.nextLocation, { state2 with nextLocation := state2.nextLocation + 1 }, MemorySpace.global)
+      -- 4. Add the write access with memory space and stmtIdx
       let addrPat := dexprToAddressPattern idx blockDim state3.varEnv
-      let access := AccessPattern.write addrPat loc
-      { state3 with accesses := access :: state3.accesses }
+      let stmtIdx := state3.stmtCounter
+      let access : AccessPattern := .write addrPat loc space stmtIdx
+      { state3 with
+        accesses := access :: state3.accesses
+        stmtCounter := state3.stmtCounter + 1 }
 
   | DStmt.seq s1 s2 =>
       let state1 := extractFromStmt s1 state blockDim
@@ -244,13 +277,19 @@ def extractFromStmt (stmt : DStmt) (state : AccessExtractor) (blockDim : Dim3) :
   | DStmt.ite cond sthen selse =>
       -- Extract from condition
       let state0 := extractReadsFromExpr cond state blockDim
+      -- Mark that we're entering a conditional block
+      let state0' := { state0 with inConditional := true }
       -- Conservative: collect accesses from both branches
-      let stateThen := extractFromStmt sthen state0 blockDim
-      let stateElse := extractFromStmt selse state0 blockDim
+      let stateThen := extractFromStmt sthen state0' blockDim
+      let stateElse := extractFromStmt selse state0' blockDim
+      -- Restore inConditional to original value after branches, take max stmtCounter
       { stateThen with
         accesses := stateThen.accesses ++ stateElse.accesses
         nextLocation := max stateThen.nextLocation stateElse.nextLocation
-        arrayLocations := stateThen.arrayLocations ++ stateElse.arrayLocations }
+        arrayLocations := stateThen.arrayLocations ++ stateElse.arrayLocations
+        barrierInfos := stateThen.barrierInfos ++ stateElse.barrierInfos
+        inConditional := state.inConditional
+        stmtCounter := max stateThen.stmtCounter stateElse.stmtCounter }
 
   | DStmt.for _ lo hi body =>
       -- Extract from loop bounds
@@ -264,10 +303,13 @@ def extractFromStmt (stmt : DStmt) (state : AccessExtractor) (blockDim : Dim3) :
       extractFromStmt body state1 blockDim
 
   | DStmt.barrier =>
-      -- Barrier location is based on program order (use nextLocation as counter)
+      -- Barrier location is based on stmtCounter (program order)
+      let barrierLoc := state.stmtCounter
+      let info : BarrierInfo := { location := barrierLoc, inConditional := state.inConditional }
       { state with
-        barriers := state.nextLocation :: state.barriers
-        nextLocation := state.nextLocation + 1 }
+        barriers := barrierLoc :: state.barriers
+        barrierInfos := info :: state.barrierInfos
+        stmtCounter := state.stmtCounter + 1 }
 
   | DStmt.call _ args =>
       -- Extract reads from arguments
@@ -280,12 +322,19 @@ def extractFromStmt (stmt : DStmt) (state : AccessExtractor) (blockDim : Dim3) :
 
 /-- Translate DeviceIR Kernel to GPUVerify-style KernelSpec -/
 def deviceIRToKernelSpec (kernel : Kernel) (blockDim gridDim : Dim3) : KernelSpec :=
+  -- Extract shared array names from kernel definition
+  let sharedNames := kernel.sharedArrays.map (fun a => a.name)
+
   let initialState : AccessExtractor := {
     accesses := []
     nextLocation := 0
     barriers := []
+    barrierInfos := []
     varEnv := []
     arrayLocations := []
+    sharedArrays := sharedNames
+    inConditional := false
+    stmtCounter := 0
   }
 
   let finalState := extractFromStmt kernel.body initialState blockDim
@@ -297,7 +346,34 @@ def deviceIRToKernelSpec (kernel : Kernel) (blockDim gridDim : Dim3) : KernelSpe
     barriers := finalState.barriers.reverse
   }
 
-/-! ## Helper: Print KernelSpec for debugging -/
+/-- Translate DeviceIR Kernel to KernelSpec with barrier info for uniformity checking -/
+def deviceIRToKernelSpecWithBarrierInfo (kernel : Kernel) (blockDim gridDim : Dim3) : (KernelSpec × List BarrierInfo) :=
+  let sharedNames := kernel.sharedArrays.map (fun a => a.name)
+
+  let initialState : AccessExtractor := {
+    accesses := []
+    nextLocation := 0
+    barriers := []
+    barrierInfos := []
+    varEnv := []
+    arrayLocations := []
+    sharedArrays := sharedNames
+    inConditional := false
+    stmtCounter := 0
+  }
+
+  let finalState := extractFromStmt kernel.body initialState blockDim
+
+  let spec : KernelSpec := {
+    blockSize := blockDim.x
+    gridSize := gridDim.x
+    accesses := finalState.accesses.reverse
+    barriers := finalState.barriers.reverse
+  }
+
+  (spec, finalState.barrierInfos.reverse)
+
+/-- Helper: Print KernelSpec for debugging -/
 
 def printKernelSpec (spec : KernelSpec) : IO Unit := do
   IO.println s!"KernelSpec:"
@@ -305,9 +381,7 @@ def printKernelSpec (spec : KernelSpec) : IO Unit := do
   IO.println s!"  Grid size: {spec.gridSize}"
   IO.println s!"  Accesses: {spec.accesses.length}"
   for (acc, i) in spec.accesses.zipIdx do
-    match acc with
-    | AccessPattern.read _ loc => IO.println s!"    [{i}] Read at location {loc}"
-    | AccessPattern.write _ loc => IO.println s!"    [{i}] Write at location {loc}"
+    IO.println s!"    [{i}] {repr acc}"
   IO.println s!"  Barriers: {spec.barriers}"
 
 end CLean.ToGPUVerifyIR

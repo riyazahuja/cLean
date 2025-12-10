@@ -47,14 +47,13 @@ theorem saxpy_safe : ∀ (config grid : Dim3), KernelSafe (saxpySpec config grid
   constructor
   . unfold RaceFree
     intro tid1 tid2 h_distinct a1 a2 ha1 ha2
-    simp_all [saxpySpec, HasRace, SeparatedByBarrier, deviceIRToKernelSpec, extractFromStmt, saxpyKernelIR,extractReadsFromExpr, dexprToAddressPattern, List.lookup, AccessExtractor.getArrayLocation, getArrayName, AddressPattern.couldCollide]
+    simp_all [HasRace, saxpySpec, deviceIRToKernelSpec, saxpyKernelIR, extractFromStmt, extractReadsFromExpr, dexprToAddressPattern, List.lookup, SeparatedByBarrier, AddressPattern.couldCollide, getArrayName, AccessExtractor.getArrayLocation]
     intro h_race
     rcases h_distinct with ⟨_,_,h_neq⟩
     rcases ha1 with ha1 | ha1 | ha1 <;>
     rcases ha2 with ha2 | ha2 | ha2 <;>
     simp_all [AddressPattern.eval, SymValue.isNonZero]
-  . simp [BarrierUniform]
-
+  . unfold BarrierUniform; intros; trivial
 def saxpyCPU (n : Nat)
     (α : Float)
     (x y : Array Float) : IO (Array Float) := do
@@ -100,8 +99,8 @@ def saxpyGPU (n : Nat)
   return response.r
 
 
-#eval do saxpyCPU 2 8.0 #[1.0, 1.0] #[2.0, 2.0]
-#eval do saxpyGPU 2 8.0 #[1.0, 1.0] #[2.0, 2.0]
+#eval do saxpyCPU 2 8.0 #[1.0, 1.0] #[3.0,3.0]
+#eval do saxpyGPU 2 8.0 #[1.0, 1.0] #[3.0, 3.0]
 
 
 
@@ -556,3 +555,133 @@ def matmulCPU (n : Nat)
 #eval do matmulGPU 2 #[#[1.0,2.0],#[3.0,4.0]] #[#[5.0,6.0],#[7.0,8.0]]
 
 end BasicMatMul
+
+/-! ## Shared Memory Transpose Verification -/
+
+namespace SharedMemTranspose
+
+kernelArgs TransposeArgs(N: Nat)
+  global[input output: Array Float]
+  shared[tile: Array Float]
+
+device_kernel transposeKernel : KernelM TransposeArgs Unit := do
+  let args ← getArgs
+  let N := args.N
+  let input : GlobalArray Float := ⟨args.input⟩
+  let output : GlobalArray Float := ⟨args.output⟩
+  let tile : SharedArray Float := ⟨args.tile⟩
+
+  let row ← globalIdxX
+  let col ← globalIdxY
+
+  -- Phase 1: Load from global to shared
+  if row < N && col < N then
+    let val ← input.get (row * N + col)
+    tile.set (row * N + col) val
+
+  barrier
+
+  -- Phase 2: Read from shared and write transposed to global
+  if row < N && col < N then
+    let val ← tile.get (col * N + row)
+    output.set (row * N + col) val
+
+/-- Generate KernelSpec for transpose kernel -/
+def transposeSpec (config grid: Dim3): KernelSpec :=
+  deviceIRToKernelSpec transposeKernelIR config grid
+
+/-- Transpose kernel is safe:
+    1. Race-free within each phase (barrier separates phases)
+    2. Barriers are uniform (not inside thread-dependent conditionals)
+
+    Phase 1 accesses:
+    - Read: input[row * N + col] (global)
+    - Write: tile[row * N + col] (shared)
+
+    Phase 2 accesses:
+    - Read: tile[col * N + row] (shared)
+    - Write: output[row * N + col] (global)
+
+    No race in Phase 1: Each thread writes to unique shared location (row*N+col is injective)
+    No race in Phase 2: Each thread reads from unique shared location and writes to unique global location
+    Cross-phase: Barrier synchronizes all threads before Phase 2 reads what Phase 1 wrote -/
+theorem transpose_safe : ∀ (config grid : Dim3), KernelSafe (transposeSpec config grid) := by
+  intro config grid
+  unfold KernelSafe
+  constructor
+  . -- RaceFree proof
+    unfold RaceFree
+    intro tid1 tid2 h_distinct a1 a2 ha1 ha2
+    -- The key insight: either accesses don't race (different locations/spaces),
+    -- or they are separated by the barrier at stmtIdx 5.
+    -- Phase 1 writes to shared tile at stmtIdx 3
+    -- Phase 2 reads from shared tile at stmtIdx 6
+    -- Since 3 < 5 < 6, they are barrier-separated
+    simp_all [transposeSpec, deviceIRToKernelSpec, transposeKernelIR, extractFromStmt,
+               extractReadsFromExpr, dexprToAddressPattern, List.lookup, getArrayName,
+               AccessExtractor.getArrayLocation, AccessExtractor.getMemorySpace,
+               List.reverse_cons, List.reverse_nil, List.mem_cons, List.mem_singleton,
+               List.append_nil, List.mem_nil_iff, or_false, false_or,
+               HasRace, SeparatedByBarrier, AddressPattern.couldCollide,
+               SymValue.isNonZero, GPUVerify.MemorySpace]
+    -- All goals should now be decidable propositions about memory spaces and locations
+    -- Use decide/trivial to discharge them
+    rcases h_distinct with ⟨_,_,h_neq⟩
+    rcases ha1 with ha1 | ha1 | ha1 | ha1 | ha1 | ha1 <;>
+    rcases ha2 with ha2 | ha2 | ha2 | ha2 | ha2 | ha2 <;>
+    simp_all [AddressPattern.eval, ha1, ha2, SymValue.isNonZero]
+  . -- BarrierUniform proof
+    unfold BarrierUniform
+    intros
+    trivial
+
+/-- Example: transpose a 4x4 matrix -/
+def transpose (n : Nat)
+    (mat : Array (Array Float)) : IO (Array (Array Float)) := do
+  let flattened := mat.flatMap id
+
+  let initState := mkKernelState
+    [ globalFloatArray `input flattened
+    , globalFloatArray `output (Array.replicate (n*n) 0.0)
+    ]
+    [ (`tile, KernelValue.arrayFloat (Array.replicate (n*n) 0.0))
+    ]
+
+  let threadsPerBlock := 8
+  let numBlocks := (n + threadsPerBlock - 1) / threadsPerBlock
+
+  let finalState ←
+    runKernelCPU
+      ⟨numBlocks, numBlocks, 1⟩
+      ⟨threadsPerBlock, threadsPerBlock, 1⟩
+      ⟨n, `input, `output, `tile⟩
+      initState
+      transposeKernel
+
+  let some (KernelValue.arrayFloat out) := finalState.globals.get? `output
+    | throw <| IO.userError "Result missing"
+  if out.size = n * n then
+    pure (Array.ofFn fun (i : Fin n) =>
+      Array.ofFn fun (j : Fin n) => out[i.val * n + j.val]!)
+  else
+    throw <| IO.userError s!"Size mismatch: {out.size} ≠ {n*n}"
+
+-- Test CPU execution
+#eval do transpose 4 #[#[1.0,2.0,3.0,4.0], #[5.0,6.0,7.0,8.0], #[9.0,10.0,11.0,12.0], #[13.0,14.0,15.0,16.0]]
+
+-- Check the extracted spec has correct structure
+#eval do
+  let spec := transposeSpec ⟨8, 8, 1⟩ ⟨1, 1, 1⟩
+  IO.println s!"Transpose KernelSpec:"
+  IO.println s!"  Block size: {spec.blockSize}"
+  IO.println s!"  Grid size: {spec.gridSize}"
+  IO.println s!"  Accesses: {spec.accesses.length}"
+  IO.println s!"  Barriers: {spec.barriers}"
+  -- The spec should show:
+  -- - Reads/writes to global arrays (input, output) at different locations
+  -- - Reads/writes to shared array (tile) at different locations
+  -- - A barrier between phases
+  IO.println "Accesses (inspect with repr):"
+  IO.println (repr spec.accesses)
+
+end SharedMemTranspose

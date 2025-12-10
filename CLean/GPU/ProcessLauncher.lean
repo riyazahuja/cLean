@@ -144,8 +144,7 @@ def compileKernelToPTX (kernel : Kernel) : IO CachedKernel := do
   if !ptxExists then
     IO.println s!"[GPU] Compiling {kernel.name} to PTX..."
 
-    -- Compile using nvcc
-    let nvccPath := "nvcc"
+    -- Compile using nvcc - try "nvcc" first, fallback to full path
     let args := #[
       "-ptx",
       "-O3",
@@ -153,6 +152,15 @@ def compileKernelToPTX (kernel : Kernel) : IO CachedKernel := do
       "-o", cached.ptxPath.toString,
       cached.cudaSourcePath.toString
     ]
+
+    -- Try nvcc from PATH first, fallback to full path if not found
+    let nvccPath ← do
+      let result ← IO.Process.output { cmd := "which", args := #["nvcc"] }
+      if result.exitCode == 0 then
+        pure "nvcc"
+      else
+        pure "/usr/local/cuda-12.5/bin/nvcc"
+
     IO.println s!"[nvcc] {nvccPath} {String.intercalate " " args.toList}"
     let output ← IO.Process.run {
       cmd := nvccPath

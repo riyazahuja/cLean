@@ -157,16 +157,16 @@ partial def stmtToCudaWithState (arrayTypes : Std.HashMap String String)
 
   | .ite cond thenBranch elseBranch =>
     let condStr := exprToCuda cond
-    -- Pass declared set into branches, but use same base declared for both
-    -- (variables declared in branches go out of scope)
-    let (thenCode, thenDeclared) := stmtToCudaWithState arrayTypes (indent ++ "  ") declared thenBranch
-    let (elseCode, elseDeclared) := stmtToCudaWithState arrayTypes (indent ++ "  ") thenDeclared elseBranch
+    -- Variables declared inside branches are scoped to those branches in C/CUDA
+    -- So we don't propagate them to outer scope - use original declared set
+    let (thenCode, _) := stmtToCudaWithState arrayTypes (indent ++ "  ") declared thenBranch
+    let (elseCode, _) := stmtToCudaWithState arrayTypes (indent ++ "  ") declared elseBranch
     let code := if elseCode.trim.isEmpty then
       s!"{indent}if ({condStr}) \{\n{thenCode}{indent}}\n"
     else
       s!"{indent}if ({condStr}) \{\n{thenCode}{indent}} else \{\n{elseCode}{indent}}\n"
-    -- Variables declared in branches are now known to outer scope
-    (code, elseDeclared)
+    -- Variables declared in branches don't escape their scope in C/CUDA
+    (code, declared)
 
   | .for varName lo hi body =>
     let loStr := exprToCuda lo
@@ -262,8 +262,8 @@ def genArrayParamDecl (arr : ArrayDecl) : String :=
     | t => dtypeToCuda t
   s!"{baseType}* {arr.name}"
 
-/-- Generate shared memory array declaration -/
-def genSharedArrayDecl (arr : ArrayDecl) (size : Nat := 256) : String :=
+/-- Generate shared memory array declaration with explicit size -/
+def genSharedArrayDecl (arr : ArrayDecl) (size : Nat) : String :=
   let baseType := match arr.ty with
     | .array t => dtypeToCuda t
     | t => dtypeToCuda t
@@ -274,8 +274,26 @@ def genLocalDecl (v : VarDecl) : String :=
   let typeStr := dtypeToCuda v.ty
   s!"  {typeStr} {v.name};\n"
 
+/-- Shared memory size configuration -/
+structure SharedMemConfig where
+  /-- Default size for shared arrays without explicit size -/
+  defaultSize : Nat := 256
+  /-- Per-array size overrides (array name → size) -/
+  arraySizes : Std.HashMap String Nat := {}
+  deriving Inhabited
+
+/-- Get the size for a shared array from config -/
+def SharedMemConfig.getSize (config : SharedMemConfig) (arr : ArrayDecl) : Nat :=
+  -- Priority: 1) explicit override in config, 2) size in ArrayDecl, 3) default
+  match config.arraySizes.get? arr.name with
+  | some size => size
+  | none =>
+    match arr.size with
+    | some s => s
+    | none => config.defaultSize
+
 /-- Generate complete CUDA kernel from DeviceIR.Kernel -/
-def kernelToCuda (k : Kernel) (sharedMemSize : Nat := 256) : String :=
+def kernelToCuda (k : Kernel) (sharedMemConfig : SharedMemConfig := {}) : String :=
   -- Use scalar parameters directly from k.params
   let scalarParamDecls := k.params.map genParamDecl
 
@@ -288,9 +306,9 @@ def kernelToCuda (k : Kernel) (sharedMemSize : Nat := 256) : String :=
 
   let signature := s!"extern \"C\" __global__ void {k.name}({paramList})"
 
-  -- Shared memory declarations
+  -- Shared memory declarations (each array gets its own size from config)
   let sharedDecls := k.sharedArrays.foldl
-    (fun acc arr => acc ++ genSharedArrayDecl arr sharedMemSize) ""
+    (fun acc arr => acc ++ genSharedArrayDecl arr (sharedMemConfig.getSize arr)) ""
 
   -- Local variable declarations
   let localDecls := k.locals.foldl
@@ -337,7 +355,7 @@ def genLaunchCode (kernelName : String) (config : LaunchConfig) (args : List Str
 /-! ## Complete CUDA Program Generation -/
 
 /-- Generate complete CUDA file with kernel, host code, and main function -/
-def genCompleteCudaProgram (k : Kernel) (config : LaunchConfig) (sharedMemSize : Nat := 256) : String :=
+def genCompleteCudaProgram (k : Kernel) (config : LaunchConfig) (sharedMemConfig : SharedMemConfig := {}) : String :=
   -- Header includes
   let includes :=
     "#include <cuda_runtime.h>\n" ++
@@ -346,7 +364,7 @@ def genCompleteCudaProgram (k : Kernel) (config : LaunchConfig) (sharedMemSize :
     "#include <assert.h>\n\n"
 
   -- Kernel definition
-  let kernelCode := kernelToCuda k sharedMemSize ++ "\n"
+  let kernelCode := kernelToCuda k sharedMemConfig ++ "\n"
 
   -- Helper function to check CUDA errors
   let errorCheck :=

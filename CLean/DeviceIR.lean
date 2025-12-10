@@ -117,6 +117,7 @@ structure ArrayDecl where
   name : String
   ty : DType
   space : MemorySpace
+  size : Option Nat := none  -- Optional size hint (used for shared memory allocation)
   deriving Repr, BEq, Inhabited
 
 -- Complete kernel definition

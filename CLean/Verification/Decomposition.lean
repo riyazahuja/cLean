@@ -124,7 +124,7 @@ theorem kernel_safe_implies_identity_access
     (h_spec : spec.blockSize = blockSize)
     (h_safe : KernelSafe spec)
     (h_all_identity : ∀ a ∈ spec.accesses, ∃ loc,
-      a = AccessPattern.write AddressPattern.identity loc) :
+      a = AccessPattern.write AddressPattern.identity loc .global) :
     IdentityAccessPattern body blockSize gridSize arr N := by
   sorry  -- Proof connects KernelSpec representation to actual execution
 
