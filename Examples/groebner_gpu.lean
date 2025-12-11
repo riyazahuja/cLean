@@ -11,6 +11,28 @@ import CLean.DeviceMacro
 import CLean.DeviceCodeGen
 import CLean.GPU.ProcessLauncher
 
+import CLean.ToGPUVerifyIR
+import CLean.GPU
+import CLean.DeviceMacro
+import CLean.DeviceIR
+import CLean.DeviceCodeGen
+import CLean.DeviceTranslation
+import CLean.DeviceInstances
+import CLean.GPU.ProcessLauncher
+
+import CLean.ToGPUVerifyIR
+import CLean.Verification.GPUVerifyStyle
+import CLean.Verification.Semantics
+import CLean.Verification.Decomposition
+
+open CLean.ToGPUVerifyIR
+open CLean.Verification.GPUVerify
+open CLean.Verification
+open Lean GpuDSL DeviceIR CLean.DeviceMacro CLean.DeviceCodeGen DeviceTranslation CLean.GPU.ProcessLauncher Json
+
+open CLean.ToGPUVerifyIR CLean.Verification CLean.Verification.GPUVerify
+
+
 namespace CLean.GroebnerGPU
 
 open Groebner
@@ -69,6 +91,160 @@ device_kernel gaussElimKernel : KernelM GaussElimArgs Unit := do
           let prod := (factor * pivotVal) % p
           let diff := ((matVal - prod) % p + p) % p
           mat.set idx diff
+
+
+def gaussElimSpec (config grid: Dim3): KernelSpec :=
+  deviceIRToKernelSpec gaussElimKernelIR config grid
+
+theorem gaussElim_safe : ∀ (config grid : Dim3), KernelSafe (gaussElimSpec config grid) := by
+  intro config grid
+  unfold KernelSafe
+  constructor
+  . unfold RaceFree
+    intro tid1 tid2 h_distinct a1 a2 ha1 ha2
+    simp_all [HasRace, gaussElimSpec, deviceIRToKernelSpec, gaussElimKernelIR, extractFromStmt, extractReadsFromExpr, dexprToAddressPattern, List.lookup, SeparatedByBarrier, AddressPattern.couldCollide, getArrayName, AccessExtractor.getArrayLocation, AccessExtractor.getMemorySpace]
+    intro h_race
+    rcases h_distinct with ⟨_,_,h_neq⟩
+    rcases ha1 with ha1 | ha1 | ha1 | ha1 <;>
+    rcases ha2 with ha2 | ha2 | ha2 | ha2 <;>
+    simp_all [AddressPattern.eval, SymValue.isNonZero]
+  . unfold BarrierUniform; intros; trivial
+
+
+
+
+
+
+
+def gaussElimInitMem (x y : Array Rat) (N : Nat) : VMem :=
+  fun arr idx =>
+    if arr = "x" then
+      if h : idx < x.size then VVal.rat x[idx] else VVal.rat 0
+    else if arr = "y" then
+      if h : idx < y.size then VVal.rat y[idx] else VVal.rat 0
+    else if arr = "r" then
+      VVal.rat 0
+    else
+      VVal.int 0
+
+/-- Execute a single thread of SAXPY and show what it computes -/
+theorem saxpy_thread_computes (N : Nat) (α : Rat) (x y : Array Rat)
+    (blockSize numBlocks : Nat)
+    (tid bid : Nat)
+    (h_tid : tid < blockSize)
+    (h_bid : bid < numBlocks)
+    (h_gid : globalIdx1D blockSize bid tid < N)
+    (h_x : x.size ≥ N)
+    (h_y : y.size ≥ N)
+    (mem₀ : VMem)
+    (h_mem_x : ∀ i, i < x.size → mem₀ "x" i = VVal.rat x[i]!)
+    (h_mem_y : ∀ i, i < y.size → mem₀ "y" i = VVal.rat y[i]!) :
+    let gid := globalIdx1D blockSize bid tid
+    let params : String → VVal := fun name =>
+      if name = "N" then VVal.nat N
+      else if name = "alpha" then VVal.rat α
+      else VVal.int 0
+    let mem_after := vExecThread1DWithParams saxpyKernelIR.body blockSize numBlocks tid bid params mem₀
+    mem_after.getR "r" gid = α * x[gid]! + y[gid]! := by
+
+  intro gid params mem_after
+  have h_cond : bid * blockSize + tid < N := by simp only [globalIdx1D] at h_gid; exact h_gid
+  have h_gid_lt_x : bid * blockSize + tid < x.size := by omega
+  have h_gid_lt_y : bid * blockSize + tid < y.size := by omega
+
+  simp only [mem_after, vExecThread1DWithParams, vExecThreadWithLocals, saxpyKernelIR,
+    vEvalStmt, vEvalExpr, vEvalBinOp, VCtx.setLocal, VMem.getR, gid, VCtx.mk', VCtx.getLocal,
+    globalIdx1D, VVal.toRat, VMem.get, VVal.toBool, VVal.toInt, VVal.toNat,
+    VMem.set, params, h_cond, ↓reduceIte]
+
+  simp_all [h_mem_x (bid * blockSize + tid) h_gid_lt_x,
+            h_mem_y (bid * blockSize + tid) h_gid_lt_y,
+            VMem.set
+          ]
+
+
+/-- Main functional correctness theorem for SAXPY
+
+    Given:
+    - Arrays x, y of size at least N
+    - Initial memory with x, y, and zeroed output r
+    - A grid/block configuration that covers all N elements
+
+    Then: After executing the kernel, r[i] = α * x[i] + y[i] for all i < N
+-/
+theorem saxpy_correct (N : Nat) (α : Rat) (x y : Array Rat)
+    (numBlocks blockSize : Nat)
+    (h_x : x.size ≥ N)
+    (h_y : y.size ≥ N)
+    (h_cover : N ≤ numBlocks * blockSize)
+    (h_blockSize_pos : blockSize > 0) :
+    let mem₀ := saxpyInitMem x y N
+    let params : String → VVal := fun name =>
+      if name = "N" then VVal.nat N
+      else if name = "alpha" then VVal.rat α
+      else VVal.int 0
+    let mem_f := vExecKernel1DWithParams saxpyKernelIR.body numBlocks blockSize params mem₀
+    ∀ i, i < N → mem_f.getR "r" i = α * x[i]! + y[i]! := by
+  intro mem₀ params mem_f i hi
+
+  -- Memory hypotheses
+  have h_mem_x : ∀ j, j < x.size → mem₀ "x" j = VVal.rat x[j]! := by
+    intro j hj
+    simp only [mem₀, saxpyInitMem, ↓reduceIte, hj, dite_true]
+    simp only [getElem!_pos, hj]
+
+  have h_mem_y : ∀ j, j < y.size → mem₀ "y" j = VVal.rat y[j]! := by
+    intro j hj
+    simp only [mem₀, saxpyInitMem, String.reduceEq, ↓reduceIte, hj, dite_true]
+    simp only [getElem!_pos, hj]
+
+  -- Use the thread correctness lemma!
+
+  -- helpers
+  have h_tid : i % blockSize < blockSize := Nat.mod_lt i h_blockSize_pos
+  have h_bid : i / blockSize < numBlocks := by
+    have h1 : i < numBlocks * blockSize := Nat.lt_of_lt_of_le hi h_cover
+    rw [Nat.mul_comm] at h1
+    exact Nat.div_lt_of_lt_mul h1
+  have h_gid : globalIdx1D blockSize (i / blockSize) (i % blockSize) = i := by
+    simp only [globalIdx1D]
+    ring_nf
+    exact Nat.div_add_mod' i blockSize
+  have h_gid_lt : globalIdx1D blockSize (i / blockSize) (i % blockSize) < N := by
+    rw [h_gid]; exact hi
+
+  have h_thread := saxpy_thread_computes N α x y blockSize numBlocks
+    (i % blockSize) (i / blockSize)
+    h_tid h_bid h_gid_lt h_x h_y mem₀ h_mem_x h_mem_y
+
+  -- if thread (bid, tid) writes to any index idx, then idx = globalIdx bid tid
+  have h_identity : CLean.Verification.IdentityAccessPatternWithParams saxpyKernelIR.body blockSize numBlocks params "r" N := by
+    intro bid tid mem idx h_bound h_writes
+    simp only [globalIdx1D]
+    by_contra h_neq
+    apply h_writes
+    simp only [ThreadWritesTo1DWithParams, vExecThread1DWithParams, vExecThreadWithLocals,
+              saxpyKernelIR, vEvalStmt, vEvalExpr, vEvalBinOp,
+              VCtx.mk', VCtx.getLocal, VCtx.setLocal,
+              VCtx.globalIdxX, VVal.toNat, VVal.toBool, VVal.toRat,
+              VMem.get, VMem.set] at h_writes ⊢
+    simp only [String.reduceEq, true_and, ↓reduceIte, and_true,
+              ne_eq, h_neq, not_false_eq_true, and_false]
+    split_ifs with h_lt
+    · simp only [VMem.set, h_neq, and_false, ↓reduceIte]
+    · rfl
+
+  have h_decomp : (vExecKernel1DWithParams saxpyKernelIR.body numBlocks blockSize params mem₀) "r" i =
+      vExecThread1DWithParams saxpyKernelIR.body blockSize numBlocks
+      (i % blockSize) (i / blockSize) params mem₀ "r" i := by
+    exact vExecKernel1DWithParams_at_idx saxpyKernelIR.body numBlocks blockSize "r" N params mem₀ i hi h_cover h_blockSize_pos h_identity
+
+  simp_all [VMem.getR, h_gid, VMem.get, mem_f, h_decomp]
+  convert h_thread using 2
+
+
+
+
 
 -- Show generated IR and CUDA code
 #eval do

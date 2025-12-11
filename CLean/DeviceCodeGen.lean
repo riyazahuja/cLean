@@ -66,9 +66,6 @@ partial def exprToCuda : DExpr → String
   | .var name => name
   | .binop op a b =>
     match op with
-    | .mul =>
-      -- Use long long for multiplication to avoid overflow
-      s!"((long long){exprToCuda a} * {exprToCuda b})"
     | _ => s!"({exprToCuda a} {binopToCuda op} {exprToCuda b})"
   | .unop op a => s!"({unopToCuda op}{exprToCuda a})"
   | .index arr idx => s!"{exprToCuda arr}[{exprToCuda idx}]"

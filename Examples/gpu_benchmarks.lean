@@ -2,7 +2,7 @@
   GPU vs CPU Benchmark Suite
 
   Demonstrates cases where GPU acceleration provides significant speedup.
-  
+
   Key insight: GPU wins when:
   1. Per-element computation is high (amortizes transfer cost)
   2. Large data sizes (parallelism matters more)
@@ -43,7 +43,7 @@ device_kernel vectorComputeKernel : KernelM VectorOpArgs Unit := do
   let iterations := args.iterations
   let data : GlobalArray Int := ⟨args.data⟩
   let result : GlobalArray Int := ⟨args.result⟩
-  
+
   let idx ← globalIdxX
   if idx < n then do
     let val ← data.get idx
@@ -65,9 +65,9 @@ device_kernel vectorComputeKernel : KernelM VectorOpArgs Unit := do
 def launchVectorCompute (data : Array Int) (p : Nat) (iterations : Nat) : IO (Array Int) := do
   let n := data.size
   let result : Array Int := Array.replicate n 0
-  
+
   let cached ← compileKernelToPTX vectorComputeKernelIR
-  
+
   let scalarParams : Array ScalarValue := #[
     ScalarValue.int n,
     ScalarValue.int p,
@@ -78,17 +78,17 @@ def launchVectorCompute (data : Array Int) (p : Nat) (iterations : Nat) : IO (Ar
     (`result, result)
   ]
   let jsonInput := buildLauncherInputBetter scalarParams arrays
-  
+
   let grid : Dim3 := ⟨(n + 255) / 256, 1, 1⟩
   let block : Dim3 := ⟨256, 1, 1⟩
-  
+
   let launcherArgs := #[
     cached.ptxPath.toString,
     vectorComputeKernelIR.name,
     toString grid.x, toString grid.y, toString grid.z,
     toString block.x, toString block.y, toString block.z
   ]
-  
+
   let child ← IO.Process.spawn {
     cmd := "./gpu_launcher"
     args := launcherArgs
@@ -96,17 +96,17 @@ def launchVectorCompute (data : Array Int) (p : Nat) (iterations : Nat) : IO (Ar
     stdout := .piped
     stderr := .piped
   }
-  
+
   child.stdin.putStr jsonInput
   child.stdin.putStr "\n"
   child.stdin.flush
-  
+
   let stdout ← child.stdout.readToEnd
   let exitCode ← child.wait
-  
+
   if exitCode != 0 then
     throw <| IO.userError s!"GPU kernel failed with exit code {exitCode}"
-  
+
   match Lean.Json.parse stdout with
   | Except.error err => throw <| IO.userError s!"JSON parse error: {err}"
   | Except.ok json =>
@@ -155,7 +155,7 @@ device_kernel matVecKernel : KernelM MatVecArgs Unit := do
   let matrix : GlobalArray Int := ⟨args.matrix⟩
   let vector : GlobalArray Int := ⟨args.vector⟩
   let result : GlobalArray Int := ⟨args.result⟩
-  
+
   let row ← globalIdxX
   if row < rows then do
     let mut sum := 0
@@ -173,9 +173,9 @@ device_kernel matVecKernel : KernelM MatVecArgs Unit := do
 
 def launchMatVec (matrix : Array Int) (vector : Array Int) (rows cols : Nat) (p : Nat) : IO (Array Int) := do
   let result : Array Int := Array.replicate rows 0
-  
+
   let cached ← compileKernelToPTX matVecKernelIR
-  
+
   let scalarParams : Array ScalarValue := #[
     ScalarValue.int rows,
     ScalarValue.int cols,
@@ -187,17 +187,17 @@ def launchMatVec (matrix : Array Int) (vector : Array Int) (rows cols : Nat) (p 
     (`result, result)
   ]
   let jsonInput := buildLauncherInputBetter scalarParams arrays
-  
+
   let grid : Dim3 := ⟨(rows + 255) / 256, 1, 1⟩
   let block : Dim3 := ⟨256, 1, 1⟩
-  
+
   let launcherArgs := #[
     cached.ptxPath.toString,
     matVecKernelIR.name,
     toString grid.x, toString grid.y, toString grid.z,
     toString block.x, toString block.y, toString block.z
   ]
-  
+
   let child ← IO.Process.spawn {
     cmd := "./gpu_launcher"
     args := launcherArgs
@@ -205,17 +205,17 @@ def launchMatVec (matrix : Array Int) (vector : Array Int) (rows cols : Nat) (p 
     stdout := .piped
     stderr := .piped
   }
-  
+
   child.stdin.putStr jsonInput
   child.stdin.putStr "\n"
   child.stdin.flush
-  
+
   let stdout ← child.stdout.readToEnd
   let exitCode ← child.wait
-  
+
   if exitCode != 0 then
     throw <| IO.userError s!"GPU kernel failed"
-  
+
   match Lean.Json.parse stdout with
   | Except.error err => throw <| IO.userError s!"JSON parse error: {err}"
   | Except.ok json =>
@@ -265,7 +265,7 @@ device_kernel polyEvalKernel : KernelM PolyEvalArgs Unit := do
   let coeffs : GlobalArray Int := ⟨args.coeffs⟩
   let points : GlobalArray Int := ⟨args.points⟩
   let results : GlobalArray Int := ⟨args.results⟩
-  
+
   let idx ← globalIdxX
   if idx < npoints then do
     let x ← points.get idx
@@ -286,9 +286,9 @@ def launchPolyEval (coeffs : Array Int) (points : Array Int) (p : Nat) : IO (Arr
   let npoints := points.size
   let degree := coeffs.size - 1
   let results : Array Int := Array.replicate npoints 0
-  
+
   let cached ← compileKernelToPTX polyEvalKernelIR
-  
+
   let scalarParams : Array ScalarValue := #[
     ScalarValue.int npoints,
     ScalarValue.int degree,
@@ -300,17 +300,17 @@ def launchPolyEval (coeffs : Array Int) (points : Array Int) (p : Nat) : IO (Arr
     (`results, results)
   ]
   let jsonInput := buildLauncherInputBetter scalarParams arrays
-  
+
   let grid : Dim3 := ⟨(npoints + 255) / 256, 1, 1⟩
   let block : Dim3 := ⟨256, 1, 1⟩
-  
+
   let launcherArgs := #[
     cached.ptxPath.toString,
     polyEvalKernelIR.name,
     toString grid.x, toString grid.y, toString grid.z,
     toString block.x, toString block.y, toString block.z
   ]
-  
+
   let child ← IO.Process.spawn {
     cmd := "./gpu_launcher"
     args := launcherArgs
@@ -318,17 +318,17 @@ def launchPolyEval (coeffs : Array Int) (points : Array Int) (p : Nat) : IO (Arr
     stdout := .piped
     stderr := .piped
   }
-  
+
   child.stdin.putStr jsonInput
   child.stdin.putStr "\n"
   child.stdin.flush
-  
+
   let stdout ← child.stdout.readToEnd
   let exitCode ← child.wait
-  
+
   if exitCode != 0 then
     throw <| IO.userError s!"GPU kernel failed"
-  
+
   match Lean.Json.parse stdout with
   | Except.error _ => throw <| IO.userError "JSON parse error"
   | Except.ok json =>
@@ -395,14 +395,14 @@ def main : IO Unit := do
 
   for (n, iters, desc) in vectorTests do
     IO.println s!"  Test: {desc}"
-    
+
     -- Generate random data
     let mut data : Array Int := #[]
     let mut seed := 12345
     for _ in [:n] do
       seed := (seed * 1103515245 + 12345) % (2^31)
       data := data.push ((seed % PRIME) : Int)
-    
+
     -- GPU timing
     let startGPU ← IO.monoNanosNow
     let gpuResult ← launchVectorCompute data PRIME iters
@@ -414,15 +414,15 @@ def main : IO Unit := do
     let cpuResult := cpuVectorCompute data PRIME iters
     let endCPU ← IO.monoNanosNow
     let cpuMs := (endCPU - startCPU).toFloat / 1000000.0
-    
+
     -- Verify correctness
     let correct := gpuResult[0]? == cpuResult[0]?
-    
+
     let speedup := cpuMs / gpuMs
     let winner := if speedup > 1.0 then "GPU" else "CPU"
-    let speedupStr := if speedup > 1.0 then s!"{speedup.toString.take 5}x faster" 
+    let speedupStr := if speedup > 1.0 then s!"{speedup.toString.take 5}x faster"
                       else s!"{(1.0/speedup).toString.take 5}x slower"
-    
+
     IO.println s!"    CPU: {cpuMs.toString.take 8}ms | GPU: {gpuMs.toString.take 8}ms | {winner} {speedupStr} | Correct: {correct}"
 
   IO.println ""
@@ -447,20 +447,20 @@ def main : IO Unit := do
 
   for (rows, cols, desc) in matVecTests do
     IO.println s!"  Test: {desc}"
-    
+
     -- Generate random matrix and vector
     let mut matrix : Array Int := #[]
     let mut vector : Array Int := #[]
     let mut seed := 54321
-    
+
     for _ in [:rows * cols] do
       seed := (seed * 1103515245 + 12345) % (2^31)
       matrix := matrix.push ((seed % PRIME) : Int)
-    
+
     for _ in [:cols] do
       seed := (seed * 1103515245 + 12345) % (2^31)
       vector := vector.push ((seed % PRIME) : Int)
-    
+
     -- GPU timing
     let startGPU ← IO.monoNanosNow
     let gpuResult ← launchMatVec matrix vector rows cols PRIME
@@ -472,15 +472,15 @@ def main : IO Unit := do
     let cpuResult := cpuMatVec matrix vector rows cols PRIME
     let endCPU ← IO.monoNanosNow
     let cpuMs := (endCPU - startCPU).toFloat / 1000000.0
-    
+
     -- Verify correctness (check first few elements)
     let correct := gpuResult[0]? == cpuResult[0]? && gpuResult[1]? == cpuResult[1]?
-    
+
     let speedup := cpuMs / gpuMs
     let winner := if speedup > 1.0 then "GPU" else "CPU"
-    let speedupStr := if speedup > 1.0 then s!"{speedup.toString.take 5}x faster" 
+    let speedupStr := if speedup > 1.0 then s!"{speedup.toString.take 5}x faster"
                       else s!"{(1.0/speedup).toString.take 5}x slower"
-    
+
     IO.println s!"    CPU: {cpuMs.toString.take 8}ms | GPU: {gpuMs.toString.take 8}ms | {winner} {speedupStr} | Correct: {correct}"
 
   IO.println ""
@@ -505,20 +505,20 @@ def main : IO Unit := do
 
   for (npoints, degree, desc) in polyTests do
     IO.println s!"  Test: {desc}"
-    
+
     -- Generate random coefficients and points
     let mut coeffs : Array Int := #[]
     let mut points : Array Int := #[]
     let mut seed := 98765
-    
+
     for _ in [:degree + 1] do
       seed := (seed * 1103515245 + 12345) % (2^31)
       coeffs := coeffs.push ((seed % PRIME) : Int)
-    
+
     for _ in [:npoints] do
       seed := (seed * 1103515245 + 12345) % (2^31)
       points := points.push ((seed % PRIME) : Int)
-    
+
     -- GPU timing
     let startGPU ← IO.monoNanosNow
     let gpuResult ← launchPolyEval coeffs points PRIME
@@ -530,15 +530,15 @@ def main : IO Unit := do
     let cpuResult := cpuPolyEval coeffs points PRIME
     let endCPU ← IO.monoNanosNow
     let cpuMs := (endCPU - startCPU).toFloat / 1000000.0
-    
+
     -- Verify correctness
     let correct := gpuResult[0]? == cpuResult[0]?
-    
+
     let speedup := cpuMs / gpuMs
     let winner := if speedup > 1.0 then "GPU" else "CPU"
-    let speedupStr := if speedup > 1.0 then s!"{speedup.toString.take 5}x faster" 
+    let speedupStr := if speedup > 1.0 then s!"{speedup.toString.take 5}x faster"
                       else s!"{(1.0/speedup).toString.take 5}x slower"
-    
+
     IO.println s!"    CPU: {cpuMs.toString.take 8}ms | GPU: {gpuMs.toString.take 8}ms | {winner} {speedupStr} | Correct: {correct}"
 
   IO.println ""

@@ -27,3 +27,27 @@ lean_exe examples {
   root := `Examples
   supportInterpreter := true
 }
+
+lean_exe benchmark_gpu {
+  root := `benchmark_gpu
+  supportInterpreter := true
+}
+
+lean_lib Benchmarks {
+  roots := #[`Benchmarks]
+}
+
+lean_exe benchmarks {
+  root := `Benchmarks.Main
+  supportInterpreter := true
+}
+
+lean_exe generateptx {
+  root := `Benchmarks.GeneratePTX
+  supportInterpreter := true
+}
+
+lean_exe groebner_bench {
+  root := `Benchmarks.Groebner.Main
+  supportInterpreter := true
+}
