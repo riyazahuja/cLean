@@ -38,6 +38,8 @@ device_kernel saxpyKernel : KernelM saxpyArgs Unit := do
     let yi ← y.get i
     r.set i (alpha * xi + yi)
 
+
+
 def saxpySpec (config grid: Dim3): KernelSpec :=
   deviceIRToKernelSpec saxpyKernelIR config grid
 
@@ -102,7 +104,7 @@ def saxpyGPU (n : Nat)
 #eval do saxpyCPU 2 8.0 #[1.0, 1.0] #[3.0,3.0]
 #eval do saxpyGPU 2 8.0 #[1.0, 1.0] #[3.0, 3.0]
 
-
+#eval CLean.DeviceCodeGen.kernelToCuda saxpyKernelIR
 
 def saxpyInitMem (x y : Array Rat) (N : Nat) : VMem :=
   fun arr idx =>

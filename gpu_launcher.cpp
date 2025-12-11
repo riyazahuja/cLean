@@ -374,7 +374,13 @@ int main(int argc, char** argv) {
     std::vector<CUdeviceptr> deviceArrays;
     std::vector<size_t> arraySizes;  // Track sizes for copy-back
     std::vector<bool> arrayIsInt;    // Track types for copy-back
-    
+
+    // Create events for H2D timing
+    cudaEvent_t h2dStart, h2dStop;
+    CUDA_CHECK(cudaEventCreate(&h2dStart));
+    CUDA_CHECK(cudaEventCreate(&h2dStop));
+    CUDA_CHECK(cudaEventRecord(h2dStart, 0));
+
     for (const auto& arr : params.arrays) {
         CUdeviceptr devPtr;
         size_t numElements;
@@ -398,6 +404,12 @@ int main(int argc, char** argv) {
         arraySizes.push_back(numElements);
         arrayIsInt.push_back(arr.isInt);
     }
+
+    // Record H2D completion and calculate time
+    CUDA_CHECK(cudaEventRecord(h2dStop, 0));
+    CUDA_CHECK(cudaEventSynchronize(h2dStop));
+    float h2dTimeMs = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&h2dTimeMs, h2dStart, h2dStop));
 
     // Prepare kernel arguments
     // We need stable storage for scalar values since we pass pointers
@@ -429,6 +441,14 @@ int main(int argc, char** argv) {
         kernelArgs.push_back(&ptr);
     }
 
+    // Create CUDA events for kernel timing
+    cudaEvent_t startEvent, stopEvent;
+    CUDA_CHECK(cudaEventCreate(&startEvent));
+    CUDA_CHECK(cudaEventCreate(&stopEvent));
+
+    // Record start time
+    CUDA_CHECK(cudaEventRecord(startEvent, 0));
+
     // Launch kernel
     CU_CHECK(cuLaunchKernel(
         kernel,
@@ -440,8 +460,26 @@ int main(int argc, char** argv) {
         nullptr
     ));
 
-    // Synchronize
-    CU_CHECK(cuCtxSynchronize());
+    // Record stop time
+    CUDA_CHECK(cudaEventRecord(stopEvent, 0));
+    CUDA_CHECK(cudaEventSynchronize(stopEvent));
+
+    // Calculate kernel execution time
+    float kernelTimeMs = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&kernelTimeMs, startEvent, stopEvent));
+
+    // Print kernel time to stderr
+    std::cerr << "[Launcher] Kernel execution time: " << kernelTimeMs << " ms" << std::endl;
+
+    // Cleanup kernel events
+    CUDA_CHECK(cudaEventDestroy(startEvent));
+    CUDA_CHECK(cudaEventDestroy(stopEvent));
+
+    // Create events for D2H timing
+    cudaEvent_t d2hStart, d2hStop;
+    CUDA_CHECK(cudaEventCreate(&d2hStart));
+    CUDA_CHECK(cudaEventCreate(&d2hStop));
+    CUDA_CHECK(cudaEventRecord(d2hStart, 0));
 
     // Copy results back
     std::cout << "{\"results\":{";
@@ -476,6 +514,23 @@ int main(int argc, char** argv) {
         std::cout << "]";
     }
     std::cout << "}}" << std::endl;
+
+    // Record D2H completion and calculate time
+    CUDA_CHECK(cudaEventRecord(d2hStop, 0));
+    CUDA_CHECK(cudaEventSynchronize(d2hStop));
+    float d2hTimeMs = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&d2hTimeMs, d2hStart, d2hStop));
+
+    // Print all timing info to stderr
+    std::cerr << "[Launcher] H2D transfer time: " << h2dTimeMs << " ms" << std::endl;
+    std::cerr << "[Launcher] D2H transfer time: " << d2hTimeMs << " ms" << std::endl;
+
+    // Cleanup D2H events
+    CUDA_CHECK(cudaEventDestroy(d2hStart));
+    CUDA_CHECK(cudaEventDestroy(d2hStop));
+    // Cleanup H2D events
+    CUDA_CHECK(cudaEventDestroy(h2dStart));
+    CUDA_CHECK(cudaEventDestroy(h2dStop));
 
     // Cleanup
     for (CUdeviceptr ptr : deviceArrays) {

@@ -7,6 +7,16 @@ We are building a domain-specific language embedded in Lean 4 for writing CUDA-s
 
 As of the milestone (Dec 1, 2025), the core end-to-end pipeline is implemented: users can write kernels in the Lean DSL, simulate them on a deterministic CPU interpreter, transpile to CUDA C++/PTX, run on actual NVIDIA GPUs via a small C++ launcher, and automatically prove safety (race-freedom and barrier uniformity) for a subset of representative kernels (e.g., SAXPY, prefix sum, matrix multiplication).
 
+## Reports
+
+
+
+You can find the final project report here: [final_report.pdf](final_report.pdf)
+
+You can find the project checkin here: [milestone.pdf](milestone.pdf)
+
+You can find the project proposal here: [prop.pdf](prop.pdf)
+
 ## Background
 
 GPU kernels are critical for modern high-performance computing, and as these kernels run at large scale and often manipulate shared memory across thousands of threads, safety (e.g., absence of data races, correct synchronization, etc) and correctness (the kernel actually 

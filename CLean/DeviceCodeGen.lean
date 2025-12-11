@@ -64,7 +64,9 @@ partial def exprToCuda : DExpr → String
   | .floatLit f => toString f ++ "f"
   | .boolLit b => if b then "true" else "false"
   | .var name => name
-  | .binop op a b => s!"({exprToCuda a} {binopToCuda op} {exprToCuda b})"
+  | .binop op a b =>
+    match op with
+    | _ => s!"({exprToCuda a} {binopToCuda op} {exprToCuda b})"
   | .unop op a => s!"({unopToCuda op}{exprToCuda a})"
   | .index arr idx => s!"{exprToCuda arr}[{exprToCuda idx}]"
   | .field obj fieldName => s!"{exprToCuda obj}.{fieldName}"
@@ -116,15 +118,25 @@ partial def inferExprType (arrayTypes : Std.HashMap String String) (expr : DExpr
     | .var arrName => arrayTypes.getD arrName "float"
     | _ => "float"  -- Default for complex array expressions
   | .var name =>
-    -- Simple heuristic based on name
+    -- Simple heuristic based on name - default to int for most GPU kernel values
     if name.endsWith "Idx" || name.endsWith "idx" ||
        name == "i" || name == "j" || name == "k" || name == "N" || name == "length" ||
        name == "index" || name == "idx" || name == "idx1" || name == "idx2" ||
-       name == "twod" || name == "twod1" || name.endsWith "d1" then
+       name == "twod" || name == "twod1" || name.endsWith "d1" ||
+       -- Common dimension/count names
+       name == "nrows" || name == "ncols" || name == "rows" || name == "cols" ||
+       name == "size" || name == "n" || name == "m" ||
+       name == "p" || name == "prime" || name == "mod" || name == "modulus" ||
+       name == "row" || name == "col" ||
+       -- Values that are computed from int expressions
+       name == "factor" || name == "matVal" || name == "pivotVal" ||
+       name == "prod" || name == "diff" ||
+       name.endsWith "Row" || name.endsWith "Col" || name.endsWith "Dim" ||
+       name.endsWith "Count" || name.endsWith "Num" || name.endsWith "Size" then
       "int"
     else
-      "float"
-  | _ => "float"  -- Default
+      "int"  -- Default to int for GPU kernels (most values are indices/counts)
+  | _ => "int"  -- Default to int
 
 /-- Convert DStmt to CUDA C statement string with proper indentation, tracking declared variables -/
 partial def stmtToCudaWithState (arrayTypes : Std.HashMap String String)
