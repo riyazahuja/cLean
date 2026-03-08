@@ -315,6 +315,31 @@ def writeMem? (st : State) (space : AddrSpace) (ty : ScalarTy) (addr : Addr) (va
     let mem := writeBytes mem addr.offset bytes
     setSpaceBaseMem? st addr mem
 
+def evalCvta? (space : AddrSpace) (value : Value) : Option Value :=
+  match space, value with
+  | .generic, .gaddr s off => some (.gaddr s off)
+  | .global, .u32 off => some (.gaddr .global off.toNat)
+  | .global, .u64 off => some (.gaddr .global off.toNat)
+  | .global, .gaddr .global off => some (.gaddr .global off)
+  | .shared, .u32 off => some (.gaddr .shared off.toNat)
+  | .shared, .u64 off => some (.gaddr .shared off.toNat)
+  | .shared, .gaddr .shared off => some (.gaddr .shared off)
+  | .local, .u32 off => some (.gaddr .local off.toNat)
+  | .local, .u64 off => some (.gaddr .local off.toNat)
+  | .local, .gaddr .local off => some (.gaddr .local off)
+  | .param, .u32 off => some (.gaddr .param off.toNat)
+  | .param, .u64 off => some (.gaddr .param off.toNat)
+  | .param, .gaddr .param off => some (.gaddr .param off)
+  | .const, .u32 off => some (.gaddr .const off.toNat)
+  | .const, .u64 off => some (.gaddr .const off.toNat)
+  | .const, .gaddr .const off => some (.gaddr .const off)
+  | _, _ => none
+
+def evalIsspacep? (space : AddrSpace) (value : Value) : Option Bool :=
+  match value with
+  | .gaddr s _ => some (s == space)
+  | _ => none
+
 mutual
   partial def evalRValue? (st : State) (cta : CTAId) (warp : WarpId) (lane : LaneId) : RValue → Option Value
     | .imm v => some v
@@ -538,8 +563,16 @@ def stepInstr? (st : State) (cta : CTAId) (warp : WarpId) (gi : GInstr) : Option
             let v <- evalRValue? cur cta warp lane value
             cur <- writeMem? cur dst.space dst.ty addr v
           pure cur
-      | .cvta _ _ _ => none
-      | .isspacep _ _ _ => none
+      | .cvta dst space src =>
+          applyToLaneIds? st cta warp participants fun lane laneState => do
+            let value <- evalRValue? st cta warp lane src
+            let gaddr <- evalCvta? space value
+            pure (writeReg laneState dst gaddr)
+      | .isspacep dst space src =>
+          applyToLaneIds? st cta warp participants fun lane laneState => do
+            let value <- evalRValue? st cta warp lane src
+            let b <- evalIsspacep? space value
+            pure (writePred laneState dst b)
       | .barrierCTA _ => none
       | .warp _ => none
       | .atomic _ _ _ _ _ => none

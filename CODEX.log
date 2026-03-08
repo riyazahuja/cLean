@@ -18,3 +18,5 @@
 - Signed `s32`/`s64` arithmetic now normalizes results back into the corresponding fixed-width range, while read-set helpers remain list-style approximations rather than extensional sets.
 
 2026-03-08: Simplified Examples relation proofs to use explicit StepInstr/StepBlock/StepWarp/StepMachine witness parameters. Kept semantic helpers unfoldable/public where proof-relevant and retained decidable/reflection support for WF and lockstep predicates.
+
+2026-03-08: Expanded Lemmas.lean with stable state-update/accessor lemmas (CTA/warp/lane get/set), read/write aliases, and evalCvta?/evalIsspacep? facts. Deferred heavier step-level and memory/WF preservation proofs until after the state-update interface was stabilized. Verified with lake build.

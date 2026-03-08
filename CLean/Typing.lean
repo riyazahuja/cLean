@@ -22,6 +22,14 @@ def scalarCodecSupported? : ScalarTy → Bool
   | .b8 | .b16 | .b32 | .b64
   | .f16 | .bf16 | .f32 | .f64 => true
 
+def cvtaSourceSupported? : ScalarTy → Bool
+  | .u32 | .u64 => true
+  | _ => false
+
+def isGenericAddrValue? : Value → Bool
+  | .gaddr _ _ => true
+  | _ => false
+
 def valueHasType : Value → ScalarTy → Prop
   | .pred _, .pred => True
   | .u8 _, .u8 => True

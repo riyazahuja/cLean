@@ -47,6 +47,45 @@ private def lane0Terminated (st : State) : Bool :=
   | some laneState => laneState.status == .terminated
   | none => false
 
+private def cvtaLane0 : LaneState :=
+  { regs := ({} : Std.HashMap RegName Value).insert "p" (.u64 64), pc := ("entry", 0) }
+
+private def cvtaWarp : WarpState :=
+  { lanes := (Array.replicate 32 { pc := ("entry", 0) }).set! 0 cvtaLane0, activeMask := 1 }
+
+private def cvtaCTA : CTAState :=
+  { warps := ({} : Std.HashMap WarpId WarpState).insert 0 cvtaWarp }
+
+private def cvtaState : State :=
+  { kernelEnv := { entry := "entry", blocks := ({} : Std.HashMap BlockLabel Block).insert "entry" exampleBlock }
+    ctas := ({} : Std.HashMap CTAId CTAState).insert 0 cvtaCTA }
+
+private def afterCvtaState : State :=
+  match Helpers.stepInstr? cvtaState 0 0 { instr := .cvta "gp" .global (.reg "p") } with
+  | some st => st
+  | none => cvtaState
+
+private def afterIsspacepState : State :=
+  match Helpers.stepInstr? afterCvtaState 0 0 { instr := .isspacep "q" .global (.reg "gp") } with
+  | some st => st
+  | none => afterCvtaState
+
+private def lane0HasGlobalAddr (st : State) : Bool :=
+  match st.getLane? 0 0 lane0 with
+  | some laneState =>
+      match laneState.regs["gp"]? with
+      | some (.gaddr .global 64) => true
+      | _ => false
+  | none => false
+
+private def lane0PredQTrue (st : State) : Bool :=
+  match st.getLane? 0 0 lane0 with
+  | some laneState =>
+      match laneState.preds["q"]? with
+      | some true => true
+      | _ => false
+  | none => false
+
 example : (Helpers.rvalueReadSet (.triop .selp (.reg "a") (.reg "b") (.pred "p"))).regs = ["a", "b"] := by
   native_decide
 
@@ -63,6 +102,12 @@ example : State.wf? exampleState = true := by
   native_decide
 
 example : Helpers.lockstepRunnable? baseWarp = true := by
+  native_decide
+
+example : (Helpers.stepInstr? cvtaState 0 0 { instr := .cvta "gp" .global (.reg "p") }).isSome = true := by
+  native_decide
+
+example : (Helpers.stepInstr? afterCvtaState 0 0 { instr := .isspacep "q" .global (.reg "gp") }).isSome = true := by
   native_decide
 
 example : ∃ st', StepInstr exampleState 0 0 exampleAssign st' := by
@@ -112,6 +157,12 @@ example : lane0HasR1Seven afterAssignState = true := by
   native_decide
 
 example : lane0Terminated afterTerminateState = true := by
+  native_decide
+
+example : lane0HasGlobalAddr afterCvtaState = true := by
+  native_decide
+
+example : lane0PredQTrue afterIsspacepState = true := by
   native_decide
 
 end CLean
