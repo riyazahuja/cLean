@@ -1,0 +1,607 @@
+diff --git a/CLean/Examples.lean b/CLean/Examples.lean
+index 57b1c0a..1549522 100644
+--- a/CLean/Examples.lean
++++ b/CLean/Examples.lean
+@@ -1,5 +1,5 @@
+ import CLean.Semantics
+-
++import Mathlib.Tactic
+ namespace CLean
+ 
+ open Helpers
+@@ -17,10 +17,103 @@ private def exampleBlock : Block :=
+     body := #[( { instr := .assignReg "r1" (.imm (.u32 7)) } : GInstr )]
+     term := .terminate }
+ 
++private def exampleAssign : GInstr :=
++  { instr := .assignReg "r1" (.imm (.u32 7)) }
++
+ private def exampleState : State :=
+   { kernelEnv := { entry := "entry", blocks := ({} : Std.HashMap BlockLabel Block).insert "entry" exampleBlock }
+     ctas := ({} : Std.HashMap CTAId CTAState).insert 0 baseCTA }
+ 
++private def afterAssignState : State :=
++  match Helpers.stepInstr? exampleState 0 0 { instr := .assignReg "r1" (.imm (.u32 7)) } with
++  | some st => st
++  | none => exampleState
++
++private def afterTerminateState : State :=
++  match Helpers.stepTerminator? afterAssignState 0 0 .terminate with
++  | some st => st
++  | none => afterAssignState
++
++private def afterAssignWarp : WarpState :=
++  match afterAssignState.getWarp? 0 0 with
++  | some warpState => warpState
++  | none => baseWarp
++
++private def lane0HasR1Seven (st : State) : Bool :=
++  match st.getLane? 0 0 lane0 with
++  | some laneState =>
++      match laneState.regs["r1"]? with
++      | some (.u32 7) => true
++      | _ => false
++  | none => false
++
++private def lane0Terminated (st : State) : Bool :=
++  match st.getLane? 0 0 lane0 with
++  | some laneState => laneState.status == .terminated
++  | none => false
++
++private lemma exampleStateWF : State.wf exampleState := by
++  unfold State.wf State.wf? KernelEnv.wf? CTAState.wf? WarpState.wf? exampleState baseCTA baseWarp
++  native_decide
++
++private lemma baseWarpWF : WarpState.wf baseWarp := by
++  unfold WarpState.wf WarpState.wf? baseWarp
++  native_decide
++
++private lemma exampleGetWarp : exampleState.getWarp? 0 0 = some baseWarp := by
++  simp [State.getWarp?, State.getCTA?, exampleState, baseCTA]
++
++private lemma exampleLockstep : Helpers.lockstepRunnable baseWarp := by
++  unfold Helpers.lockstepRunnable Helpers.currentRunnablePc? Helpers.runnableLaneIds Helpers.laneIsRunnable baseWarp
++  native_decide
++
++private lemma exampleRunnablePc : Helpers.RunnablePc baseWarp ("entry", 0) := by
++  unfold Helpers.RunnablePc Helpers.currentRunnablePc? Helpers.runnableLaneIds Helpers.laneIsRunnable baseWarp
++  native_decide
++
++private lemma exampleParticipants : Helpers.ParticipatingRunnable baseWarp exampleAssign.guard? [lane0] := by
++  unfold Helpers.ParticipatingRunnable Helpers.participatingRunnableLaneIds? Helpers.currentRunnablePc?
++    Helpers.runnableLaneIds Helpers.laneIsRunnable Helpers.guardHolds? exampleAssign baseWarp lane0
++  native_decide
++
++private lemma exampleInstrStep :
++    Helpers.stepInstr? exampleState 0 0 exampleAssign = some afterAssignState := by
++  unfold afterAssignState
++  split <;> simp
++
++private lemma afterAssignStateWF : State.wf afterAssignState := by
++  unfold State.wf State.wf? KernelEnv.wf? CTAState.wf? WarpState.wf? afterAssignState afterAssignState
++  native_decide
++
++private lemma afterAssignGetWarp : afterAssignState.getWarp? 0 0 = some afterAssignWarp := by
++  unfold afterAssignWarp afterAssignState
++  split <;> simp [State.getWarp?, State.getCTA?, exampleState, baseCTA]
++
++private lemma afterAssignWarpWF : WarpState.wf afterAssignWarp := by
++  unfold WarpState.wf WarpState.wf? afterAssignWarp afterAssignState
++  split <;> simp [baseWarp]
++
++private lemma afterAssignLockstep : Helpers.lockstepRunnable afterAssignWarp := by
++  unfold afterAssignWarp afterAssignState
++  split
++  · simp [Helpers.lockstepRunnable, Helpers.currentRunnablePc?, Helpers.runnableLaneIds, Helpers.laneIsRunnable,
++      Helpers.stepInstr?, Helpers.evalRValue?, Helpers.advanceRunnablePcs?, exampleState, baseCTA, baseWarp, exampleAssign,
++      Helpers.readReg, Helpers.readPred, Helpers.writeReg, State.getWarp?, State.getCTA?, State.getLane?, WarpState.getLane?]
++  · simp [Helpers.lockstepRunnable, Helpers.currentRunnablePc?, Helpers.runnableLaneIds, Helpers.laneIsRunnable]
++
++private lemma afterAssignRunnablePc : Helpers.RunnablePc afterAssignWarp ("entry", 1) := by
++  unfold Helpers.RunnablePc afterAssignWarp afterAssignState
++  split
++  · simp [Helpers.currentRunnablePc?, Helpers.runnableLaneIds, Helpers.laneIsRunnable,
++      Helpers.stepInstr?, Helpers.evalRValue?, Helpers.advanceRunnablePcs?, exampleState, baseCTA, baseWarp, exampleAssign,
++      Helpers.readReg, Helpers.readPred, Helpers.writeReg, State.getWarp?, State.getCTA?, State.getLane?, WarpState.getLane?]
++  · simp [Helpers.currentRunnablePc?, Helpers.runnableLaneIds, Helpers.laneIsRunnable]
++
++private lemma afterAssignTermStep :
++    Helpers.stepTerminator? afterAssignState 0 0 exampleBlock.term = some afterTerminateState := by
++  unfold afterTerminateState
++  split <;> simp [exampleBlock]
++
+ example : (Helpers.rvalueReadSet (.triop .selp (.reg "a") (.reg "b") (.pred "p"))).regs = ["a", "b"] := by
+   native_decide
+ 
+@@ -30,12 +123,51 @@ example : (Helpers.rvalueReadSet (.triop .selp (.reg "a") (.reg "b") (.pred "p")
+ example : (Helpers.stepInstr? exampleState 0 0 { instr := .assignReg "r1" (.imm (.u32 7)) }).isSome = true := by
+   native_decide
+ 
+-private def terminatedState : State :=
+-  match Helpers.stepInstr? exampleState 0 0 { instr := .assignReg "r1" (.imm (.u32 7)) } with
+-  | some st => st
+-  | none => exampleState
++example : (Helpers.stepTerminator? afterAssignState 0 0 .terminate).isSome = true := by
++  native_decide
++
++example : StepMachine exampleState afterAssignState := by
++  refine StepMachine.mk (st := exampleState) (st' := afterAssignState) (cta := 0) (warp := 0) ?_ ?_
++  · exact exampleStateWF
++  · refine StepWarp.mk (st := exampleState) (cta := 0) (warp := 0) (st' := afterAssignState) ?_ ?_
++    · exact exampleStateWF
++    · refine StepBlock.body (st := exampleState) (cta := 0) (warp := 0) (st' := afterAssignState)
++        (warpState := baseWarp) (pc := ("entry", 0)) (block := exampleBlock) (gi := exampleAssign) ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_
++      · exact exampleStateWF
++      · exact exampleGetWarp
++      · exact baseWarpWF
++      · exact exampleLockstep
++      · exact exampleRunnablePc
++      · simp [exampleState, exampleBlock]
++      · simp [exampleBlock, exampleAssign]
++      · refine StepInstr.mk (st := exampleState) (cta := 0) (warp := 0) (gi := exampleAssign)
++          (st' := afterAssignState) (warpState := baseWarp) (participants := [lane0]) ?_ ?_ ?_ ?_ ?_ ?_
++        · exact exampleStateWF
++        · exact exampleGetWarp
++        · exact baseWarpWF
++        · exact exampleLockstep
++        · exact exampleParticipants
++        · exact exampleInstrStep
++
++example : lane0HasR1Seven afterAssignState = true := by
++  native_decide
++
++example : StepMachine afterAssignState afterTerminateState := by
++  refine StepMachine.mk (st := afterAssignState) (st' := afterTerminateState) (cta := 0) (warp := 0) ?_ ?_
++  · exact afterAssignStateWF
++  · refine StepWarp.mk (st := afterAssignState) (cta := 0) (warp := 0) (st' := afterTerminateState) ?_ ?_
++    · exact afterAssignStateWF
++    · refine StepBlock.term (st := afterAssignState) (cta := 0) (warp := 0) (st' := afterTerminateState)
++        (warpState := afterAssignWarp) (pc := ("entry", 1)) (block := exampleBlock) ?_ ?_ ?_ ?_ ?_ ?_ ?_
++      · exact afterAssignStateWF
++      · exact afterAssignGetWarp
++      · exact afterAssignWarpWF
++      · exact afterAssignLockstep
++      · exact afterAssignRunnablePc
++      · simp [afterAssignState, exampleState, exampleBlock]
++      · exact afterAssignTermStep
+ 
+-example : (Helpers.stepTerminator? terminatedState 0 0 .terminate).isSome = true := by
++example : lane0Terminated afterTerminateState = true := by
+   native_decide
+ 
+ end CLean
+diff --git a/CLean/Helpers.lean b/CLean/Helpers.lean
+index 2f5b65e..4dd0bd6 100644
+--- a/CLean/Helpers.lean
++++ b/CLean/Helpers.lean
+@@ -10,6 +10,15 @@ namespace Helpers
+ private def intAbs (x : Int) : Int :=
+   Int.ofNat x.natAbs
+ 
++private def normalizeSigned (bits : Nat) (x : Int) : Int :=
++  let signBit := 2 ^ (bits - 1)
++  let modulus := 2 ^ bits
++  let n := Int.toNat (x % Int.ofNat modulus)
++  if n < signBit then
++    Int.ofNat n
++  else
++    Int.ofNat n - Int.ofNat modulus
++
+ private def intToFloat (x : Int) : Float :=
+   if x < 0 then
+     -Float.ofNat x.natAbs
+@@ -37,6 +46,10 @@ private def u64Shr (a : UInt64) (n : Nat) : UInt64 :=
+ private def bitSet (mask : UInt32) (i : Nat) : Bool :=
+   ((mask.toNat / (2 ^ i)) % 2) = 1
+ 
++-- Milestone 1 assumes 1D blocks whose warps partition block threads contiguously.
++private def blockLinearTidX (warp : WarpId) (lane : LaneId) : Nat :=
++  warp * 32 + lane.val
++
+ private def laneIds : List LaneId :=
+   List.finRange 32
+ 
+@@ -53,7 +66,7 @@ def writePred (lane : LaneState) (p : PredName) (b : Bool) : LaneState :=
+   { lane with preds := lane.preds.insert p b }
+ 
+ def evalSpecial (grid : GridCtx) (cta : CTAId) (warp : WarpId) (lane : LaneId) : SpecialReg → Value
+-  | .tidX => .u32 <| UInt32.ofNat (warp * 32 + lane.val)
++  | .tidX => .u32 <| UInt32.ofNat (blockLinearTidX warp lane)
+   | .tidY => .u32 0
+   | .tidZ => .u32 0
+   | .ctaidX => .u32 <| UInt32.ofNat cta
+@@ -112,10 +125,6 @@ def ginstrReadSet (gi : GInstr) : ReadSet :=
+ 
+ private def valueToBool? : Value → Option Bool
+   | .pred b => some b
+-  | .u32 x => some (x != 0)
+-  | .u64 x => some (x != 0)
+-  | .s32 x => some (x != 0)
+-  | .s64 x => some (x != 0)
+   | _ => none
+ 
+ private def natToBytesLE (n width : Nat) : List Byte :=
+@@ -147,6 +156,8 @@ def encodeScalar? : ScalarTy → Value → Option (List Byte)
+   | .s32, .s32 x => some <| natToBytesLE (signedToNat 32 x) 4
+   | .s64, .s64 x => some <| natToBytesLE (signedToNat 64 x) 8
+   | .f16, .f16 bits | .bf16, .bf16 bits => some <| natToBytesLE bits.toNat 2
++  | .f32, .f32 x => some <| natToBytesLE x.toFloat32.toBits.toNat 4
++  | .f64, .f64 x => some <| natToBytesLE x.toBits.toNat 8
+   | _, _ => none
+ 
+ def decodeScalar? : ScalarTy → List Byte → Option Value
+@@ -165,6 +176,8 @@ def decodeScalar? : ScalarTy → List Byte → Option Value
+   | .s64, bs => if bs.length = 8 then some (.s64 (natToSigned 64 <| bytesToNatLE bs)) else none
+   | .f16, bs => if bs.length = 2 then some (.f16 (UInt16.ofNat <| bytesToNatLE bs)) else none
+   | .bf16, bs => if bs.length = 2 then some (.bf16 (UInt16.ofNat <| bytesToNatLE bs)) else none
++  | .f32, bs => if bs.length = 4 then some (.f32 <| (Float32.ofBits <| UInt32.ofNat <| bytesToNatLE bs).toFloat) else none
++  | .f64, bs => if bs.length = 8 then some (.f64 <| Float.ofBits <| UInt64.ofNat <| bytesToNatLE bs) else none
+   | _, _ => none
+ 
+ private def readBytes? (mem : ByteMem) (offset width : Nat) : Option (List Byte) :=
+@@ -215,6 +228,12 @@ def participatingRunnableLaneIds? (warp : WarpState) (guard? : Option Guard) : O
+         out := lane :: out
+   pure out.reverse
+ 
++def RunnablePc (warp : WarpState) (pc : PC) : Prop :=
++  currentRunnablePc? warp = some pc
++
++def ParticipatingRunnable (warp : WarpState) (guard? : Option Guard) (lanes : List LaneId) : Prop :=
++  participatingRunnableLaneIds? warp guard? = some lanes
++
+ def lockstepRunnable (warp : WarpState) : Prop :=
+   match currentRunnablePc? warp with
+   | none => True
+@@ -305,27 +324,26 @@ mutual
+ 
+   partial def evalUnary? : ScalarUnaryOp → Value → Option Value
+     | .mov, v => some v
+-    | .neg, .s32 x => some (.s32 (-x))
+-    | .neg, .s64 x => some (.s64 (-x))
++    | .neg, .s32 x => some (.s32 (normalizeSigned 32 (-x)))
++    | .neg, .s64 x => some (.s64 (normalizeSigned 64 (-x)))
+     | .neg, .f32 x => some (.f32 (-x))
+     | .neg, .f64 x => some (.f64 (-x))
+-    | .abs, .s32 x => some (.s32 (intAbs x))
+-    | .abs, .s64 x => some (.s64 (intAbs x))
++    | .abs, .s32 x => some (.s32 (normalizeSigned 32 (intAbs x)))
++    | .abs, .s64 x => some (.s64 (normalizeSigned 64 (intAbs x)))
+     | .abs, .f32 x => some (.f32 (Float.abs x))
+     | .abs, .f64 x => some (.f64 (Float.abs x))
+     | .bitnot, .u32 x => some (.u32 (~~~x))
+     | .bitnot, .u64 x => some (.u64 (~~~x))
+     | .bitnot, .b32 x => some (.b32 (~~~x))
+     | .bitnot, .b64 x => some (.b64 (~~~x))
+-    | .cvt .u32, .s32 x => some (.u32 (UInt32.ofNat x.toNat))
+-    | .cvt .u64, .s64 x => some (.u64 (UInt64.ofNat x.toNat))
+-    | .cvt .s32, .u32 x => some (.s32 x.toNat)
+-    | .cvt .s64, .u64 x => some (.s64 x.toNat)
++    | .cvt .u32, .s32 x => some (.u32 (UInt32.ofNat (signedToNat 32 x)))
++    | .cvt .u64, .s64 x => some (.u64 (UInt64.ofNat (signedToNat 64 x)))
++    | .cvt .s32, .u32 x => some (.s32 (normalizeSigned 32 (Int.ofNat x.toNat)))
++    | .cvt .s64, .u64 x => some (.s64 (normalizeSigned 64 (Int.ofNat x.toNat)))
+     | .cvt .f32, .u32 x => some (.f32 x.toFloat)
+     | .cvt .f32, .s32 x => some (.f32 (intToFloat x))
+     | .cvt .f64, .u64 x => some (.f64 x.toFloat)
+     | .cvt .f64, .s64 x => some (.f64 (intToFloat x))
+-    | .cvt .pred, .pred b => some (.pred b)
+     | .cvt dst, v =>
+         if let some ty := Typing.valueType? v then
+           if dst = ty then some v else none
+@@ -335,20 +353,20 @@ mutual
+   partial def evalBinary? : ScalarBinaryOp → Value → Value → Option Value
+     | .add, .u32 a, .u32 b => some (.u32 (a + b))
+     | .add, .u64 a, .u64 b => some (.u64 (a + b))
+-    | .add, .s32 a, .s32 b => some (.s32 (a + b))
+-    | .add, .s64 a, .s64 b => some (.s64 (a + b))
++    | .add, .s32 a, .s32 b => some (.s32 (normalizeSigned 32 (a + b)))
++    | .add, .s64 a, .s64 b => some (.s64 (normalizeSigned 64 (a + b)))
+     | .add, .f32 a, .f32 b => some (.f32 (a + b))
+     | .add, .f64 a, .f64 b => some (.f64 (a + b))
+     | .sub, .u32 a, .u32 b => some (.u32 (a - b))
+     | .sub, .u64 a, .u64 b => some (.u64 (a - b))
+-    | .sub, .s32 a, .s32 b => some (.s32 (a - b))
+-    | .sub, .s64 a, .s64 b => some (.s64 (a - b))
++    | .sub, .s32 a, .s32 b => some (.s32 (normalizeSigned 32 (a - b)))
++    | .sub, .s64 a, .s64 b => some (.s64 (normalizeSigned 64 (a - b)))
+     | .sub, .f32 a, .f32 b => some (.f32 (a - b))
+     | .sub, .f64 a, .f64 b => some (.f64 (a - b))
+     | .mul, .u32 a, .u32 b => some (.u32 (a * b))
+     | .mul, .u64 a, .u64 b => some (.u64 (a * b))
+-    | .mul, .s32 a, .s32 b => some (.s32 (a * b))
+-    | .mul, .s64 a, .s64 b => some (.s64 (a * b))
++    | .mul, .s32 a, .s32 b => some (.s32 (normalizeSigned 32 (a * b)))
++    | .mul, .s64 a, .s64 b => some (.s64 (normalizeSigned 64 (a * b)))
+     | .mul, .f32 a, .f32 b => some (.f32 (a * b))
+     | .mul, .f64 a, .f64 b => some (.f64 (a * b))
+     | .bitand, .u32 a, .u32 b => some (.u32 (a &&& b))
+@@ -370,8 +388,8 @@ mutual
+   partial def evalTernary? : ScalarTernaryOp → Value → Value → Value → Option Value
+     | .mad, .u32 a, .u32 b, .u32 c => some (.u32 (a * b + c))
+     | .mad, .u64 a, .u64 b, .u64 c => some (.u64 (a * b + c))
+-    | .mad, .s32 a, .s32 b, .s32 c => some (.s32 (a * b + c))
+-    | .mad, .s64 a, .s64 b, .s64 c => some (.s64 (a * b + c))
++    | .mad, .s32 a, .s32 b, .s32 c => some (.s32 (normalizeSigned 32 (a * b + c)))
++    | .mad, .s64 a, .s64 b, .s64 c => some (.s64 (normalizeSigned 64 (a * b + c)))
+     | .fma, .f32 a, .f32 b, .f32 c => some (.f32 (a * b + c))
+     | .fma, .f64 a, .f64 b, .f64 c => some (.f64 (a * b + c))
+     | .selp, a, _, .pred true => some a
+@@ -429,8 +447,12 @@ def resolveAddr? (st : State) (cta : CTAId) (warp : WarpId) (lane : LaneId) (ta
+   | .local, .u64 off => some (.local cta warp lane off.toNat)
+   | .param, .u64 off => some (.param off.toNat)
+   | .const, .u64 off => some (.const off.toNat)
++  | .global, .gaddr .global off => some (.global off)
++  | .shared, .gaddr .shared off => some (.shared cta off)
++  | .local, .gaddr .local off => some (.local cta warp lane off)
++  | .param, .gaddr .param off => some (.param off)
++  | .const, .gaddr .const off => some (.const off)
+   | .generic, .gaddr s off => some (.generic s off)
+-  | space, .gaddr s off => if s = space then some (.generic s off) else none
+   | .global, .u32 off => some (.global off.toNat)
+   | .shared, .u32 off => some (.shared cta off.toNat)
+   | .local, .u32 off => some (.local cta warp lane off.toNat)
+@@ -438,6 +460,17 @@ def resolveAddr? (st : State) (cta : CTAId) (warp : WarpId) (lane : LaneId) (ta
+   | .const, .u32 off => some (.const off.toNat)
+   | _, _ => none
+ 
++private def uniformBranchDestination? (st : State) (cta : CTAId) (warp : WarpId)
++    (lanes : List LaneId) (cond : RValue) (tLabel fLabel : BlockLabel) : Option PC := do
++  let mut dests : List PC := []
++  for lane in lanes do
++    let v <- evalRValue? st cta warp lane cond
++    let b <- valueToBool? v
++    dests := (if b then (tLabel, 0) else (fLabel, 0)) :: dests
++  match dests.reverse with
++  | [] => none
++  | dest :: rest => if rest.all (fun pc' => pc' == dest) then some dest else none
++
+ private def advancePcForLane (laneState : LaneState) : LaneState :=
+   let (lbl, idx) := laneState.pc
+   { laneState with pc := (lbl, idx + 1) }
+@@ -481,6 +514,7 @@ def stepInstr? (st : State) (cta : CTAId) (warp : WarpId) (gi : GInstr) : Option
+             let value <- readMem? st src.space src.ty addr
+             pure (writeReg laneState dst value)
+       | .store dst value =>
++          -- Milestone 1 deterministic simplification: stores are sequentialized in lane order.
+           let mut cur := st
+           for lane in participants do
+             let addr <- resolveAddr? cur cta warp lane dst
+@@ -513,18 +547,8 @@ def stepTerminator? (st : State) (cta : CTAId) (warp : WarpId) (term : Terminato
+         applyToLaneIds? st cta warp lanes fun _ laneState =>
+           some { laneState with status := .terminated }
+     | .cbr cond tLabel fLabel =>
+-        let mut dests : List PC := []
+-        for lane in lanes do
+-          let v <- evalRValue? st cta warp lane cond
+-          let b <- valueToBool? v
+-          dests := (if b then (tLabel, 0) else (fLabel, 0)) :: dests
+-        match dests.reverse with
+-        | [] => some st
+-        | dest :: rest =>
+-            if rest.all (fun pc' => pc' == dest) then
+-              applyToLaneIds? st cta warp lanes fun _ laneState => some { laneState with pc := dest }
+-            else
+-              none
++        let dest <- uniformBranchDestination? st cta warp lanes cond tLabel fLabel
++        applyToLaneIds? st cta warp lanes fun _ laneState => some { laneState with pc := dest }
+ 
+ end Helpers
+ 
+diff --git a/CLean/Semantics.lean b/CLean/Semantics.lean
+index c189aeb..92c767d 100644
+--- a/CLean/Semantics.lean
++++ b/CLean/Semantics.lean
+@@ -5,30 +5,47 @@ namespace CLean
+ open Helpers
+ 
+ inductive StepInstr : State → CTAId → WarpId → GInstr → State → Prop where
+-  | mk {st cta warp gi st'} :
++  | mk {st cta warp gi st' warpState participants} :
++      State.wf st →
++      st.getWarp? cta warp = some warpState →
++      WarpState.wf warpState →
++      Helpers.lockstepRunnable warpState →
++      Helpers.ParticipatingRunnable warpState gi.guard? participants →
+       Helpers.stepInstr? st cta warp gi = some st' →
+       StepInstr st cta warp gi st'
+ 
+ inductive StepBlock : State → CTAId → WarpId → State → Prop where
+-  | body {st cta warp st' pc block gi} :
+-      (hwarp : st.getWarp? cta warp = some (st.getWarp? cta warp).get!) →
+-      Helpers.currentRunnablePc? (st.getWarp? cta warp).get! = some pc →
++  | body {st cta warp st' warpState pc block gi} :
++      State.wf st →
++      st.getWarp? cta warp = some warpState →
++      WarpState.wf warpState →
++      Helpers.lockstepRunnable warpState →
++      Helpers.RunnablePc warpState pc →
+       st.kernelEnv.blocks[pc.1]? = some block →
+       block.body[pc.2]? = some gi →
+       StepInstr st cta warp gi st' →
+       StepBlock st cta warp st'
+-  | term {st cta warp st' pc block} :
+-      (hwarp : st.getWarp? cta warp = some (st.getWarp? cta warp).get!) →
+-      Helpers.currentRunnablePc? (st.getWarp? cta warp).get! = some pc →
++  | term {st cta warp st' warpState pc block} :
++      State.wf st →
++      st.getWarp? cta warp = some warpState →
++      WarpState.wf warpState →
++      Helpers.lockstepRunnable warpState →
++      Helpers.RunnablePc warpState pc →
+       st.kernelEnv.blocks[pc.1]? = some block →
+       block.body[pc.2]? = none →
+       Helpers.stepTerminator? st cta warp block.term = some st' →
+       StepBlock st cta warp st'
+ 
+ inductive StepWarp : State → CTAId → WarpId → State → Prop where
+-  | mk {st cta warp st'} : StepBlock st cta warp st' → StepWarp st cta warp st'
++  | mk {st cta warp st'} :
++      State.wf st →
++      StepBlock st cta warp st' →
++      StepWarp st cta warp st'
+ 
+ inductive StepMachine : State → State → Prop where
+-  | mk {st st' cta warp} : StepWarp st cta warp st' → StepMachine st st'
++  | mk {st st' cta warp} :
++      State.wf st →
++      StepWarp st cta warp st' →
++      StepMachine st st'
+ 
+ end CLean
+diff --git a/CLean/State.lean b/CLean/State.lean
+index 0a23d88..6ad4174 100644
+--- a/CLean/State.lean
++++ b/CLean/State.lean
+@@ -104,8 +104,34 @@ def getLane? (warp : WarpState) (lane : LaneId) : Option LaneState :=
+ def setLane (warp : WarpState) (lane : LaneId) (laneState : LaneState) : WarpState :=
+   { warp with lanes := warp.lanes.set! lane.val laneState }
+ 
++def wf? (warp : WarpState) : Bool :=
++  warp.lanes.size == 32
++
++def wf (warp : WarpState) : Prop :=
++  warp.wf? = true
++
+ end WarpState
+ 
++namespace CTAState
++
++def wf? (cta : CTAState) : Bool :=
++  cta.warps.toList.all fun (_, warpState) => warpState.wf?
++
++def wf (cta : CTAState) : Prop :=
++  cta.wf? = true
++
++end CTAState
++
++namespace KernelEnv
++
++def wf? (env : KernelEnv) : Bool :=
++  env.blocks.toList.all fun (entry : BlockLabel × Block) => entry.2.label == entry.1
++
++def wf (env : KernelEnv) : Prop :=
++  env.wf? = true
++
++end KernelEnv
++
+ namespace State
+ 
+ def getCTA? (st : State) (cta : CTAId) : Option CTAState :=
+@@ -132,6 +158,12 @@ def setLane (st : State) (cta : CTAId) (warp : WarpId) (lane : LaneId) (laneStat
+   let warpState := warpState.setLane lane laneState
+   st.setWarp cta warp warpState
+ 
++def wf? (st : State) : Bool :=
++  st.kernelEnv.wf? && st.ctas.toList.all fun (_, ctaState) => ctaState.wf?
++
++def wf (st : State) : Prop :=
++  st.wf? = true
++
+ end State
+ 
+ end CLean
+diff --git a/CLean/Typing.lean b/CLean/Typing.lean
+index 5dbb3af..2e35304 100644
+--- a/CLean/Typing.lean
++++ b/CLean/Typing.lean
+@@ -15,6 +15,13 @@ def byteWidth? : ScalarTy → Option Nat
+ def alignment? (ty : ScalarTy) : Option Nat :=
+   byteWidth? ty
+ 
++def scalarCodecSupported? : ScalarTy → Bool
++  | .pred
++  | .u8 | .u16 | .u32 | .u64
++  | .s8 | .s16 | .s32 | .s64
++  | .b8 | .b16 | .b32 | .b64
++  | .f16 | .bf16 | .f32 | .f64 => true
++
+ def valueHasType : Value → ScalarTy → Prop
+   | .pred _, .pred => True
+   | .u8 _, .u8 => True
+@@ -52,6 +59,21 @@ private def binaryFloat? (lhs rhs : ScalarTy) : Bool :=
+   | .f32, .f32 | .f64, .f64 => true
+   | _, _ => false
+ 
++private def cvtSig? (dst src : ScalarTy) : Option ScalarTy :=
++  if dst == src then
++    some dst
++  else
++    match dst, src with
++    | .u32, .s32 => some .u32
++    | .u64, .s64 => some .u64
++    | .s32, .u32 => some .s32
++    | .s64, .u64 => some .s64
++    | .f32, .u32 => some .f32
++    | .f32, .s32 => some .f32
++    | .f64, .u64 => some .f64
++    | .f64, .s64 => some .f64
++    | _, _ => none
++
+ def unarySig? : ScalarUnaryOp → ScalarTy → Option ScalarTy
+   | .mov, ty => some ty
+   | .neg, .s32 => some .s32
+@@ -66,15 +88,21 @@ def unarySig? : ScalarUnaryOp → ScalarTy → Option ScalarTy
+   | .bitnot, .b64 => some .b64
+   | .bitnot, .u32 => some .u32
+   | .bitnot, .u64 => some .u64
+-  | .cvt dst, _ => some dst
++  | .cvt dst, src => cvtSig? dst src
+   | _, _ => none
+ 
+ def binarySig? : ScalarBinaryOp → ScalarTy → ScalarTy → Option ScalarTy
+-  | .add, a, b | .sub, a, b | .mul, a, b | .div, a, b | .rem, a, b
+-  | .min, a, b | .max, a, b =>
++  | .add, a, b | .sub, a, b | .mul, a, b =>
+       if binarySameWidthInt? a b || binaryFloat? a b then some a else none
++  | .min, .s32, .s32 => some .s32
++  | .min, .s64, .s64 => some .s64
++  | .max, .s32, .s32 => some .s32
++  | .max, .s64, .s64 => some .s64
+   | .bitand, a, b | .bitor, a, b | .bitxor, a, b =>
+-      if binarySameWidthInt? a b then some a else none
++      match a, b with
++      | .u32, .u32 => some .u32
++      | .u64, .u64 => some .u64
++      | _, _ => none
+   | .shl, .u32, .u32 => some .u32
+   | .shl, .u64, .u64 => some .u64
+   | .shr, .u32, .u32 => some .u32
+@@ -82,7 +110,10 @@ def binarySig? : ScalarBinaryOp → ScalarTy → ScalarTy → Option ScalarTy
+   | _, _, _ => none
+ 
+ def ternarySig? : ScalarTernaryOp → ScalarTy → ScalarTy → ScalarTy → Option ScalarTy
+-  | .mad, a, b, c => if a = b && b = c then some a else none
++  | .mad, .u32, .u32, .u32 => some .u32
++  | .mad, .u64, .u64, .u64 => some .u64
++  | .mad, .s32, .s32, .s32 => some .s32
++  | .mad, .s64, .s64, .s64 => some .s64
+   | .fma, .f32, .f32, .f32 => some .f32
+   | .fma, .f64, .f64, .f64 => some .f64
+   | .selp, a, b, .pred => if a = b then some a else none
+@@ -162,10 +193,10 @@ def addrSpaceMatches? (space : AddrSpace) (addr : Addr) : Bool :=
+   | _ => addr.space == space
+ 
+ def typedAccessPreconditions (space : AddrSpace) (ty : ScalarTy) (addr : Addr) : Prop :=
+-  (byteWidth? ty).isSome ∧ aligned ty addr ∧ addrSpaceMatches space addr
++  scalarCodecSupported? ty = true ∧ (byteWidth? ty).isSome ∧ aligned ty addr ∧ addrSpaceMatches space addr
+ 
+ def typedAccessPreconditions? (space : AddrSpace) (ty : ScalarTy) (addr : Addr) : Bool :=
+-  (byteWidth? ty).isSome && aligned? ty addr && addrSpaceMatches? space addr
++  scalarCodecSupported? ty && (byteWidth? ty).isSome && aligned? ty addr && addrSpaceMatches? space addr
+ 
+ end Typing
+ 
+diff --git a/CODEX.log b/CODEX.log
+index 31f8fd2..d94aed3 100644
+--- a/CODEX.log
++++ b/CODEX.log
+@@ -10,3 +10,9 @@
+ - Adjusted the implementation to use a separate compare/setp path, lockstepRunnable? boolean helper, and lightweight read-set helpers.
+ - Cleaned the helper layer to compile on Lean 4.20.1 without warnings from the current code paths.
+ - Verified the new semantic core with `lake build`; the library now compiles end to end.
++- Tightened Typing to match the semantics actually implemented in milestone 1 instead of advertising a larger operation surface.
++- Added explicit well-formedness predicates for warps, CTAs, kernel environments, and whole states, and exposed lockstep/participation premises in the relational semantics.
++- Refactored StepBlock to bind extracted warp state explicitly instead of using `.get!` proof tricks.
++- Normalized generic-address resolution into concrete addresses when the requested state space is concrete.
++- Documented milestone-1 simplifications: `tid.x` uses a 1D contiguous warp-to-block mapping assumption; stores are deterministic lane-order sequentializations; conditional branches require a uniform destination across participating lanes; branch conditions are predicate-valued only.
++- Signed `s32`/`s64` arithmetic now normalizes results back into the corresponding fixed-width range, while read-set helpers remain list-style approximations rather than extensional sets.

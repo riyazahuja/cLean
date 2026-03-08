@@ -10,6 +10,15 @@ namespace Helpers
 private def intAbs (x : Int) : Int :=
   Int.ofNat x.natAbs
 
+private def normalizeSigned (bits : Nat) (x : Int) : Int :=
+  let signBit := 2 ^ (bits - 1)
+  let modulus := 2 ^ bits
+  let n := Int.toNat (x % Int.ofNat modulus)
+  if n < signBit then
+    Int.ofNat n
+  else
+    Int.ofNat n - Int.ofNat modulus
+
 private def intToFloat (x : Int) : Float :=
   if x < 0 then
     -Float.ofNat x.natAbs
@@ -34,10 +43,14 @@ private def u32Shr (a : UInt32) (n : Nat) : UInt32 :=
 private def u64Shr (a : UInt64) (n : Nat) : UInt64 :=
   UInt64.ofNat (a.toNat / (2 ^ n))
 
-private def bitSet (mask : UInt32) (i : Nat) : Bool :=
+def bitSet (mask : UInt32) (i : Nat) : Bool :=
   ((mask.toNat / (2 ^ i)) % 2) = 1
 
-private def laneIds : List LaneId :=
+-- Milestone 1 assumes 1D blocks whose warps partition block threads contiguously.
+def blockLinearTidX (warp : WarpId) (lane : LaneId) : Nat :=
+  warp * 32 + lane.val
+
+def laneIds : List LaneId :=
   List.finRange 32
 
 def readReg (lane : LaneState) (r : RegName) : Option Value :=
@@ -53,7 +66,7 @@ def writePred (lane : LaneState) (p : PredName) (b : Bool) : LaneState :=
   { lane with preds := lane.preds.insert p b }
 
 def evalSpecial (grid : GridCtx) (cta : CTAId) (warp : WarpId) (lane : LaneId) : SpecialReg → Value
-  | .tidX => .u32 <| UInt32.ofNat (warp * 32 + lane.val)
+  | .tidX => .u32 <| UInt32.ofNat (blockLinearTidX warp lane)
   | .tidY => .u32 0
   | .tidZ => .u32 0
   | .ctaidX => .u32 <| UInt32.ofNat cta
@@ -110,12 +123,8 @@ def ginstrReadSet (gi : GInstr) : ReadSet :=
   | some g => { base with preds := g.pred :: base.preds }
   | none => base
 
-private def valueToBool? : Value → Option Bool
+def valueToBool? : Value → Option Bool
   | .pred b => some b
-  | .u32 x => some (x != 0)
-  | .u64 x => some (x != 0)
-  | .s32 x => some (x != 0)
-  | .s64 x => some (x != 0)
   | _ => none
 
 private def natToBytesLE (n width : Nat) : List Byte :=
@@ -147,6 +156,8 @@ def encodeScalar? : ScalarTy → Value → Option (List Byte)
   | .s32, .s32 x => some <| natToBytesLE (signedToNat 32 x) 4
   | .s64, .s64 x => some <| natToBytesLE (signedToNat 64 x) 8
   | .f16, .f16 bits | .bf16, .bf16 bits => some <| natToBytesLE bits.toNat 2
+  | .f32, .f32 x => some <| natToBytesLE x.toFloat32.toBits.toNat 4
+  | .f64, .f64 x => some <| natToBytesLE x.toBits.toNat 8
   | _, _ => none
 
 def decodeScalar? : ScalarTy → List Byte → Option Value
@@ -165,6 +176,8 @@ def decodeScalar? : ScalarTy → List Byte → Option Value
   | .s64, bs => if bs.length = 8 then some (.s64 (natToSigned 64 <| bytesToNatLE bs)) else none
   | .f16, bs => if bs.length = 2 then some (.f16 (UInt16.ofNat <| bytesToNatLE bs)) else none
   | .bf16, bs => if bs.length = 2 then some (.bf16 (UInt16.ofNat <| bytesToNatLE bs)) else none
+  | .f32, bs => if bs.length = 4 then some (.f32 <| (Float32.ofBits <| UInt32.ofNat <| bytesToNatLE bs).toFloat) else none
+  | .f64, bs => if bs.length = 8 then some (.f64 <| Float.ofBits <| UInt64.ofNat <| bytesToNatLE bs) else none
   | _, _ => none
 
 private def readBytes? (mem : ByteMem) (offset width : Nat) : Option (List Byte) :=
@@ -183,7 +196,7 @@ private def writeBytes (mem : ByteMem) (offset : Nat) (bytes : List Byte) : Byte
     | b :: rest => loop (i + 1) (acc.insert (offset + i) b) rest
   loop 0 mem bytes
 
-private def guardHolds? (lane : LaneState) (guard? : Option Guard) : Option Bool :=
+def guardHolds? (lane : LaneState) (guard? : Option Guard) : Option Bool :=
   match guard? with
   | none => some true
   | some g => do
@@ -215,14 +228,27 @@ def participatingRunnableLaneIds? (warp : WarpState) (guard? : Option Guard) : O
         out := lane :: out
   pure out.reverse
 
-def lockstepRunnable (warp : WarpState) : Prop :=
-  match currentRunnablePc? warp with
-  | none => True
-  | some pc =>
-      ∀ lane, lane ∈ runnableLaneIds warp →
-        match warp.getLane? lane with
-        | some laneState => laneState.pc = pc
-        | none => False
+def RunnablePc (warp : WarpState) (pc : PC) : Prop :=
+  currentRunnablePc? warp = some pc
+
+def ParticipatingRunnable (warp : WarpState) (guard? : Option Guard) (lanes : List LaneId) : Prop :=
+  participatingRunnableLaneIds? warp guard? = some lanes
+
+theorem runnablePc_iff_bool (warp : WarpState) (pc : PC) :
+    Helpers.RunnablePc warp pc ↔ Helpers.currentRunnablePc? warp = some pc := Iff.rfl
+
+instance (warp : WarpState) (pc : PC) : Decidable (Helpers.RunnablePc warp pc) := by
+  unfold Helpers.RunnablePc
+  infer_instance
+
+theorem participatingRunnable_iff_bool (warp : WarpState) (guard? : Option Guard) (lanes : List LaneId) :
+    Helpers.ParticipatingRunnable warp guard? lanes ↔
+      Helpers.participatingRunnableLaneIds? warp guard? = some lanes := Iff.rfl
+
+instance (warp : WarpState) (guard? : Option Guard) (lanes : List LaneId) :
+    Decidable (Helpers.ParticipatingRunnable warp guard? lanes) := by
+  unfold Helpers.ParticipatingRunnable
+  infer_instance
 
 def lockstepRunnable? (warp : WarpState) : Bool :=
   match currentRunnablePc? warp with
@@ -232,6 +258,16 @@ def lockstepRunnable? (warp : WarpState) : Bool :=
         match warp.getLane? lane with
         | some laneState => laneState.pc == pc
         | none => false
+
+def lockstepRunnable (warp : WarpState) : Prop :=
+  lockstepRunnable? warp = true
+
+theorem lockstepRunnable_iff_bool (warp : WarpState) :
+    Helpers.lockstepRunnable warp ↔ Helpers.lockstepRunnable? warp = true := Iff.rfl
+
+instance (warp : WarpState) : Decidable (Helpers.lockstepRunnable warp) := by
+  unfold Helpers.lockstepRunnable
+  infer_instance
 
 private def getSpaceBaseMem? (st : State) (addr : Addr) : Option ByteMem :=
   match addr with
@@ -305,27 +341,26 @@ mutual
 
   partial def evalUnary? : ScalarUnaryOp → Value → Option Value
     | .mov, v => some v
-    | .neg, .s32 x => some (.s32 (-x))
-    | .neg, .s64 x => some (.s64 (-x))
+    | .neg, .s32 x => some (.s32 (normalizeSigned 32 (-x)))
+    | .neg, .s64 x => some (.s64 (normalizeSigned 64 (-x)))
     | .neg, .f32 x => some (.f32 (-x))
     | .neg, .f64 x => some (.f64 (-x))
-    | .abs, .s32 x => some (.s32 (intAbs x))
-    | .abs, .s64 x => some (.s64 (intAbs x))
+    | .abs, .s32 x => some (.s32 (normalizeSigned 32 (intAbs x)))
+    | .abs, .s64 x => some (.s64 (normalizeSigned 64 (intAbs x)))
     | .abs, .f32 x => some (.f32 (Float.abs x))
     | .abs, .f64 x => some (.f64 (Float.abs x))
     | .bitnot, .u32 x => some (.u32 (~~~x))
     | .bitnot, .u64 x => some (.u64 (~~~x))
     | .bitnot, .b32 x => some (.b32 (~~~x))
     | .bitnot, .b64 x => some (.b64 (~~~x))
-    | .cvt .u32, .s32 x => some (.u32 (UInt32.ofNat x.toNat))
-    | .cvt .u64, .s64 x => some (.u64 (UInt64.ofNat x.toNat))
-    | .cvt .s32, .u32 x => some (.s32 x.toNat)
-    | .cvt .s64, .u64 x => some (.s64 x.toNat)
+    | .cvt .u32, .s32 x => some (.u32 (UInt32.ofNat (signedToNat 32 x)))
+    | .cvt .u64, .s64 x => some (.u64 (UInt64.ofNat (signedToNat 64 x)))
+    | .cvt .s32, .u32 x => some (.s32 (normalizeSigned 32 (Int.ofNat x.toNat)))
+    | .cvt .s64, .u64 x => some (.s64 (normalizeSigned 64 (Int.ofNat x.toNat)))
     | .cvt .f32, .u32 x => some (.f32 x.toFloat)
     | .cvt .f32, .s32 x => some (.f32 (intToFloat x))
     | .cvt .f64, .u64 x => some (.f64 x.toFloat)
     | .cvt .f64, .s64 x => some (.f64 (intToFloat x))
-    | .cvt .pred, .pred b => some (.pred b)
     | .cvt dst, v =>
         if let some ty := Typing.valueType? v then
           if dst = ty then some v else none
@@ -335,20 +370,20 @@ mutual
   partial def evalBinary? : ScalarBinaryOp → Value → Value → Option Value
     | .add, .u32 a, .u32 b => some (.u32 (a + b))
     | .add, .u64 a, .u64 b => some (.u64 (a + b))
-    | .add, .s32 a, .s32 b => some (.s32 (a + b))
-    | .add, .s64 a, .s64 b => some (.s64 (a + b))
+    | .add, .s32 a, .s32 b => some (.s32 (normalizeSigned 32 (a + b)))
+    | .add, .s64 a, .s64 b => some (.s64 (normalizeSigned 64 (a + b)))
     | .add, .f32 a, .f32 b => some (.f32 (a + b))
     | .add, .f64 a, .f64 b => some (.f64 (a + b))
     | .sub, .u32 a, .u32 b => some (.u32 (a - b))
     | .sub, .u64 a, .u64 b => some (.u64 (a - b))
-    | .sub, .s32 a, .s32 b => some (.s32 (a - b))
-    | .sub, .s64 a, .s64 b => some (.s64 (a - b))
+    | .sub, .s32 a, .s32 b => some (.s32 (normalizeSigned 32 (a - b)))
+    | .sub, .s64 a, .s64 b => some (.s64 (normalizeSigned 64 (a - b)))
     | .sub, .f32 a, .f32 b => some (.f32 (a - b))
     | .sub, .f64 a, .f64 b => some (.f64 (a - b))
     | .mul, .u32 a, .u32 b => some (.u32 (a * b))
     | .mul, .u64 a, .u64 b => some (.u64 (a * b))
-    | .mul, .s32 a, .s32 b => some (.s32 (a * b))
-    | .mul, .s64 a, .s64 b => some (.s64 (a * b))
+    | .mul, .s32 a, .s32 b => some (.s32 (normalizeSigned 32 (a * b)))
+    | .mul, .s64 a, .s64 b => some (.s64 (normalizeSigned 64 (a * b)))
     | .mul, .f32 a, .f32 b => some (.f32 (a * b))
     | .mul, .f64 a, .f64 b => some (.f64 (a * b))
     | .bitand, .u32 a, .u32 b => some (.u32 (a &&& b))
@@ -370,8 +405,8 @@ mutual
   partial def evalTernary? : ScalarTernaryOp → Value → Value → Value → Option Value
     | .mad, .u32 a, .u32 b, .u32 c => some (.u32 (a * b + c))
     | .mad, .u64 a, .u64 b, .u64 c => some (.u64 (a * b + c))
-    | .mad, .s32 a, .s32 b, .s32 c => some (.s32 (a * b + c))
-    | .mad, .s64 a, .s64 b, .s64 c => some (.s64 (a * b + c))
+    | .mad, .s32 a, .s32 b, .s32 c => some (.s32 (normalizeSigned 32 (a * b + c)))
+    | .mad, .s64 a, .s64 b, .s64 c => some (.s64 (normalizeSigned 64 (a * b + c)))
     | .fma, .f32 a, .f32 b, .f32 c => some (.f32 (a * b + c))
     | .fma, .f64 a, .f64 b, .f64 c => some (.f64 (a * b + c))
     | .selp, a, _, .pred true => some a
@@ -429,14 +464,29 @@ def resolveAddr? (st : State) (cta : CTAId) (warp : WarpId) (lane : LaneId) (ta 
   | .local, .u64 off => some (.local cta warp lane off.toNat)
   | .param, .u64 off => some (.param off.toNat)
   | .const, .u64 off => some (.const off.toNat)
+  | .global, .gaddr .global off => some (.global off)
+  | .shared, .gaddr .shared off => some (.shared cta off)
+  | .local, .gaddr .local off => some (.local cta warp lane off)
+  | .param, .gaddr .param off => some (.param off)
+  | .const, .gaddr .const off => some (.const off)
   | .generic, .gaddr s off => some (.generic s off)
-  | space, .gaddr s off => if s = space then some (.generic s off) else none
   | .global, .u32 off => some (.global off.toNat)
   | .shared, .u32 off => some (.shared cta off.toNat)
   | .local, .u32 off => some (.local cta warp lane off.toNat)
   | .param, .u32 off => some (.param off.toNat)
   | .const, .u32 off => some (.const off.toNat)
   | _, _ => none
+
+def uniformBranchDestination? (st : State) (cta : CTAId) (warp : WarpId)
+    (lanes : List LaneId) (cond : RValue) (tLabel fLabel : BlockLabel) : Option PC := do
+  let mut dests : List PC := []
+  for lane in lanes do
+    let v <- evalRValue? st cta warp lane cond
+    let b <- valueToBool? v
+    dests := (if b then (tLabel, 0) else (fLabel, 0)) :: dests
+  match dests.reverse with
+  | [] => none
+  | dest :: rest => if rest.all (fun pc' => pc' == dest) then some dest else none
 
 private def advancePcForLane (laneState : LaneState) : LaneState :=
   let (lbl, idx) := laneState.pc
@@ -451,7 +501,7 @@ private def applyToLaneIds? (st : State) (cta : CTAId) (warp : WarpId) (lanes : 
     cur <- cur.setLane cta warp lane laneState'
   pure cur
 
-private def advanceRunnablePcs? (st : State) (cta : CTAId) (warp : WarpId) : Option State := do
+def advanceRunnablePcs? (st : State) (cta : CTAId) (warp : WarpId) : Option State := do
   let warpState <- st.getWarp? cta warp
   let pc <- currentRunnablePc? warpState
   let lanes := runnableLaneIds warpState |>.filter fun lane =>
@@ -481,6 +531,7 @@ def stepInstr? (st : State) (cta : CTAId) (warp : WarpId) (gi : GInstr) : Option
             let value <- readMem? st src.space src.ty addr
             pure (writeReg laneState dst value)
       | .store dst value =>
+          -- Milestone 1 deterministic simplification: stores are sequentialized in lane order.
           let mut cur := st
           for lane in participants do
             let addr <- resolveAddr? cur cta warp lane dst
@@ -513,18 +564,8 @@ def stepTerminator? (st : State) (cta : CTAId) (warp : WarpId) (term : Terminato
         applyToLaneIds? st cta warp lanes fun _ laneState =>
           some { laneState with status := .terminated }
     | .cbr cond tLabel fLabel =>
-        let mut dests : List PC := []
-        for lane in lanes do
-          let v <- evalRValue? st cta warp lane cond
-          let b <- valueToBool? v
-          dests := (if b then (tLabel, 0) else (fLabel, 0)) :: dests
-        match dests.reverse with
-        | [] => some st
-        | dest :: rest =>
-            if rest.all (fun pc' => pc' == dest) then
-              applyToLaneIds? st cta warp lanes fun _ laneState => some { laneState with pc := dest }
-            else
-              none
+        let dest <- uniformBranchDestination? st cta warp lanes cond tLabel fLabel
+        applyToLaneIds? st cta warp lanes fun _ laneState => some { laneState with pc := dest }
 
 end Helpers
 

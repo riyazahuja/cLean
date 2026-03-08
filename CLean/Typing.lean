@@ -15,6 +15,13 @@ def byteWidth? : ScalarTy → Option Nat
 def alignment? (ty : ScalarTy) : Option Nat :=
   byteWidth? ty
 
+def scalarCodecSupported? : ScalarTy → Bool
+  | .pred
+  | .u8 | .u16 | .u32 | .u64
+  | .s8 | .s16 | .s32 | .s64
+  | .b8 | .b16 | .b32 | .b64
+  | .f16 | .bf16 | .f32 | .f64 => true
+
 def valueHasType : Value → ScalarTy → Prop
   | .pred _, .pred => True
   | .u8 _, .u8 => True
@@ -52,6 +59,21 @@ private def binaryFloat? (lhs rhs : ScalarTy) : Bool :=
   | .f32, .f32 | .f64, .f64 => true
   | _, _ => false
 
+private def cvtSig? (dst src : ScalarTy) : Option ScalarTy :=
+  if dst == src then
+    some dst
+  else
+    match dst, src with
+    | .u32, .s32 => some .u32
+    | .u64, .s64 => some .u64
+    | .s32, .u32 => some .s32
+    | .s64, .u64 => some .s64
+    | .f32, .u32 => some .f32
+    | .f32, .s32 => some .f32
+    | .f64, .u64 => some .f64
+    | .f64, .s64 => some .f64
+    | _, _ => none
+
 def unarySig? : ScalarUnaryOp → ScalarTy → Option ScalarTy
   | .mov, ty => some ty
   | .neg, .s32 => some .s32
@@ -66,15 +88,21 @@ def unarySig? : ScalarUnaryOp → ScalarTy → Option ScalarTy
   | .bitnot, .b64 => some .b64
   | .bitnot, .u32 => some .u32
   | .bitnot, .u64 => some .u64
-  | .cvt dst, _ => some dst
+  | .cvt dst, src => cvtSig? dst src
   | _, _ => none
 
 def binarySig? : ScalarBinaryOp → ScalarTy → ScalarTy → Option ScalarTy
-  | .add, a, b | .sub, a, b | .mul, a, b | .div, a, b | .rem, a, b
-  | .min, a, b | .max, a, b =>
+  | .add, a, b | .sub, a, b | .mul, a, b =>
       if binarySameWidthInt? a b || binaryFloat? a b then some a else none
+  | .min, .s32, .s32 => some .s32
+  | .min, .s64, .s64 => some .s64
+  | .max, .s32, .s32 => some .s32
+  | .max, .s64, .s64 => some .s64
   | .bitand, a, b | .bitor, a, b | .bitxor, a, b =>
-      if binarySameWidthInt? a b then some a else none
+      match a, b with
+      | .u32, .u32 => some .u32
+      | .u64, .u64 => some .u64
+      | _, _ => none
   | .shl, .u32, .u32 => some .u32
   | .shl, .u64, .u64 => some .u64
   | .shr, .u32, .u32 => some .u32
@@ -82,7 +110,10 @@ def binarySig? : ScalarBinaryOp → ScalarTy → ScalarTy → Option ScalarTy
   | _, _, _ => none
 
 def ternarySig? : ScalarTernaryOp → ScalarTy → ScalarTy → ScalarTy → Option ScalarTy
-  | .mad, a, b, c => if a = b && b = c then some a else none
+  | .mad, .u32, .u32, .u32 => some .u32
+  | .mad, .u64, .u64, .u64 => some .u64
+  | .mad, .s32, .s32, .s32 => some .s32
+  | .mad, .s64, .s64, .s64 => some .s64
   | .fma, .f32, .f32, .f32 => some .f32
   | .fma, .f64, .f64, .f64 => some .f64
   | .selp, a, b, .pred => if a = b then some a else none
@@ -162,10 +193,10 @@ def addrSpaceMatches? (space : AddrSpace) (addr : Addr) : Bool :=
   | _ => addr.space == space
 
 def typedAccessPreconditions (space : AddrSpace) (ty : ScalarTy) (addr : Addr) : Prop :=
-  (byteWidth? ty).isSome ∧ aligned ty addr ∧ addrSpaceMatches space addr
+  scalarCodecSupported? ty = true ∧ (byteWidth? ty).isSome ∧ aligned ty addr ∧ addrSpaceMatches space addr
 
 def typedAccessPreconditions? (space : AddrSpace) (ty : ScalarTy) (addr : Addr) : Bool :=
-  (byteWidth? ty).isSome && aligned? ty addr && addrSpaceMatches? space addr
+  scalarCodecSupported? ty && (byteWidth? ty).isSome && aligned? ty addr && addrSpaceMatches? space addr
 
 end Typing
 

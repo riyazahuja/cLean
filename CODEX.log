@@ -10,3 +10,11 @@
 - Adjusted the implementation to use a separate compare/setp path, lockstepRunnable? boolean helper, and lightweight read-set helpers.
 - Cleaned the helper layer to compile on Lean 4.20.1 without warnings from the current code paths.
 - Verified the new semantic core with `lake build`; the library now compiles end to end.
+- Tightened Typing to match the semantics actually implemented in milestone 1 instead of advertising a larger operation surface.
+- Added explicit well-formedness predicates for warps, CTAs, kernel environments, and whole states, and exposed lockstep/participation premises in the relational semantics.
+- Refactored StepBlock to bind extracted warp state explicitly instead of using `.get!` proof tricks.
+- Normalized generic-address resolution into concrete addresses when the requested state space is concrete.
+- Documented milestone-1 simplifications: `tid.x` uses a 1D contiguous warp-to-block mapping assumption; stores are deterministic lane-order sequentializations; conditional branches require a uniform destination across participating lanes; branch conditions are predicate-valued only.
+- Signed `s32`/`s64` arithmetic now normalizes results back into the corresponding fixed-width range, while read-set helpers remain list-style approximations rather than extensional sets.
+
+2026-03-08: Simplified Examples relation proofs to use explicit StepInstr/StepBlock/StepWarp/StepMachine witness parameters. Kept semantic helpers unfoldable/public where proof-relevant and retained decidable/reflection support for WF and lockstep predicates.

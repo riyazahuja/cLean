@@ -104,7 +104,51 @@ def getLane? (warp : WarpState) (lane : LaneId) : Option LaneState :=
 def setLane (warp : WarpState) (lane : LaneId) (laneState : LaneState) : WarpState :=
   { warp with lanes := warp.lanes.set! lane.val laneState }
 
+def wf? (warp : WarpState) : Bool :=
+  warp.lanes.size == 32
+
+def wf (warp : WarpState) : Prop :=
+  warp.wf? = true
+
+theorem wf_iff_bool (warp : WarpState) : WarpState.wf warp ↔ warp.wf? = true := Iff.rfl
+
+instance (warp : WarpState) : Decidable (WarpState.wf warp) := by
+  unfold WarpState.wf
+  infer_instance
+
 end WarpState
+
+namespace CTAState
+
+def wf? (cta : CTAState) : Bool :=
+  cta.warps.toList.all fun (_, warpState) => warpState.wf?
+
+def wf (cta : CTAState) : Prop :=
+  cta.wf? = true
+
+theorem wf_iff_bool (cta : CTAState) : CTAState.wf cta ↔ cta.wf? = true := Iff.rfl
+
+instance (cta : CTAState) : Decidable (CTAState.wf cta) := by
+  unfold CTAState.wf
+  infer_instance
+
+end CTAState
+
+namespace KernelEnv
+
+def wf? (env : KernelEnv) : Bool :=
+  env.blocks.toList.all fun (entry : BlockLabel × Block) => entry.2.label == entry.1
+
+def wf (env : KernelEnv) : Prop :=
+  env.wf? = true
+
+theorem wf_iff_bool (env : KernelEnv) : KernelEnv.wf env ↔ env.wf? = true := Iff.rfl
+
+instance (env : KernelEnv) : Decidable (KernelEnv.wf env) := by
+  unfold KernelEnv.wf
+  infer_instance
+
+end KernelEnv
 
 namespace State
 
@@ -131,6 +175,18 @@ def setLane (st : State) (cta : CTAId) (warp : WarpId) (lane : LaneId) (laneStat
   let warpState <- st.getWarp? cta warp
   let warpState := warpState.setLane lane laneState
   st.setWarp cta warp warpState
+
+def wf? (st : State) : Bool :=
+  st.kernelEnv.wf? && st.ctas.toList.all fun (_, ctaState) => ctaState.wf?
+
+def wf (st : State) : Prop :=
+  st.wf? = true
+
+theorem wf_iff_bool (st : State) : State.wf st ↔ st.wf? = true := Iff.rfl
+
+instance (st : State) : Decidable (State.wf st) := by
+  unfold State.wf
+  infer_instance
 
 end State
 
