@@ -1,0 +1,12 @@
+2026-03-08
+- Initialized the PTX semantic core module structure under CLean.
+- Kept the IR future-facing but minimized milestone-1 WarpOp/AtomicOp/FragTy enumerations.
+- Represented PCs as (block label, instruction index).
+- Kept per-lane PCs in state while enforcing a lockstep-runnable-warp invariant in milestone-1 helpers.
+- Represented predication with Guard/GInstr wrappers.
+- Kept memory byte-addressed and weakly typed; typed loads/stores are partial helpers.
+- Added a Typing layer and read-set helpers before small-step semantics.
+- Left cvta/isspacep, barriers, warp collectives, atomics, and mma structurally present but semantically deferred.
+- Adjusted the implementation to use a separate compare/setp path, lockstepRunnable? boolean helper, and lightweight read-set helpers.
+- Cleaned the helper layer to compile on Lean 4.20.1 without warnings from the current code paths.
+- Verified the new semantic core with `lake build`; the library now compiles end to end.
