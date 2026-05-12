@@ -39,9 +39,20 @@ structure Block where
   term : Terminator := .exit
   deriving Repr, Inhabited
 
+structure RegDecl where
+  name : RegName
+  ty : ScalarTy
+  deriving Repr, Inhabited
+
+structure PredDecl where
+  name : PredName
+  deriving Repr, Inhabited
+
 structure Kernel where
   entry : BlockLabel
   gridCtx : GridCtx := { gridDim := { x := 1 }, blockDim := { x := 32 } }
+  regs : Array RegDecl := #[]
+  preds : Array PredDecl := #[]
   blocks : Array Block := #[]
   deriving Repr, Inhabited
 

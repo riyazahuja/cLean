@@ -180,10 +180,16 @@ def lowerBlockChecked? (env : Typing.TypeEnv) (block : Block) : LowerM (CLean.Bl
 def lowerBlocks (blocks : Array Block) : Std.HashMap BlockLabel CLean.Block :=
   blocks.foldl (fun out block => out.insert block.label (lowerBlock block)) {}
 
-def lowerBlocksChecked? (blocks : Array Block) : LowerM (Std.HashMap BlockLabel CLean.Block) := do
+def initialTypeEnv (kernel : Kernel) : Typing.TypeEnv :=
+  let env : Typing.TypeEnv := {}
+  let env := kernel.regs.foldl (fun env decl => { env with regs := env.regs.insert decl.name decl.ty }) env
+  kernel.preds.foldl (fun env decl => { env with preds := env.preds.insert decl.name .pred }) env
+
+def lowerBlocksChecked? (env : Typing.TypeEnv) (blocks : Array Block) :
+    LowerM (Std.HashMap BlockLabel CLean.Block) := do
   let mut out : Std.HashMap BlockLabel CLean.Block := {}
   for block in blocks do
-    let (block', _) <- lowerBlockChecked? {} block
+    let (block', _) <- lowerBlockChecked? env block
     out := out.insert block.label block'
   pure out
 
@@ -193,7 +199,7 @@ def lowerKernelEnv (kernel : Kernel) : KernelEnv :=
     blocks := lowerBlocks kernel.blocks }
 
 def lowerKernelEnvChecked? (kernel : Kernel) : LowerM KernelEnv := do
-  let blocks <- lowerBlocksChecked? kernel.blocks
+  let blocks <- lowerBlocksChecked? (initialTypeEnv kernel) kernel.blocks
   pure { entry := kernel.entry, gridCtx := kernel.gridCtx, blocks := blocks }
 
 def lowerKernelEnvCheckedD (kernel : Kernel) (default : KernelEnv := {}) : KernelEnv :=

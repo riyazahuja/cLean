@@ -43,6 +43,14 @@ private def lane0HasR1Seven (st : State) : Bool :=
       | _ => false
   | none => false
 
+private def lane0HasRegU32 (reg : RegName) (value : UInt32) (st : State) : Bool :=
+  match st.getLane? 0 0 lane0 with
+  | some laneState =>
+      match laneState.regs[reg]? with
+      | some (.u32 v) => v == value
+      | _ => false
+  | none => false
+
 private def lane0Terminated (st : State) : Bool :=
   match st.getLane? 0 0 lane0 with
   | some laneState => laneState.status == .terminated
@@ -417,6 +425,7 @@ example :
 
 private def ptxAssignKernel : PTX.Kernel :=
   { entry := "ptx_assign"
+    regs := #[{ name := "r1", ty := .u32 }]
     blocks := #[{
       label := "ptx_assign"
       body := #[({ instr := .mov .u32 "r1" (.imm (.u32 7)) } : PTX.GInstr)]
@@ -444,6 +453,7 @@ theorem ptx_assign_kernel_run_functional :
 
 private def ptxCopyKernel : PTX.Kernel :=
   { entry := "ptx_copy"
+    regs := #[{ name := "r1", ty := .u32 }]
     blocks := #[{
       label := "ptx_copy"
       body := #[
@@ -475,6 +485,7 @@ theorem ptx_copy_kernel_run_functional :
 
 private def ptxBarrierKernel : PTX.Kernel :=
   { entry := "ptx_barrier"
+    regs := #[{ name := "r1", ty := .u32 }]
     blocks := #[{
       label := "ptx_barrier"
       body := #[
@@ -503,6 +514,50 @@ theorem ptx_barrier_kernel_run_functional :
       lane0Terminated ptxBarrierFinalState = true := by
   refine ⟨StepMachine.runN_reaches 3 ptxBarrierState, ?_, ?_, ?_⟩
   · native_decide
+  · native_decide
+  · native_decide
+
+private def ptxAddKernel : PTX.Kernel :=
+  { entry := "ptx_add"
+    regs := #[
+      { name := "r1", ty := .u32 },
+      { name := "r2", ty := .u32 },
+      { name := "r3", ty := .u32 }
+    ]
+    blocks := #[{
+      label := "ptx_add"
+      body := #[({ instr := .add .u32 "r3" (.reg "r1") (.reg "r2") } : PTX.GInstr)]
+      term := .exit
+    }] }
+
+private def ptxAddLane0 : LaneState :=
+  { regs := ({} : Std.HashMap RegName Value)
+      |>.insert "r1" (.u32 2)
+      |>.insert "r2" (.u32 5)
+    pc := ("ptx_add", 0) }
+
+private def ptxAddWarp0 : WarpState :=
+  { lanes := (Array.replicate 32 { pc := ("ptx_add", 0) }).set! 0 ptxAddLane0, activeMask := 1 }
+
+private def ptxAddState : State :=
+  { kernelEnv := PTX.lowerKernelEnvCheckedD ptxAddKernel
+    ctas := ({} : Std.HashMap CTAId CTAState).insert 0
+      { warps := ({} : Std.HashMap WarpId WarpState).insert 0 ptxAddWarp0 } }
+
+private def ptxAddFinalState : State :=
+  StepMachine.runN 2 ptxAddState
+
+example :
+    (match PTX.lowerKernelEnvChecked? ptxAddKernel with
+     | .ok _ => true
+     | .error _ => false) = true := by
+  native_decide
+
+theorem ptx_add_kernel_run_functional :
+    Reaches ptxAddState ptxAddFinalState ∧
+      lane0HasRegU32 "r3" 7 ptxAddFinalState = true ∧
+      lane0Terminated ptxAddFinalState = true := by
+  refine ⟨StepMachine.runN_reaches 2 ptxAddState, ?_, ?_⟩
   · native_decide
   · native_decide
 
