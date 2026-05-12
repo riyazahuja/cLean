@@ -46,9 +46,43 @@ private def u64Shr (a : UInt64) (n : Nat) : UInt64 :=
 def bitSet (mask : UInt32) (i : Nat) : Bool :=
   ((mask.toNat / (2 ^ i)) % 2) = 1
 
--- Milestone 1 assumes 1D blocks whose warps partition block threads contiguously.
-def blockLinearTidX (warp : WarpId) (lane : LaneId) : Nat :=
+def nonzeroDim (n : Nat) : Nat :=
+  if n = 0 then 1 else n
+
+def dim3X (linear : Nat) (dims : Dim3) : Nat :=
+  linear % nonzeroDim dims.x
+
+def dim3Y (linear : Nat) (dims : Dim3) : Nat :=
+  (linear / nonzeroDim dims.x) % nonzeroDim dims.y
+
+def dim3Z (linear : Nat) (dims : Dim3) : Nat :=
+  linear / (nonzeroDim dims.x * nonzeroDim dims.y)
+
+-- Warps partition block threads contiguously; dimensional coordinates are derived
+-- from this block-local linear ID and the launch blockDim.
+def blockLinearTid (warp : WarpId) (lane : LaneId) : Nat :=
   warp * 32 + lane.val
+
+def blockLinearTidX (warp : WarpId) (lane : LaneId) : Nat :=
+  blockLinearTid warp lane
+
+def threadIdxX (grid : GridCtx) (warp : WarpId) (lane : LaneId) : Nat :=
+  dim3X (blockLinearTid warp lane) grid.blockDim
+
+def threadIdxY (grid : GridCtx) (warp : WarpId) (lane : LaneId) : Nat :=
+  dim3Y (blockLinearTid warp lane) grid.blockDim
+
+def threadIdxZ (grid : GridCtx) (warp : WarpId) (lane : LaneId) : Nat :=
+  dim3Z (blockLinearTid warp lane) grid.blockDim
+
+def ctaIdxX (grid : GridCtx) (cta : CTAId) : Nat :=
+  dim3X cta grid.gridDim
+
+def ctaIdxY (grid : GridCtx) (cta : CTAId) : Nat :=
+  dim3Y cta grid.gridDim
+
+def ctaIdxZ (grid : GridCtx) (cta : CTAId) : Nat :=
+  dim3Z cta grid.gridDim
 
 def laneIds : List LaneId :=
   List.finRange 32
@@ -66,12 +100,12 @@ def writePred (lane : LaneState) (p : PredName) (b : Bool) : LaneState :=
   { lane with preds := lane.preds.insert p b }
 
 def evalSpecial (grid : GridCtx) (cta : CTAId) (warp : WarpId) (lane : LaneId) : SpecialReg → Value
-  | .tidX => .u32 <| UInt32.ofNat (blockLinearTidX warp lane)
-  | .tidY => .u32 0
-  | .tidZ => .u32 0
-  | .ctaidX => .u32 <| UInt32.ofNat cta
-  | .ctaidY => .u32 0
-  | .ctaidZ => .u32 0
+  | .tidX => .u32 <| UInt32.ofNat (threadIdxX grid warp lane)
+  | .tidY => .u32 <| UInt32.ofNat (threadIdxY grid warp lane)
+  | .tidZ => .u32 <| UInt32.ofNat (threadIdxZ grid warp lane)
+  | .ctaidX => .u32 <| UInt32.ofNat (ctaIdxX grid cta)
+  | .ctaidY => .u32 <| UInt32.ofNat (ctaIdxY grid cta)
+  | .ctaidZ => .u32 <| UInt32.ofNat (ctaIdxZ grid cta)
   | .ntidX => .u32 <| UInt32.ofNat grid.blockDim.x
   | .ntidY => .u32 <| UInt32.ofNat grid.blockDim.y
   | .ntidZ => .u32 <| UInt32.ofNat grid.blockDim.z
@@ -96,6 +130,7 @@ end
 def instrReadSet : Instr → ReadSet
   | .assignReg _ rhs => rvalueReadSet rhs
   | .assignPred _ cmp => cmpReadSet cmp
+  | .assignPredValue _ rhs => rvalueReadSet rhs
   | .load _ src => rvalueReadSet src.addr
   | .store dst value => ReadSet.union (rvalueReadSet dst.addr) (rvalueReadSet value)
   | .cvta _ _ src => rvalueReadSet src
@@ -391,9 +426,13 @@ mutual
     | .cvt .u32, .s32 x => some (.u32 (UInt32.ofNat (signedToNat 32 x)))
     | .cvt .u32, .u64 x => some (.u32 (UInt32.ofNat x.toNat))
     | .cvt .u32, .b32 x => some (.u32 x)
+    | .cvt .b32, .u32 x => some (.b32 x)
+    | .cvt .b32, .s32 x => some (.b32 (UInt32.ofNat (signedToNat 32 x)))
     | .cvt .u64, .s64 x => some (.u64 (UInt64.ofNat (signedToNat 64 x)))
     | .cvt .u64, .u32 x => some (.u64 (UInt64.ofNat x.toNat))
     | .cvt .u64, .b64 x => some (.u64 x)
+    | .cvt .b64, .u64 x => some (.b64 x)
+    | .cvt .b64, .s64 x => some (.b64 (UInt64.ofNat (signedToNat 64 x)))
     | .cvt .s32, .u32 x => some (.s32 (normalizeSigned 32 (Int.ofNat x.toNat)))
     | .cvt .s32, .s64 x => some (.s32 (normalizeSigned 32 x))
     | .cvt .s32, .b32 x => some (.s32 (normalizeSigned 32 (Int.ofNat x.toNat)))
@@ -412,6 +451,9 @@ mutual
 
   partial def evalBinary? : ScalarBinaryOp → Value → Value → Option Value
     | .mulWideS32, .s32 a, .s32 b => some (.s64 (normalizeSigned 64 (a * b)))
+    | .bitor, .pred a, .pred b => some (.pred (a || b))
+    | .bitand, .pred a, .pred b => some (.pred (a && b))
+    | .bitxor, .pred a, .pred b => some (.pred (a != b))
     | .add, .u32 a, .u32 b => some (.u32 (a + b))
     | .add, .u64 a, .u64 b => some (.u64 (a + b))
     | .add, .s32 a, .s32 b => some (.s32 (normalizeSigned 32 (a + b)))
@@ -438,10 +480,28 @@ mutual
     | .mul, .f64 a, .f64 b => some (.f64 (a * b))
     | .bitand, .u32 a, .u32 b => some (.u32 (a &&& b))
     | .bitand, .u64 a, .u64 b => some (.u64 (a &&& b))
+    | .bitand, .b32 a, .b32 b => some (.b32 (a &&& b))
+    | .bitand, .u32 a, .b32 b => some (.b32 (a &&& b))
+    | .bitand, .b32 a, .u32 b => some (.b32 (a &&& b))
+    | .bitand, .b64 a, .b64 b => some (.b64 (a &&& b))
+    | .bitand, .u64 a, .b64 b => some (.b64 (a &&& b))
+    | .bitand, .b64 a, .u64 b => some (.b64 (a &&& b))
     | .bitor, .u32 a, .u32 b => some (.u32 (a ||| b))
     | .bitor, .u64 a, .u64 b => some (.u64 (a ||| b))
+    | .bitor, .b32 a, .b32 b => some (.b32 (a ||| b))
+    | .bitor, .u32 a, .b32 b => some (.b32 (a ||| b))
+    | .bitor, .b32 a, .u32 b => some (.b32 (a ||| b))
+    | .bitor, .b64 a, .b64 b => some (.b64 (a ||| b))
+    | .bitor, .u64 a, .b64 b => some (.b64 (a ||| b))
+    | .bitor, .b64 a, .u64 b => some (.b64 (a ||| b))
     | .bitxor, .u32 a, .u32 b => some (.u32 (u32Xor a b))
     | .bitxor, .u64 a, .u64 b => some (.u64 (u64Xor a b))
+    | .bitxor, .b32 a, .b32 b => some (.b32 (u32Xor a b))
+    | .bitxor, .u32 a, .b32 b => some (.b32 (u32Xor a b))
+    | .bitxor, .b32 a, .u32 b => some (.b32 (u32Xor a b))
+    | .bitxor, .b64 a, .b64 b => some (.b64 (u64Xor a b))
+    | .bitxor, .u64 a, .b64 b => some (.b64 (u64Xor a b))
+    | .bitxor, .b64 a, .u64 b => some (.b64 (u64Xor a b))
     | .shl, .u32 a, .u32 b => some (.u32 (u32Shl a b.toNat))
     | .shl, .u64 a, .u64 b => some (.u64 (u64Shl a b.toNat))
     | .shr, .u32 a, .u32 b => some (.u32 (u32Shr a b.toNat))
@@ -637,6 +697,11 @@ def stepInstr? (st : State) (cta : CTAId) (warp : WarpId) (gi : GInstr) : Option
           | .assignPred dst cmp =>
               applyToLaneIds? st cta warp participants fun lane laneState => do
                 let b <- evalCmp? st cta warp lane cmp
+                pure (writePred laneState dst b)
+          | .assignPredValue dst rhs =>
+              applyToLaneIds? st cta warp participants fun lane laneState => do
+                let v <- evalRValue? st cta warp lane rhs
+                let b <- valueToBool? v
                 pure (writePred laneState dst b)
           | .load dst src =>
               applyToLaneIds? st cta warp participants fun lane laneState => do

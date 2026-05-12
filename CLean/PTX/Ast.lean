@@ -17,6 +17,7 @@ inductive Instr where
   | mov (ty : ScalarTy) (dst : RegName) (src : Operand)
   | unop (op : ScalarUnaryOp) (srcTy : ScalarTy) (dst : RegName) (src : Operand)
   | binop (op : ScalarBinaryOp) (ty : ScalarTy) (dst : RegName) (lhs rhs : Operand)
+  | predBinop (op : ScalarBinaryOp) (dst : PredName) (lhs rhs : Operand)
   | triop (op : ScalarTernaryOp) (ty : ScalarTy) (dst : RegName) (a b c : Operand)
   | setp (op : CmpOp) (ty : ScalarTy) (dst : PredName) (lhs rhs : Operand)
   | ld (space : AddrSpace) (ty : ScalarTy) (dst : RegName) (addr : Operand)

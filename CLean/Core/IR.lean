@@ -80,6 +80,7 @@ structure MMAInstr where
 inductive Instr where
   | assignReg (dst : RegName) (rhs : RValue)
   | assignPred (dst : PredName) (cmp : CmpExpr)
+  | assignPredValue (dst : PredName) (rhs : RValue)
   | load (dst : RegName) (src : TypedAddr)
   | store (dst : TypedAddr) (value : RValue)
   | cvta (dst : RegName) (space : AddrSpace) (src : RValue)

@@ -131,6 +131,11 @@ def hexNatRaw : Parser Nat := do
   let digits ← many1 (Std.Internal.Parsec.String.hexDigit)
   pure (natFromHexDigits digits)
 
+def hexFloat32Raw : Parser Float := do
+  rawSymbol "0f"
+  let digits ← many1 (Std.Internal.Parsec.String.hexDigit)
+  pure ((Float32.ofBits (UInt32.ofNat (natFromHexDigits digits))).toFloat)
+
 def natRaw : Parser Nat :=
   attempt hexNatRaw <|> decNatRaw
 
@@ -234,13 +239,24 @@ def operandOfNameRef (ref : NameRef) : Operand :=
   | some s => .special s
   | none => if ref.hasPercent then .reg ref.name else .symbol ref.name
 
+def operandOfNameRefWithTy (ty : ScalarTy) (ref : NameRef) : Operand :=
+  match ty with
+  | .pred => if ref.hasPercent then .pred ref.name else .symbol ref.name
+  | _ => operandOfNameRef ref
+
 def operandWithTy (ty : ScalarTy) : Parser Operand :=
+  attempt (do
+    match ty with
+    | .f32 =>
+        let x ← lexeme hexFloat32Raw
+        pure (.imm (.f32 x))
+    | _ => fail "expected f32 hex literal") <|>
   attempt (do
     let n ← intLit
     match immediateValue? ty n with
     | some v => pure (.imm v)
     | none => fail s!"numeric literals for {repr ty} are not supported by this parser") <|>
-  (operandOfNameRef <$> nameRef)
+  (operandOfNameRefWithTy ty <$> nameRef)
 
 def addrAtom : Parser Operand :=
   attempt (do
@@ -360,6 +376,21 @@ def instrMulWideS32 : Parser Instr := do
   let rhs ← operandWithTy .s32
   pure (.binop .mulWideS32 .s32 dst lhs rhs)
 
+def predBinaryOp : Parser ScalarBinaryOp :=
+  attempt (rawSymbol "or.pred" *> pure .bitor) <|>
+  attempt (rawSymbol "and.pred" *> pure .bitand) <|>
+  attempt (rawSymbol "xor.pred" *> pure .bitxor)
+
+def instrPredBinop : Parser Instr := do
+  let op ← predBinaryOp
+  trivia
+  let dst ← ident
+  comma
+  let lhs ← operandWithTy .pred
+  comma
+  let rhs ← operandWithTy .pred
+  pure (.predBinop op dst lhs rhs)
+
 def instrBinop : Parser Instr := do
   let op ← scalarBinaryOp
   let ty ← scalarTySuffix
@@ -453,6 +484,7 @@ def instr : Parser Instr :=
   attempt instrFmaRn <|>
   attempt instrMulWideS32 <|>
   attempt instrMulLo <|>
+  attempt instrPredBinop <|>
   attempt instrMov <|>
   attempt instrUnop <|>
   attempt instrBinop <|>
@@ -490,9 +522,20 @@ inductive Stmt where
   | instr (i : GInstr)
   | term (t : Terminator)
   | guardedBra (g : Guard) (label : BlockLabel)
+  | noop
   deriving Repr
 
+def implicitFallthroughLabel : BlockLabel :=
+  "__ptx_implicit_fallthrough__"
+
 def stmt : Parser Stmt := do
+  attempt (do
+    symbol ".pragma"
+    symbol "\""
+    let _ ← manyChars (satisfy fun c : Char => c != '"')
+    symbol "\""
+    semi
+    pure .noop) <|>
   attempt (do
     let g ← guard
     symbol "bra"
@@ -506,22 +549,24 @@ def stmt : Parser Stmt := do
 
 def blockOfStmts (label : BlockLabel) (stmts : Array Stmt) : Block := Id.run do
   let mut body : Array GInstr := #[]
-  let mut term : Terminator := .exit
+  let mut term? : Option Terminator := none
   for st in stmts do
     match st with
     | .instr i => body := body.push i
-    | .term t => term := t
-    | .guardedBra g target => term := .cbra g.pred g.negate target (label ++ "$fallthrough")
-  pure { label := label, body := body, term := term }
+    | .term t => term? := some t
+    | .guardedBra g target => term? := some (.cbra g.pred g.negate target (label ++ "$fallthrough"))
+    | .noop => pure ()
+  pure { label := label, body := body, term := term?.getD (.bra implicitFallthroughLabel) }
 
 def fallthroughLabel (label : BlockLabel) (idx : Nat) : BlockLabel :=
   label ++ "$fallthrough" ++ toString idx
 
 partial def blocksOfStmts (label : BlockLabel) (stmts : Array Stmt) : Array Block := Id.run do
   let rec go (label : BlockLabel) (idx : Nat) (body : Array GInstr) : List Stmt → Array Block
-    | [] => #[{ label := label, body := body, term := .exit }]
+    | [] => #[{ label := label, body := body, term := .bra implicitFallthroughLabel }]
     | .instr instr :: rest => go label idx (body.push instr) rest
     | .term term :: _ => #[{ label := label, body := body, term := term }]
+    | .noop :: rest => go label idx body rest
     | .guardedBra g target :: rest =>
         let cont := fallthroughLabel label idx
         let block : Block := {
@@ -530,10 +575,27 @@ partial def blocksOfStmts (label : BlockLabel) (stmts : Array Stmt) : Array Bloc
           term := .cbra g.pred g.negate target cont
         }
         if rest.isEmpty then
-          #[block, { label := cont, body := #[], term := .exit }]
+          #[block, { label := cont, body := #[], term := .bra implicitFallthroughLabel }]
         else
           #[block] ++ go cont (idx + 1) #[] rest
   go label 0 #[] stmts.toList
+
+def linkImplicitFallthroughs (blocks : Array Block) : Array Block := Id.run do
+  let mut out : Array Block := #[]
+  for h : i in [:blocks.size] do
+    let block := blocks[i]
+    let term :=
+      match block.term with
+      | .bra label =>
+          if label == implicitFallthroughLabel then
+            match blocks[i + 1]? with
+            | some next => .bra next.label
+            | none => .exit
+          else
+            block.term
+      | _ => block.term
+    out := out.push { block with term := term }
+  pure out
 
 def block : Parser (Array Block) := do
   let label ← ident
@@ -668,7 +730,7 @@ def kernelBody (entry : BlockLabel) (entryParams : Array ParamDecl) : Parser Ker
     preds := preds
     params := entryParams ++ params
     shareds := shareds
-    blocks := withLeadingBlocks entry leading blocks
+    blocks := linkImplicitFallthroughs (withLeadingBlocks entry leading blocks)
   }
 
 def kernel : Parser Kernel := do

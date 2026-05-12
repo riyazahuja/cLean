@@ -43,6 +43,8 @@ def addressOffsetValue? (ty : ScalarTy) (offset : Nat) : Option Value :=
   match ty with
   | .u32 => some (.u32 (UInt32.ofNat offset))
   | .u64 => some (.u64 (UInt64.ofNat offset))
+  | .s64 => some (.s64 (Int.ofNat offset))
+  | .b64 => some (.b64 (UInt64.ofNat offset))
   | _ => none
 
 def lowerOperandChecked? (env : Typing.TypeEnv) : Operand → LowerM RValue
@@ -138,6 +140,8 @@ def coerceOperandTo? (expected actual : ScalarTy) (rv : RValue) : RValue :=
     rv
   else
     match expected, actual with
+    | .b32, .u32 | .b32, .s32 => .unop (.cvt .b32) rv
+    | .b64, .u64 | .b64, .s64 => .unop (.cvt .b64) rv
     | .s32, .u32 | .s32, .b32 => .unop (.cvt .s32) rv
     | .u32, .s32 | .u32, .b32 => .unop (.cvt .u32) rv
     -- Keep 64-bit address-shaped values unwrapped: `cvta` registers carry generic
@@ -178,6 +182,7 @@ def lowerInstr : Instr → CLean.Instr
   | .mov _ dst src => .assignReg dst (lowerOperand src)
   | .unop op _ dst src => .assignReg dst (.unop op (lowerOperand src))
   | .binop op _ dst lhs rhs => .assignReg dst (.binop op (lowerOperand lhs) (lowerOperand rhs))
+  | .predBinop op dst lhs rhs => .assignPredValue dst (.binop op (lowerOperand lhs) (lowerOperand rhs))
   | .triop op _ dst a b c => .assignReg dst (.triop op (lowerOperand a) (lowerOperand b) (lowerOperand c))
   | .setp op _ dst lhs rhs => .assignPred dst { op := op, lhs := lowerOperand lhs, rhs := lowerOperand rhs }
   | .ld space ty dst addr => .load dst { space := space, ty := ty, addr := lowerOperand addr }
@@ -209,6 +214,16 @@ def lowerInstrChecked? (env : Typing.TypeEnv) : Instr → LowerM (CLean.Instr ×
           pure (.assignReg dst (.binop op lhs rhs),
             { env with regs := env.regs.insert dst outTy })
       | none => throw (.unsupportedOp "binop")
+  | .predBinop op dst lhs rhs => do
+      expectOperandType env .pred lhs
+      expectOperandType env .pred rhs
+      let lhs <- lowerOperandChecked? env lhs
+      let rhs <- lowerOperandChecked? env rhs
+      match Typing.binarySig? op .pred .pred with
+      | some .pred =>
+          pure (.assignPredValue dst (.binop op lhs rhs),
+            { env with preds := env.preds.insert dst .pred })
+      | _ => throw (.unsupportedOp "predBinop")
   | .triop op ty dst a b c => do
       expectOperandType env ty a
       expectOperandType env ty b

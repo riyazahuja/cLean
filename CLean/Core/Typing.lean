@@ -85,6 +85,10 @@ private def cvtSig? (dst src : ScalarTy) : Option ScalarTy :=
     some dst
   else
     match dst, src with
+    | .b32, .u32 => some .b32
+    | .b32, .s32 => some .b32
+    | .b64, .u64 => some .b64
+    | .b64, .s64 => some .b64
     | .u32, .s32 => some .u32
     | .u32, .u64 => some .u32
     | .u32, .b32 => some .u32
@@ -122,6 +126,9 @@ def unarySig? : ScalarUnaryOp → ScalarTy → Option ScalarTy
 
 def binarySig? : ScalarBinaryOp → ScalarTy → ScalarTy → Option ScalarTy
   | .mulWideS32, .s32, .s32 => some .s64
+  | .bitor, .pred, .pred => some .pred
+  | .bitand, .pred, .pred => some .pred
+  | .bitxor, .pred, .pred => some .pred
   | .add, a, b | .sub, a, b | .mul, a, b =>
       if binarySameWidthInt? a b || binaryFloat? a b then some a else none
   | .min, .s32, .s32 => some .s32
@@ -132,6 +139,8 @@ def binarySig? : ScalarBinaryOp → ScalarTy → ScalarTy → Option ScalarTy
       match a, b with
       | .u32, .u32 => some .u32
       | .u64, .u64 => some .u64
+      | .b32, .b32 => some .b32
+      | .b64, .b64 => some .b64
       | _, _ => none
   | .shl, .u32, .u32 => some .u32
   | .shl, .u64, .u64 => some .u64
