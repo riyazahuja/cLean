@@ -153,6 +153,64 @@ example : ∃ st', StepMachine exampleState st' := by
               ((Helpers.participatingRunnable_iff_bool baseWarp exampleAssign.guard? [lane0]).2 (by native_decide))
               hstep
 
+private theorem example_step_assign : StepMachine exampleState afterAssignState := by
+  unfold afterAssignState
+  cases hstep : Helpers.stepInstr? exampleState 0 0 exampleAssign with
+  | none =>
+      have hisSome : (Helpers.stepInstr? exampleState 0 0 exampleAssign).isSome = true := by
+        native_decide
+      simp [hstep] at hisSome
+  | some st' =>
+      refine StepMachine.mk (cta := 0) (warp := 0) ?_ ?_
+      · exact (State.wf_iff_bool exampleState).2 (by native_decide)
+      · refine StepWarp.mk (cta := 0) (warp := 0) ?_ ?_
+        · exact (State.wf_iff_bool exampleState).2 (by native_decide)
+        · refine StepBlock.body (warpState := baseWarp) (pc := ("entry", 0)) (block := exampleBlock)
+            (gi := exampleAssign) ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_
+          · exact (State.wf_iff_bool exampleState).2 (by native_decide)
+          · simp [State.getWarp?, State.getCTA?, exampleState, baseCTA]
+          · exact (WarpState.wf_iff_bool baseWarp).2 (by native_decide)
+          · exact (Helpers.lockstepRunnable_iff_bool baseWarp).2 (by native_decide)
+          · exact (Helpers.runnablePc_iff_bool baseWarp ("entry", 0)).2 (by native_decide)
+          · simp [exampleState, exampleBlock]
+          · simp [exampleBlock, exampleAssign]
+          · exact StepInstr.mk (warpState := baseWarp) (participants := [lane0])
+              ((State.wf_iff_bool exampleState).2 (by native_decide))
+              (by simp [State.getWarp?, State.getCTA?, exampleState, baseCTA])
+              ((WarpState.wf_iff_bool baseWarp).2 (by native_decide))
+              ((Helpers.lockstepRunnable_iff_bool baseWarp).2 (by native_decide))
+              ((Helpers.participatingRunnable_iff_bool baseWarp exampleAssign.guard? [lane0]).2 (by native_decide))
+              (by
+                have hstepLit :
+                    Helpers.stepInstr? exampleState 0 0 { instr := .assignReg "r1" (.imm (.u32 7)) } = some st' := by
+                  simpa [exampleAssign] using hstep
+                have hmatch :
+                    (match Helpers.stepInstr? exampleState 0 0 { instr := .assignReg "r1" (.imm (.u32 7)) } with
+                    | some st => st
+                    | none => exampleState) = st' := by
+                  rw [hstepLit]
+                simpa [hmatch] using hstepLit)
+
+private theorem example_step_terminate : StepMachine afterAssignState afterTerminateState := by
+  unfold afterAssignState afterTerminateState
+  cases hstep : Helpers.stepTerminator? afterAssignState 0 0 .terminate with
+  | none =>
+      have hisSome : (Helpers.stepTerminator? afterAssignState 0 0 .terminate).isSome = true := by
+        native_decide
+      simp [hstep] at hisSome
+  | some st' => sorry
+
+
+theorem toy_assign_kernel_functional :
+    ∃ st1 st2,
+      StepMachine exampleState st1 ∧
+      StepMachine st1 st2 ∧
+      lane0HasR1Seven st1 = true ∧
+      lane0Terminated st2 = true := by
+  refine ⟨afterAssignState, afterTerminateState, example_step_assign, example_step_terminate, ?_, ?_⟩
+  · native_decide
+  · native_decide
+
 example : lane0HasR1Seven afterAssignState = true := by
   native_decide
 

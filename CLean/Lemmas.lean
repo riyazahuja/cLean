@@ -327,4 +327,144 @@ theorem readMem_writeMem_same_global_s64
     Helpers.readMem? st' .global .s64 (.global offset) =
       some (.s64 (Helpers.natToSigned 64 (Helpers.signedToNat 64 x))) := by
   sorry
+
+def TopMemEq (st st' : State) : Prop :=
+  st'.global = st.global ∧ st'.const = st.const ∧ st'.param = st.param
+
+def LaneRegFilesEq (st st' : State) (cta : CTAId) (warp : WarpId) : Prop :=
+  ∀ lane laneState laneState',
+    st.getLane? cta warp lane = some laneState →
+    st'.getLane? cta warp lane = some laneState' →
+    laneState'.regs = laneState.regs
+
+def LanePredFilesEq (st st' : State) (cta : CTAId) (warp : WarpId) : Prop :=
+  ∀ lane laneState laneState',
+    st.getLane? cta warp lane = some laneState →
+    st'.getLane? cta warp lane = some laneState' →
+    laneState'.preds = laneState.preds
+
+theorem stepInstr_assignReg_preserves_mem
+    {st st' : State} {cta : CTAId} {warp : WarpId} {dst : RegName} {rhs : RValue}
+    {guard? : Option Guard}
+    (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .assignReg dst rhs } = some st') :
+    TopMemEq st st' := by
+  sorry
+
+theorem stepInstr_assignPred_preserves_mem
+    {st st' : State} {cta : CTAId} {warp : WarpId} {dst : PredName} {cmp : CmpExpr}
+    {guard? : Option Guard}
+    (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .assignPred dst cmp } = some st') :
+    TopMemEq st st' := by
+  sorry
+
+theorem stepInstr_load_preserves_mem
+    {st st' : State} {cta : CTAId} {warp : WarpId} {dst : RegName} {src : TypedAddr}
+    {guard? : Option Guard}
+    (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .load dst src } = some st') :
+    TopMemEq st st' := by
+  sorry
+
+theorem stepInstr_cvta_preserves_mem
+    {st st' : State} {cta : CTAId} {warp : WarpId} {dst : RegName} {space : AddrSpace} {src : RValue}
+    {guard? : Option Guard}
+    (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .cvta dst space src } = some st') :
+    TopMemEq st st' := by
+  sorry
+
+theorem stepInstr_isspacep_preserves_mem
+    {st st' : State} {cta : CTAId} {warp : WarpId} {dst : PredName} {space : AddrSpace} {src : RValue}
+    {guard? : Option Guard}
+    (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .isspacep dst space src } = some st') :
+    TopMemEq st st' := by
+  sorry
+
+theorem stepInstr_assignReg_preserves_pred_files
+    {st st' : State} {cta : CTAId} {warp : WarpId} {dst : RegName} {rhs : RValue}
+    {guard? : Option Guard}
+    (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .assignReg dst rhs } = some st') :
+    LanePredFilesEq st st' cta warp := by
+  sorry
+
+theorem stepInstr_assignPred_preserves_reg_files
+    {st st' : State} {cta : CTAId} {warp : WarpId} {dst : PredName} {cmp : CmpExpr}
+    {guard? : Option Guard}
+    (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .assignPred dst cmp } = some st') :
+    LaneRegFilesEq st st' cta warp := by
+  sorry
+
+theorem stepInstr_store_preserves_reg_files
+    {st st' : State} {cta : CTAId} {warp : WarpId} {dst : TypedAddr} {value : RValue}
+    {guard? : Option Guard}
+    (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .store dst value } = some st') :
+    LaneRegFilesEq st st' cta warp := by
+  sorry
+
+theorem stepInstr_store_preserves_pred_files
+    {st st' : State} {cta : CTAId} {warp : WarpId} {dst : TypedAddr} {value : RValue}
+    {guard? : Option Guard}
+    (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .store dst value } = some st') :
+    LanePredFilesEq st st' cta warp := by
+  sorry
+
+theorem stepInstr_cvta_preserves_pred_files
+    {st st' : State} {cta : CTAId} {warp : WarpId} {dst : RegName} {space : AddrSpace} {src : RValue}
+    {guard? : Option Guard}
+    (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .cvta dst space src } = some st') :
+    LanePredFilesEq st st' cta warp := by
+  sorry
+
+theorem stepInstr_isspacep_preserves_reg_files
+    {st st' : State} {cta : CTAId} {warp : WarpId} {dst : PredName} {space : AddrSpace} {src : RValue}
+    {guard? : Option Guard}
+    (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .isspacep dst space src } = some st') :
+    LaneRegFilesEq st st' cta warp := by
+  sorry
+
+theorem stepInstr?_preserves_wf
+    {st st' : State} {cta : CTAId} {warp : WarpId} {gi : GInstr}
+    (hwf : State.wf st)
+    (hstep : Helpers.stepInstr? st cta warp gi = some st') :
+    State.wf st' := by
+  sorry
+
+theorem stepTerminator?_preserves_wf
+    {st st' : State} {cta : CTAId} {warp : WarpId} {term : Terminator}
+    (hwf : State.wf st)
+    (hstep : Helpers.stepTerminator? st cta warp term = some st') :
+    State.wf st' := by
+  sorry
+
+theorem StepInstr.preserves_wf
+    {st st' : State} {cta : CTAId} {warp : WarpId} {gi : GInstr}
+    (hstep : StepInstr st cta warp gi st') :
+    State.wf st' := by
+  cases hstep with
+  | mk hwf _ _ _ _ hrun =>
+      exact stepInstr?_preserves_wf hwf hrun
+
+theorem StepBlock.preserves_wf
+    {st st' : State} {cta : CTAId} {warp : WarpId}
+    (hstep : StepBlock st cta warp st') :
+    State.wf st' := by
+  cases hstep with
+  | body _ _ _ _ _ _ _ hinstr =>
+      exact StepInstr.preserves_wf hinstr
+  | term hwf _ _ _ _ _ _ hterm =>
+      exact stepTerminator?_preserves_wf hwf hterm
+
+theorem StepWarp.preserves_wf
+    {st st' : State} {cta : CTAId} {warp : WarpId}
+    (hstep : StepWarp st cta warp st') :
+    State.wf st' := by
+  cases hstep with
+  | mk _ hblock =>
+      exact StepBlock.preserves_wf hblock
+
+theorem StepMachine.preserves_wf
+    {st st' : State}
+    (hstep : StepMachine st st') :
+    State.wf st' := by
+  cases hstep with
+  | mk _ hwarp =>
+      exact StepWarp.preserves_wf hwarp
 end CLean
