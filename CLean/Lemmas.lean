@@ -378,6 +378,13 @@ theorem stepInstr_isspacep_preserves_mem
     TopMemEq st st' := by
   sorry
 
+theorem stepInstr_barrierCTA_preserves_mem
+    {st st' : State} {cta : CTAId} {warp : WarpId} {barrierId : Nat}
+    {guard? : Option Guard}
+    (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .barrierCTA barrierId } = some st') :
+    TopMemEq st st' := by
+  sorry
+
 theorem stepInstr_assignReg_preserves_pred_files
     {st st' : State} {cta : CTAId} {warp : WarpId} {dst : RegName} {rhs : RValue}
     {guard? : Option Guard}
@@ -418,6 +425,20 @@ theorem stepInstr_isspacep_preserves_reg_files
     {guard? : Option Guard}
     (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .isspacep dst space src } = some st') :
     LaneRegFilesEq st st' cta warp := by
+  sorry
+
+theorem stepInstr_barrierCTA_preserves_reg_files
+    {st st' : State} {cta : CTAId} {warp : WarpId} {barrierId : Nat}
+    {guard? : Option Guard}
+    (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .barrierCTA barrierId } = some st') :
+    LaneRegFilesEq st st' cta warp := by
+  sorry
+
+theorem stepInstr_barrierCTA_preserves_pred_files
+    {st st' : State} {cta : CTAId} {warp : WarpId} {barrierId : Nat}
+    {guard? : Option Guard}
+    (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .barrierCTA barrierId } = some st') :
+    LanePredFilesEq st st' cta warp := by
   sorry
 
 theorem stepInstr?_preserves_wf

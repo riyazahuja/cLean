@@ -535,49 +535,102 @@ def advanceRunnablePcs? (st : State) (cta : CTAId) (warp : WarpId) : Option Stat
     | none => false
   applyToLaneIds? st cta warp lanes (fun _ laneState => some (advancePcForLane laneState))
 
+def barrierArrivalPresent (token : WarpId × LaneId) (arrived : List (WarpId × LaneId)) : Bool :=
+  arrived.any fun token' => token' == token
+
+def addBarrierArrival (token : WarpId × LaneId) (arrived : List (WarpId × LaneId)) :
+    List (WarpId × LaneId) :=
+  if barrierArrivalPresent token arrived then arrived else token :: arrived
+
+def barrierExpectedCount (st : State) (inst : BarrierInstance) : Nat :=
+  if inst.expectedCount = 0 then st.kernelEnv.gridCtx.blockDim.x else inst.expectedCount
+
+def setBarrierInstance? (st : State) (cta : CTAId) (barrierId : Nat)
+    (inst : BarrierInstance) : Option State := do
+  let ctaState <- st.getCTA? cta
+  let barrier := { ctaState.barrier with bars := ctaState.barrier.bars.insert barrierId inst }
+  pure <| st.setCTA cta { ctaState with barrier := barrier }
+
+def stepBarrierCTA? (st : State) (cta : CTAId) (warp : WarpId)
+    (barrierId : Nat) (participants : List LaneId) : Option State := do
+  let warpState <- st.getWarp? cta warp
+  let pc <- currentRunnablePc? warpState
+  let currentLanes := runnableLaneIds warpState |>.filter fun lane =>
+    match warpState.getLane? lane with
+    | some laneState => laneState.pc == pc
+    | none => false
+
+  -- Predicated-off lanes skip the barrier instruction; arriving lanes block until release.
+  let mut cur := st
+  for lane in currentLanes do
+    if !participants.contains lane then
+      let laneState <- cur.getLane? cta warp lane
+      cur <- cur.setLane cta warp lane (advancePcForLane laneState)
+
+  let ctaState <- cur.getCTA? cta
+  let inst0 := ctaState.barrier.bars[barrierId]?.getD {}
+  let expected := barrierExpectedCount cur inst0
+  let mut arrived := inst0.arrived
+  for lane in participants do
+    let token := (warp, lane)
+    arrived := addBarrierArrival token arrived
+    let laneState <- cur.getLane? cta warp lane
+    cur <- cur.setLane cta warp lane { laneState with status := .blockedBarrier }
+
+  if arrived.length >= expected then
+    for token in arrived do
+      let laneState <- cur.getLane? cta token.1 token.2
+      cur <- cur.setLane cta token.1 token.2 { advancePcForLane laneState with status := .running }
+    setBarrierInstance? cur cta barrierId { epoch := inst0.epoch + 1, arrived := [], expectedCount := expected }
+  else
+    setBarrierInstance? cur cta barrierId { inst0 with arrived := arrived, expectedCount := expected }
+
 def stepInstr? (st : State) (cta : CTAId) (warp : WarpId) (gi : GInstr) : Option State := do
   let warpState <- st.getWarp? cta warp
   if !lockstepRunnable? warpState then
     none
   else
     let participants <- participatingRunnableLaneIds? warpState gi.guard?
-    let st <- match gi.instr with
-      | .assignReg dst rhs =>
-          applyToLaneIds? st cta warp participants fun lane laneState => do
-            let v <- evalRValue? st cta warp lane rhs
-            pure (writeReg laneState dst v)
-      | .assignPred dst cmp =>
-          applyToLaneIds? st cta warp participants fun lane laneState => do
-            let b <- evalCmp? st cta warp lane cmp
-            pure (writePred laneState dst b)
-      | .load dst src =>
-          applyToLaneIds? st cta warp participants fun lane laneState => do
-            let addr <- resolveAddr? st cta warp lane src
-            let value <- readMem? st src.space src.ty addr
-            pure (writeReg laneState dst value)
-      | .store dst value =>
-          -- Milestone 1 deterministic simplification: stores are sequentialized in lane order.
-          let mut cur := st
-          for lane in participants do
-            let addr <- resolveAddr? cur cta warp lane dst
-            let v <- evalRValue? cur cta warp lane value
-            cur <- writeMem? cur dst.space dst.ty addr v
-          pure cur
-      | .cvta dst space src =>
-          applyToLaneIds? st cta warp participants fun lane laneState => do
-            let value <- evalRValue? st cta warp lane src
-            let gaddr <- evalCvta? space value
-            pure (writeReg laneState dst gaddr)
-      | .isspacep dst space src =>
-          applyToLaneIds? st cta warp participants fun lane laneState => do
-            let value <- evalRValue? st cta warp lane src
-            let b <- evalIsspacep? space value
-            pure (writePred laneState dst b)
-      | .barrierCTA _ => none
-      | .warp _ => none
-      | .atomic _ _ _ _ _ => none
-      | .mma _ => none
-    advanceRunnablePcs? st cta warp
+    match gi.instr with
+    | .barrierCTA barrierId => stepBarrierCTA? st cta warp barrierId participants
+    | _ => do
+        let st <- match gi.instr with
+          | .assignReg dst rhs =>
+              applyToLaneIds? st cta warp participants fun lane laneState => do
+                let v <- evalRValue? st cta warp lane rhs
+                pure (writeReg laneState dst v)
+          | .assignPred dst cmp =>
+              applyToLaneIds? st cta warp participants fun lane laneState => do
+                let b <- evalCmp? st cta warp lane cmp
+                pure (writePred laneState dst b)
+          | .load dst src =>
+              applyToLaneIds? st cta warp participants fun lane laneState => do
+                let addr <- resolveAddr? st cta warp lane src
+                let value <- readMem? st src.space src.ty addr
+                pure (writeReg laneState dst value)
+          | .store dst value =>
+              -- Milestone 1 deterministic simplification: stores are sequentialized in lane order.
+              let mut cur := st
+              for lane in participants do
+                let addr <- resolveAddr? cur cta warp lane dst
+                let v <- evalRValue? cur cta warp lane value
+                cur <- writeMem? cur dst.space dst.ty addr v
+              pure cur
+          | .cvta dst space src =>
+              applyToLaneIds? st cta warp participants fun lane laneState => do
+                let value <- evalRValue? st cta warp lane src
+                let gaddr <- evalCvta? space value
+                pure (writeReg laneState dst gaddr)
+          | .isspacep dst space src =>
+              applyToLaneIds? st cta warp participants fun lane laneState => do
+                let value <- evalRValue? st cta warp lane src
+                let b <- evalIsspacep? space value
+                pure (writePred laneState dst b)
+          | .barrierCTA _ => none
+          | .warp _ => none
+          | .atomic _ _ _ _ _ => none
+          | .mma _ => none
+        advanceRunnablePcs? st cta warp
 
 def stepTerminator? (st : State) (cta : CTAId) (warp : WarpId) (term : Terminator) : Option State := do
   let warpState <- st.getWarp? cta warp

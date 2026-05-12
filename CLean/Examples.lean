@@ -246,4 +246,91 @@ example : copyDstHasValue copyAfterStoreState = true := by
 example : copyLane0Terminated copyAfterTerminateState = true := by
   native_decide
 
+private def barrierInstr : GInstr :=
+  { instr := .barrierCTA 0 }
+
+private def barrierAssign : GInstr :=
+  { instr := .assignReg "r1" (.imm (.u32 7)) }
+
+private def barrierBlock : Block :=
+  { label := "barrier"
+    body := #[barrierInstr, barrierAssign]
+    term := .terminate }
+
+private def barrierWarp0 : WarpState :=
+  { lanes := Array.replicate 32 { pc := ("barrier", 0) }, activeMask := 1 }
+
+private def barrierCTA0 : CTAState :=
+  { warps := ({} : Std.HashMap WarpId WarpState).insert 0 barrierWarp0
+    barrier := { bars := ({} : Std.HashMap Nat BarrierInstance).insert 0 { expectedCount := 1 } } }
+
+private def barrierState : State :=
+  { kernelEnv := { entry := "barrier", blocks := ({} : Std.HashMap BlockLabel Block).insert "barrier" barrierBlock }
+    ctas := ({} : Std.HashMap CTAId CTAState).insert 0 barrierCTA0 }
+
+private def afterBarrierState : State :=
+  match StepMachine.currentInstrStep? barrierState 0 0 with
+  | some st => st
+  | none => barrierState
+
+private def afterBarrierAssignState : State :=
+  match StepMachine.currentInstrStep? afterBarrierState 0 0 with
+  | some st => st
+  | none => afterBarrierState
+
+private def afterBarrierTerminateState : State :=
+  match StepMachine.currentTermStep? afterBarrierAssignState 0 0 with
+  | some st => st
+  | none => afterBarrierAssignState
+
+private def lane0RunningAt (pc : PC) (st : State) : Bool :=
+  match st.getLane? 0 0 lane0 with
+  | some laneState => laneState.status == .running && laneState.pc == pc
+  | none => false
+
+private def barrier0Released (st : State) : Bool :=
+  match st.getCTA? 0 with
+  | some ctaState =>
+      match ctaState.barrier.bars[0]? with
+      | some inst => inst.epoch == 1 && inst.arrived.length == 0
+      | none => false
+  | none => false
+
+private theorem barrier_step_release : StepMachine barrierState afterBarrierState := by
+  cstep
+
+private theorem barrier_step_assign : StepMachine afterBarrierState afterBarrierAssignState := by
+  cstep
+
+private theorem barrier_step_terminate : StepMachine afterBarrierAssignState afterBarrierTerminateState := by
+  cstep
+
+theorem toy_barrier_kernel_functional :
+    ∃ st1 st2 st3,
+      StepMachine barrierState st1 ∧
+      StepMachine st1 st2 ∧
+      StepMachine st2 st3 ∧
+      lane0RunningAt ("barrier", 1) st1 = true ∧
+      barrier0Released st1 = true ∧
+      lane0HasR1Seven st2 = true ∧
+      lane0Terminated st3 = true := by
+  refine ⟨afterBarrierState, afterBarrierAssignState, afterBarrierTerminateState,
+    barrier_step_release, barrier_step_assign, barrier_step_terminate, ?_, ?_, ?_, ?_⟩
+  · native_decide
+  · native_decide
+  · native_decide
+  · native_decide
+
+example : lane0RunningAt ("barrier", 1) afterBarrierState = true := by
+  native_decide
+
+example : barrier0Released afterBarrierState = true := by
+  native_decide
+
+example : lane0HasR1Seven afterBarrierAssignState = true := by
+  native_decide
+
+example : lane0Terminated afterBarrierTerminateState = true := by
+  native_decide
+
 end CLean
