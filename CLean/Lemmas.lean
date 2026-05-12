@@ -473,4 +473,39 @@ theorem StepMachine.preserves_wf
   cases hstep with
   | mk _ hwarp =>
       exact StepWarp.preserves_wf hwarp
+
+theorem StepMachine.body_of_stepInstr?
+    {st st' : State} {cta : CTAId} {warp : WarpId}
+    {warpState : WarpState} {pc : PC} {block : Block} {gi : GInstr}
+    {participants : List LaneId}
+    (hwf : State.wf st)
+    (hwarp : st.getWarp? cta warp = some warpState)
+    (hwfWarp : WarpState.wf warpState)
+    (hlock : Helpers.lockstepRunnable warpState)
+    (hrpc : Helpers.RunnablePc warpState pc)
+    (hblock : st.kernelEnv.blocks[pc.1]? = some block)
+    (hgi : block.body[pc.2]? = some gi)
+    (hpart : Helpers.ParticipatingRunnable warpState gi.guard? participants)
+    (hstep : Helpers.stepInstr? st cta warp gi = some st') :
+    StepMachine st st' :=
+  StepMachine.mk hwf <|
+    StepWarp.mk hwf <|
+      StepBlock.body hwf hwarp hwfWarp hlock hrpc hblock hgi <|
+        StepInstr.mk hwf hwarp hwfWarp hlock hpart hstep
+
+theorem StepMachine.term_of_stepTerminator?
+    {st st' : State} {cta : CTAId} {warp : WarpId}
+    {warpState : WarpState} {pc : PC} {block : Block}
+    (hwf : State.wf st)
+    (hwarp : st.getWarp? cta warp = some warpState)
+    (hwfWarp : WarpState.wf warpState)
+    (hlock : Helpers.lockstepRunnable warpState)
+    (hrpc : Helpers.RunnablePc warpState pc)
+    (hblock : st.kernelEnv.blocks[pc.1]? = some block)
+    (hbodyDone : block.body[pc.2]? = none)
+    (hstep : Helpers.stepTerminator? st cta warp block.term = some st') :
+    StepMachine st st' :=
+  StepMachine.mk hwf <|
+    StepWarp.mk hwf <|
+      StepBlock.term hwf hwarp hwfWarp hlock hrpc hblock hbodyDone hstep
 end CLean
