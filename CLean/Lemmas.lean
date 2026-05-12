@@ -1,3 +1,4 @@
+-- import Mathlib.Tactic
 import Std.Data.HashMap.Lemmas
 import CLean.Semantics
 
@@ -201,4 +202,129 @@ theorem evalIsspacep?_mismatch {s1 s2 : AddrSpace} (h : s1 ≠ s2) (n : Nat) :
     exact hs.symm
   simp [Helpers.evalIsspacep?, beq_iff_eq, h']
 
+@[simp] theorem natToBytesLE_length (n width : Nat) :
+    (Helpers.natToBytesLE n width).length = width := by
+  simp [Helpers.natToBytesLE]
+
+theorem bytesToNatLE_natToBytesLE_1 (n : Nat) :
+    Helpers.bytesToNatLE (Helpers.natToBytesLE n 1) = n % (2 ^ 8) := by
+  simp [Helpers.natToBytesLE, Helpers.bytesToNatLE, List.range, List.range.loop, bytesToNatLE.loop]
+
+
+theorem bytesToNatLE_natToBytesLE_2 (n : Nat) :
+    Helpers.bytesToNatLE (Helpers.natToBytesLE n 2) = n % (2 ^ 16) := by
+  simp [Helpers.natToBytesLE, Helpers.bytesToNatLE, List.range, List.range.loop, bytesToNatLE.loop]
+  omega
+
+theorem bytesToNatLE_natToBytesLE_4 (n : Nat) :
+    Helpers.bytesToNatLE (Helpers.natToBytesLE n 4) = n % (2 ^ 32) := by
+  simp [Helpers.natToBytesLE, Helpers.bytesToNatLE, List.range, List.range.loop, bytesToNatLE.loop]
+  omega
+
+
+theorem bytesToNatLE_natToBytesLE_8 (n : Nat) :
+    Helpers.bytesToNatLE (Helpers.natToBytesLE n 8) = n % (2 ^ 64) := by
+  simp [Helpers.natToBytesLE, Helpers.bytesToNatLE, List.range, List.range.loop, bytesToNatLE.loop]
+  omega
+
+theorem decode_encode_pred (b : Bool) :
+    Helpers.decodeScalar? .pred (Option.get! (Helpers.encodeScalar? .pred (.pred b))) = some (.pred b) := by
+  cases b <;> rfl
+
+theorem decode_encode_u8 (x : UInt8) :
+    Helpers.decodeScalar? .u8 (Option.get! (Helpers.encodeScalar? .u8 (.u8 x))) = some (.u8 x) := by
+  rfl
+
+theorem decode_encode_u16 (x : UInt16) :
+    Helpers.decodeScalar? .u16 (Option.get! (Helpers.encodeScalar? .u16 (.u16 x))) = some (.u16 x) := by
+  simp [Helpers.encodeScalar?, Helpers.decodeScalar?, bytesToNatLE_natToBytesLE_2, UInt16.ofNat_toNat,
+    Nat.mod_eq_of_lt x.toNat_lt_size]
+
+theorem decode_encode_u32 (x : UInt32) :
+    Helpers.decodeScalar? .u32 (Option.get! (Helpers.encodeScalar? .u32 (.u32 x))) = some (.u32 x) := by
+  simp [Helpers.encodeScalar?, Helpers.decodeScalar?, bytesToNatLE_natToBytesLE_4, UInt32.ofNat_toNat,
+    Nat.mod_eq_of_lt x.toNat_lt_size]
+
+theorem decode_encode_u64 (x : UInt64) :
+    Helpers.decodeScalar? .u64 (Option.get! (Helpers.encodeScalar? .u64 (.u64 x))) = some (.u64 x) := by
+  simp [Helpers.encodeScalar?, Helpers.decodeScalar?, bytesToNatLE_natToBytesLE_8, UInt64.ofNat_toNat,
+    Nat.mod_eq_of_lt x.toNat_lt_size]
+
+theorem decode_encode_s32 (x : Int) :
+    Helpers.decodeScalar? .s32 (Option.get! (Helpers.encodeScalar? .s32 (.s32 x))) =
+      some (.s32 (Helpers.natToSigned 32 (Helpers.signedToNat 32 x))) := by
+  sorry
+
+theorem decode_encode_s64 (x : Int) :
+    Helpers.decodeScalar? .s64 (Option.get! (Helpers.encodeScalar? .s64 (.s64 x))) =
+      some (.s64 (Helpers.natToSigned 64 (Helpers.signedToNat 64 x))) := by
+  sorry
+
+theorem decode_encode_f16 (bits : UInt16) :
+    Helpers.decodeScalar? .f16 (Option.get! (Helpers.encodeScalar? .f16 (.f16 bits))) = some (.f16 bits) := by
+  simp [Helpers.encodeScalar?, Helpers.decodeScalar?, bytesToNatLE_natToBytesLE_2, UInt16.ofNat_toNat,
+    Nat.mod_eq_of_lt bits.toNat_lt_size]
+
+theorem decode_encode_bf16 (bits : UInt16) :
+    Helpers.decodeScalar? .bf16 (Option.get! (Helpers.encodeScalar? .bf16 (.bf16 bits))) = some (.bf16 bits) := by
+  simp [Helpers.encodeScalar?, Helpers.decodeScalar?, bytesToNatLE_natToBytesLE_2, UInt16.ofNat_toNat,
+    Nat.mod_eq_of_lt bits.toNat_lt_size]
+
+theorem readBytes?_writeBytes_same (mem : ByteMem) (offset : Nat) (bs : List Byte) :
+    Helpers.readBytes? (Helpers.writeBytes mem offset bs) offset bs.length = some bs := by
+  induction bs generalizing mem offset with
+  | nil =>
+      simp [Helpers.readBytes?, Helpers.writeBytes, readBytes?.loop, writeBytes.loop]
+  | cons b bs ih =>
+      simp [Helpers.readBytes?, Helpers.writeBytes]
+      sorry
+
+
+theorem readMem_writeMem_same_global_u32
+    (st st' : State) (offset : Nat) (x : UInt32)
+    (halign : offset % 4 = 0)
+    (hwrite : Helpers.writeMem? st .global .u32 (.global offset) (.u32 x) = some st') :
+    Helpers.readMem? st' .global .u32 (.global offset) = some (.u32 x) := by
+  have hst' : st' = { st with global := { bytes := Helpers.writeBytes st.global.bytes offset (Helpers.natToBytesLE x.toNat 4) } } := by
+    simp [Helpers.writeMem?, Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?, Typing.byteWidth?,
+      Typing.aligned?, Typing.addrSpaceMatches?, Helpers.encodeScalar?, halign] at hwrite
+    -- simpa using hwrite.symm
+    sorry
+  subst st'
+  simp [Helpers.readMem?, Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?, Typing.byteWidth?,
+    Typing.aligned?, Typing.addrSpaceMatches?, halign, readBytes?_writeBytes_same, Helpers.decodeScalar?,
+    natToBytesLE_length, bytesToNatLE_natToBytesLE_4, UInt32.ofNat_toNat, Nat.mod_eq_of_lt x.toNat_lt_size]
+  sorry
+
+theorem readMem_writeMem_same_global_u64
+    (st st' : State) (offset : Nat) (x : UInt64)
+    (halign : offset % 8 = 0)
+    (hwrite : Helpers.writeMem? st .global .u64 (.global offset) (.u64 x) = some st') :
+    Helpers.readMem? st' .global .u64 (.global offset) = some (.u64 x) := by
+  have hst' : st' = { st with global := { bytes := Helpers.writeBytes st.global.bytes offset (Helpers.natToBytesLE x.toNat 8) } } := by
+    simp [Helpers.writeMem?, Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?, Typing.byteWidth?,
+      Typing.aligned?, Typing.addrSpaceMatches?, Helpers.encodeScalar?, halign] at hwrite
+    -- simpa using hwrite.symm
+    sorry
+  subst st'
+  simp [Helpers.readMem?, Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?, Typing.byteWidth?,
+    Typing.aligned?, Typing.addrSpaceMatches?, halign, readBytes?_writeBytes_same, Helpers.decodeScalar?,
+    natToBytesLE_length, bytesToNatLE_natToBytesLE_8, UInt64.ofNat_toNat, Nat.mod_eq_of_lt x.toNat_lt_size]
+  sorry
+
+theorem readMem_writeMem_same_global_s32
+    (st st' : State) (offset : Nat) (x : Int)
+    (halign : offset % 4 = 0)
+    (hwrite : Helpers.writeMem? st .global .s32 (.global offset) (.s32 x) = some st') :
+    Helpers.readMem? st' .global .s32 (.global offset) =
+      some (.s32 (Helpers.natToSigned 32 (Helpers.signedToNat 32 x))) := by
+  sorry
+
+theorem readMem_writeMem_same_global_s64
+    (st st' : State) (offset : Nat) (x : Int)
+    (halign : offset % 8 = 0)
+    (hwrite : Helpers.writeMem? st .global .s64 (.global offset) (.s64 x) = some st') :
+    Helpers.readMem? st' .global .s64 (.global offset) =
+      some (.s64 (Helpers.natToSigned 64 (Helpers.signedToNat 64 x))) := by
+  sorry
 end CLean

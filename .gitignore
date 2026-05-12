@@ -4,3 +4,4 @@ OpenBLAS
 gpuverify/
 logs/
 .cache/
+CODEX.log

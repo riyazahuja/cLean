@@ -20,3 +20,7 @@
 2026-03-08: Simplified Examples relation proofs to use explicit StepInstr/StepBlock/StepWarp/StepMachine witness parameters. Kept semantic helpers unfoldable/public where proof-relevant and retained decidable/reflection support for WF and lockstep predicates.
 
 2026-03-08: Expanded Lemmas.lean with stable state-update/accessor lemmas (CTA/warp/lane get/set), read/write aliases, and evalCvta?/evalIsspacep? facts. Deferred heavier step-level and memory/WF preservation proofs until after the state-update interface was stabilized. Verified with lake build.
+
+2026-03-08: Exposed byte-pack/unpack helpers in Helpers.lean (natToBytesLE, bytesToNatLE, signedToNat, natToSigned, readBytes?, writeBytes) to support upcoming codec and memory round-trip proofs. Deferred end-to-end relational example theorems until dedicated fake blocks/programs are introduced for those instruction sequences.
+
+2026-03-08: Extended Lemmas.lean with the first byte-memory and typed global-memory round-trip theorem surface. Kept theorem statements for generic byte round-trip and concrete global `u32/u64/s32/s64` memory round-trip, using `sorry` where proof effort was not worth blocking the interface. Signed round-trip statements are normalized through `natToSigned (signedToNat ...)` rather than claiming exact unbounded-`Int` preservation.

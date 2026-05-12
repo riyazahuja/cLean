@@ -127,20 +127,20 @@ def valueToBool? : Value → Option Bool
   | .pred b => some b
   | _ => none
 
-private def natToBytesLE (n width : Nat) : List Byte :=
+def natToBytesLE (n width : Nat) : List Byte :=
   (List.range width).map fun i => UInt8.ofNat ((n / (2 ^ (8 * i))) % 256)
 
-private def bytesToNatLE (bs : List Byte) : Nat :=
+def bytesToNatLE (bs : List Byte) : Nat :=
   let rec loop (i : Nat) : List Byte → Nat
     | [] => 0
     | b :: rest => b.toNat * (2 ^ (8 * i)) + loop (i + 1) rest
   loop 0 bs
 
-private def signedToNat (bits : Nat) (x : Int) : Nat :=
+def signedToNat (bits : Nat) (x : Int) : Nat :=
   let modulus : Int := Int.ofNat (2 ^ bits)
   Int.toNat (x % modulus)
 
-private def natToSigned (bits : Nat) (n : Nat) : Int :=
+def natToSigned (bits : Nat) (n : Nat) : Int :=
   let signBit := 2 ^ (bits - 1)
   let modulus := 2 ^ bits
   if n < signBit then Int.ofNat n else Int.ofNat n - Int.ofNat modulus
@@ -180,7 +180,7 @@ def decodeScalar? : ScalarTy → List Byte → Option Value
   | .f64, bs => if bs.length = 8 then some (.f64 <| Float.ofBits <| UInt64.ofNat <| bytesToNatLE bs) else none
   | _, _ => none
 
-private def readBytes? (mem : ByteMem) (offset width : Nat) : Option (List Byte) :=
+def readBytes? (mem : ByteMem) (offset width : Nat) : Option (List Byte) :=
   let rec loop (i : Nat) (acc : List Byte) :=
     if i < width then
       match mem[offset + i]? with
@@ -190,7 +190,7 @@ private def readBytes? (mem : ByteMem) (offset width : Nat) : Option (List Byte)
       some acc.reverse
   loop 0 []
 
-private def writeBytes (mem : ByteMem) (offset : Nat) (bytes : List Byte) : ByteMem :=
+def writeBytes (mem : ByteMem) (offset : Nat) (bytes : List Byte) : ByteMem :=
   let rec loop (i : Nat) (acc : ByteMem) : List Byte → ByteMem
     | [] => acc
     | b :: rest => loop (i + 1) (acc.insert (offset + i) b) rest
