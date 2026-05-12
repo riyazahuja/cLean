@@ -6,4 +6,6 @@ import CLean.Helpers
 import CLean.Semantics
 import CLean.Lemmas
 import CLean.Execution
+import CLean.PTXAst
+import CLean.PTXLowering
 import CLean.Examples
