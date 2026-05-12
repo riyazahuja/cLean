@@ -1,4 +1,4 @@
-import CLean.Semantics
+import CLean.Lemmas
 import Mathlib.Tactic
 namespace CLean
 
@@ -28,6 +28,26 @@ private def afterAssignState : State :=
   match Helpers.stepInstr? exampleState 0 0 { instr := .assignReg "r1" (.imm (.u32 7)) } with
   | some st => st
   | none => exampleState
+
+private def afterAssignWarp : WarpState :=
+  match afterAssignState.getWarp? 0 0 with
+  | some warpState => warpState
+  | none => baseWarp
+
+private theorem afterAssignState_getWarp_isSome :
+    (afterAssignState.getWarp? 0 0).isSome = true := by
+  native_decide
+
+
+private theorem afterAssignState_block_entry :
+    afterAssignState.kernelEnv.blocks["entry"]? = some exampleBlock := by
+  unfold afterAssignState
+  cases hstep : Helpers.stepInstr? exampleState 0 0 { instr := .assignReg "r1" (.imm (.u32 7)) } with
+  | none =>
+      simp [exampleState, exampleBlock]
+  | some st' =>
+      have hk := stepInstr?_preserves_kernelEnv hstep
+      simp [hk, exampleState, exampleBlock]
 
 private def afterTerminateState : State :=
   match Helpers.stepTerminator? afterAssignState 0 0 .terminate with
@@ -192,13 +212,42 @@ private theorem example_step_assign : StepMachine exampleState afterAssignState 
                 simpa [hmatch] using hstepLit)
 
 private theorem example_step_terminate : StepMachine afterAssignState afterTerminateState := by
-  unfold afterAssignState afterTerminateState
   cases hstep : Helpers.stepTerminator? afterAssignState 0 0 .terminate with
   | none =>
       have hisSome : (Helpers.stepTerminator? afterAssignState 0 0 .terminate).isSome = true := by
         native_decide
       simp [hstep] at hisSome
-  | some st' => sorry
+  | some st' =>
+      cases hwarp : afterAssignState.getWarp? 0 0 with
+      | none =>
+          have hisSome := afterAssignState_getWarp_isSome
+          simp [hwarp] at hisSome
+      | some warpState =>
+          have hAfterWarp : afterAssignWarp = warpState := by
+            simp [afterAssignWarp, hwarp]
+          refine StepMachine.mk (cta := 0) (warp := 0) ?_ ?_
+          · exact (State.wf_iff_bool afterAssignState).2 (by native_decide)
+          · refine StepWarp.mk (cta := 0) (warp := 0) ?_ ?_
+            · exact (State.wf_iff_bool afterAssignState).2 (by native_decide)
+            · refine StepBlock.term (warpState := warpState) (pc := ("entry", 1)) (block := exampleBlock)
+                ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_
+              · exact (State.wf_iff_bool afterAssignState).2 (by native_decide)
+              · exact hwarp
+              · rw [← hAfterWarp]
+                exact (WarpState.wf_iff_bool afterAssignWarp).2 (by native_decide)
+              · rw [← hAfterWarp]
+                exact (Helpers.lockstepRunnable_iff_bool afterAssignWarp).2 (by native_decide)
+              · rw [← hAfterWarp]
+                exact (Helpers.runnablePc_iff_bool afterAssignWarp ("entry", 1)).2 (by native_decide)
+              · exact afterAssignState_block_entry
+              · simp [exampleBlock]
+              ·
+                have hmatch :
+                    (match Helpers.stepTerminator? afterAssignState 0 0 .terminate with
+                    | some st => st
+                    | none => afterAssignState) = st' := by
+                  rw [hstep]
+                simpa [afterTerminateState, hmatch] using hstep
 
 
 theorem toy_assign_kernel_functional :

@@ -427,6 +427,12 @@ theorem stepInstr?_preserves_wf
     State.wf st' := by
   sorry
 
+theorem stepInstr?_preserves_kernelEnv
+    {st st' : State} {cta : CTAId} {warp : WarpId} {gi : GInstr}
+    (hstep : Helpers.stepInstr? st cta warp gi = some st') :
+    st'.kernelEnv = st.kernelEnv := by
+  sorry
+
 theorem stepTerminator?_preserves_wf
     {st st' : State} {cta : CTAId} {warp : WarpId} {term : Terminator}
     (hwf : State.wf st)
