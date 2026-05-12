@@ -1,3 +1,4 @@
+import CLean.PTXParser
 import CLean.PTXLowering
 import CLean.Execution
 import Mathlib.Tactic
@@ -558,6 +559,160 @@ theorem ptx_add_kernel_run_functional :
       lane0HasRegU32 "r3" 7 ptxAddFinalState = true ∧
       lane0Terminated ptxAddFinalState = true := by
   refine ⟨StepMachine.runN_reaches 2 ptxAddState, ?_, ?_⟩
+  · native_decide
+  · native_decide
+
+private def parsedAssignText : String :=
+  ".entry parsed_assign;
+   .reg .u32 %r1;
+   parsed_assign:
+     mov.u32 %r1, 7;
+     exit;
+  "
+
+private def parsedAssignKernel : PTX.Kernel :=
+  match PTX.Parser.parseKernel parsedAssignText with
+  | .ok kernel => kernel
+  | .error _ => default
+
+example :
+    (match PTX.Parser.parseKernel parsedAssignText with
+     | .ok kernel => kernel.entry == "parsed_assign" && kernel.regs.size == 1 && kernel.blocks.size == 1
+     | .error _ => false) = true := by
+  native_decide
+
+private def parsedAssignWarp0 : WarpState :=
+  { lanes := Array.replicate 32 { pc := ("parsed_assign", 0) }, activeMask := 1 }
+
+private def parsedAssignState : State :=
+  { kernelEnv := PTX.lowerKernelEnvCheckedD parsedAssignKernel
+    ctas := ({} : Std.HashMap CTAId CTAState).insert 0
+      { warps := ({} : Std.HashMap WarpId WarpState).insert 0 parsedAssignWarp0 } }
+
+private def parsedAssignFinalState : State :=
+  StepMachine.runN 2 parsedAssignState
+
+theorem parsed_ptx_assign_kernel_run_functional :
+    Reaches parsedAssignState parsedAssignFinalState ∧
+      lane0HasR1Seven parsedAssignFinalState = true ∧
+      lane0Terminated parsedAssignFinalState = true := by
+  refine ⟨StepMachine.runN_reaches 2 parsedAssignState, ?_, ?_⟩
+  · native_decide
+  · native_decide
+
+private def parsedAddText : String :=
+  ".entry parsed_add;
+   .reg .u32 %r1;
+   .reg .u32 %r2;
+   .reg .u32 %r3;
+   parsed_add:
+     add.u32 %r3, %r1, %r2;
+     exit;
+  "
+
+private def parsedAddKernel : PTX.Kernel :=
+  match PTX.Parser.parseKernel parsedAddText with
+  | .ok kernel => kernel
+  | .error _ => default
+
+example :
+    (match PTX.Parser.parseKernel parsedAddText with
+     | .ok kernel => kernel.entry == "parsed_add" && kernel.regs.size == 3 && kernel.blocks.size == 1
+     | .error _ => false) = true := by
+  native_decide
+
+private def parsedAddLane0 : LaneState :=
+  { regs := ({} : Std.HashMap RegName Value)
+      |>.insert "r1" (.u32 2)
+      |>.insert "r2" (.u32 5)
+    pc := ("parsed_add", 0) }
+
+private def parsedAddWarp0 : WarpState :=
+  { lanes := (Array.replicate 32 { pc := ("parsed_add", 0) }).set! 0 parsedAddLane0, activeMask := 1 }
+
+private def parsedAddState : State :=
+  { kernelEnv := PTX.lowerKernelEnvCheckedD parsedAddKernel
+    ctas := ({} : Std.HashMap CTAId CTAState).insert 0
+      { warps := ({} : Std.HashMap WarpId WarpState).insert 0 parsedAddWarp0 } }
+
+private def parsedAddFinalState : State :=
+  StepMachine.runN 2 parsedAddState
+
+theorem parsed_ptx_add_kernel_run_functional :
+    Reaches parsedAddState parsedAddFinalState ∧
+      lane0HasRegU32 "r3" 7 parsedAddFinalState = true ∧
+      lane0Terminated parsedAddFinalState = true := by
+  refine ⟨StepMachine.runN_reaches 2 parsedAddState, ?_, ?_⟩
+  · native_decide
+  · native_decide
+
+private def parsedCopyText : String :=
+  ".entry parsed_copy;
+   .reg .u32 %r1;
+   parsed_copy:
+     ld.global.u32 %r1, 0;
+     st.global.u32 4, %r1;
+     exit;
+  "
+
+private def parsedCopyKernel : PTX.Kernel :=
+  match PTX.Parser.parseKernel parsedCopyText with
+  | .ok kernel => kernel
+  | .error _ => default
+
+private def parsedCopyWarp0 : WarpState :=
+  { lanes := Array.replicate 32 { pc := ("parsed_copy", 0) }, activeMask := 1 }
+
+private def parsedCopyState : State :=
+  { kernelEnv := PTX.lowerKernelEnvCheckedD parsedCopyKernel
+    global := { bytes := Helpers.writeBytes ({} : ByteMem) copySrcOffset (Helpers.natToBytesLE copyValue.toNat 4) }
+    ctas := ({} : Std.HashMap CTAId CTAState).insert 0
+      { warps := ({} : Std.HashMap WarpId WarpState).insert 0 parsedCopyWarp0 } }
+
+private def parsedCopyFinalState : State :=
+  StepMachine.runN 3 parsedCopyState
+
+theorem parsed_ptx_copy_kernel_run_functional :
+    Reaches parsedCopyState parsedCopyFinalState ∧
+      copyDstHasValue parsedCopyFinalState = true ∧
+      copyLane0Terminated parsedCopyFinalState = true := by
+  refine ⟨StepMachine.runN_reaches 3 parsedCopyState, ?_, ?_⟩
+  · native_decide
+  · native_decide
+
+private def parsedBarrierText : String :=
+  ".entry parsed_barrier;
+   .reg .u32 %r1;
+   parsed_barrier:
+     bar.sync 0;
+     mov.u32 %r1, 7;
+     exit;
+  "
+
+private def parsedBarrierKernel : PTX.Kernel :=
+  match PTX.Parser.parseKernel parsedBarrierText with
+  | .ok kernel => kernel
+  | .error _ => default
+
+private def parsedBarrierWarp0 : WarpState :=
+  { lanes := Array.replicate 32 { pc := ("parsed_barrier", 0) }, activeMask := 1 }
+
+private def parsedBarrierState : State :=
+  { kernelEnv := PTX.lowerKernelEnvCheckedD parsedBarrierKernel
+    ctas := ({} : Std.HashMap CTAId CTAState).insert 0
+      { warps := ({} : Std.HashMap WarpId WarpState).insert 0 parsedBarrierWarp0
+        barrier := { bars := ({} : Std.HashMap Nat BarrierInstance).insert 0 { expectedCount := 1 } } } }
+
+private def parsedBarrierFinalState : State :=
+  StepMachine.runN 3 parsedBarrierState
+
+theorem parsed_ptx_barrier_kernel_run_functional :
+    Reaches parsedBarrierState parsedBarrierFinalState ∧
+      barrier0Released parsedBarrierFinalState = true ∧
+      lane0HasR1Seven parsedBarrierFinalState = true ∧
+      lane0Terminated parsedBarrierFinalState = true := by
+  refine ⟨StepMachine.runN_reaches 3 parsedBarrierState, ?_, ?_, ?_⟩
+  · native_decide
   · native_decide
   · native_decide
 
