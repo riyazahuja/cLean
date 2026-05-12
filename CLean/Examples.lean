@@ -25,7 +25,7 @@ private def exampleState : State :=
     ctas := ({} : Std.HashMap CTAId CTAState).insert 0 baseCTA }
 
 private def afterAssignState : State :=
-  match Helpers.stepInstr? exampleState 0 0 { instr := .assignReg "r1" (.imm (.u32 7)) } with
+  match Helpers.stepInstr? exampleState 0 0 exampleAssign with
   | some st => st
   | none => exampleState
 
@@ -42,12 +42,15 @@ private theorem afterAssignState_getWarp_isSome :
 private theorem afterAssignState_block_entry :
     afterAssignState.kernelEnv.blocks["entry"]? = some exampleBlock := by
   unfold afterAssignState
-  cases hstep : Helpers.stepInstr? exampleState 0 0 { instr := .assignReg "r1" (.imm (.u32 7)) } with
-  | none =>
-      simp [exampleState, exampleBlock]
-  | some st' =>
-      have hk := stepInstr?_preserves_kernelEnv hstep
-      simp [hk, exampleState, exampleBlock]
+  calc
+    (match Helpers.stepInstr? exampleState 0 0 exampleAssign with
+     | some st => st
+     | none => exampleState).kernelEnv.blocks["entry"]? =
+        exampleState.kernelEnv.blocks["entry"]? :=
+          stepInstr?_computed_preserves_block?
+            (st := exampleState) (cta := 0) (warp := 0) (gi := exampleAssign)
+            "entry" (by native_decide)
+    _ = some exampleBlock := by simp [exampleState, exampleBlock]
 
 private def afterTerminateState : State :=
   match Helpers.stepTerminator? afterAssignState 0 0 .terminate with
@@ -131,123 +134,59 @@ example : (Helpers.stepInstr? afterCvtaState 0 0 { instr := .isspacep "q" .globa
   native_decide
 
 example : ∃ st', StepInstr exampleState 0 0 exampleAssign st' := by
-  cases hstep : Helpers.stepInstr? exampleState 0 0 exampleAssign with
-  | none =>
-      have hisSome : (Helpers.stepInstr? exampleState 0 0 exampleAssign).isSome = true := by
-        native_decide
-      simp [hstep] at hisSome
-  | some st' =>
-      refine ⟨st', StepInstr.mk (warpState := baseWarp) (participants := [lane0]) ?_ ?_ ?_ ?_ ?_ ?_⟩
-      · exact (State.wf_iff_bool exampleState).2 (by native_decide)
-      · simp [State.getWarp?, State.getCTA?, exampleState, baseCTA]
-      · exact (WarpState.wf_iff_bool baseWarp).2 (by native_decide)
-      · exact (Helpers.lockstepRunnable_iff_bool baseWarp).2 (by native_decide)
-      · exact (Helpers.participatingRunnable_iff_bool baseWarp exampleAssign.guard? [lane0]).2 (by native_decide)
-      · exact hstep
-
-example : ∃ st', StepMachine exampleState st' := by
-  cases hstep : Helpers.stepInstr? exampleState 0 0 exampleAssign with
-  | none =>
-      have hisSome : (Helpers.stepInstr? exampleState 0 0 exampleAssign).isSome = true := by
-        native_decide
-      simp [hstep] at hisSome
-  | some st' =>
-      refine ⟨st', StepMachine.mk (cta := 0) (warp := 0) ?_ ?_⟩
-      · exact (State.wf_iff_bool exampleState).2 (by native_decide)
-      · refine StepWarp.mk (cta := 0) (warp := 0) ?_ ?_
-        · exact (State.wf_iff_bool exampleState).2 (by native_decide)
-        · refine StepBlock.body (warpState := baseWarp) (pc := ("entry", 0)) (block := exampleBlock)
-            (gi := exampleAssign) ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_
-          · exact (State.wf_iff_bool exampleState).2 (by native_decide)
-          · simp [State.getWarp?, State.getCTA?, exampleState, baseCTA]
-          · exact (WarpState.wf_iff_bool baseWarp).2 (by native_decide)
-          · exact (Helpers.lockstepRunnable_iff_bool baseWarp).2 (by native_decide)
-          · exact (Helpers.runnablePc_iff_bool baseWarp ("entry", 0)).2 (by native_decide)
-          · simp [exampleState, exampleBlock]
-          · simp [exampleBlock, exampleAssign]
-          · exact StepInstr.mk (warpState := baseWarp) (participants := [lane0])
-              ((State.wf_iff_bool exampleState).2 (by native_decide))
-              (by simp [State.getWarp?, State.getCTA?, exampleState, baseCTA])
-              ((WarpState.wf_iff_bool baseWarp).2 (by native_decide))
-              ((Helpers.lockstepRunnable_iff_bool baseWarp).2 (by native_decide))
-              ((Helpers.participatingRunnable_iff_bool baseWarp exampleAssign.guard? [lane0]).2 (by native_decide))
-              hstep
+  exact StepInstr.exists_of_stepInstr?_isSome
+    (warpState := baseWarp) (participants := [lane0])
+    ((State.wf_iff_bool exampleState).2 (by native_decide))
+    (by simp [State.getWarp?, State.getCTA?, exampleState, baseCTA])
+    ((WarpState.wf_iff_bool baseWarp).2 (by native_decide))
+    ((Helpers.lockstepRunnable_iff_bool baseWarp).2 (by native_decide))
+    ((Helpers.participatingRunnable_iff_bool baseWarp exampleAssign.guard? [lane0]).2 (by native_decide))
+    (by native_decide)
 
 private theorem example_step_assign : StepMachine exampleState afterAssignState := by
   unfold afterAssignState
-  cases hstep : Helpers.stepInstr? exampleState 0 0 exampleAssign with
-  | none =>
-      have hisSome : (Helpers.stepInstr? exampleState 0 0 exampleAssign).isSome = true := by
-        native_decide
-      simp [hstep] at hisSome
-  | some st' =>
-      refine StepMachine.mk (cta := 0) (warp := 0) ?_ ?_
-      · exact (State.wf_iff_bool exampleState).2 (by native_decide)
-      · refine StepWarp.mk (cta := 0) (warp := 0) ?_ ?_
-        · exact (State.wf_iff_bool exampleState).2 (by native_decide)
-        · refine StepBlock.body (warpState := baseWarp) (pc := ("entry", 0)) (block := exampleBlock)
-            (gi := exampleAssign) ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_
-          · exact (State.wf_iff_bool exampleState).2 (by native_decide)
-          · simp [State.getWarp?, State.getCTA?, exampleState, baseCTA]
-          · exact (WarpState.wf_iff_bool baseWarp).2 (by native_decide)
-          · exact (Helpers.lockstepRunnable_iff_bool baseWarp).2 (by native_decide)
-          · exact (Helpers.runnablePc_iff_bool baseWarp ("entry", 0)).2 (by native_decide)
-          · simp [exampleState, exampleBlock]
-          · simp [exampleBlock, exampleAssign]
-          · exact StepInstr.mk (warpState := baseWarp) (participants := [lane0])
-              ((State.wf_iff_bool exampleState).2 (by native_decide))
-              (by simp [State.getWarp?, State.getCTA?, exampleState, baseCTA])
-              ((WarpState.wf_iff_bool baseWarp).2 (by native_decide))
-              ((Helpers.lockstepRunnable_iff_bool baseWarp).2 (by native_decide))
-              ((Helpers.participatingRunnable_iff_bool baseWarp exampleAssign.guard? [lane0]).2 (by native_decide))
-              (by
-                have hstepLit :
-                    Helpers.stepInstr? exampleState 0 0 { instr := .assignReg "r1" (.imm (.u32 7)) } = some st' := by
-                  simpa [exampleAssign] using hstep
-                have hmatch :
-                    (match Helpers.stepInstr? exampleState 0 0 { instr := .assignReg "r1" (.imm (.u32 7)) } with
-                    | some st => st
-                    | none => exampleState) = st' := by
-                  rw [hstepLit]
-                simpa [hmatch] using hstepLit)
+  exact StepMachine.body_of_stepInstr?_computed
+    (cta := 0) (warp := 0) (warpState := baseWarp) (pc := ("entry", 0))
+    (block := exampleBlock) (gi := exampleAssign) (participants := [lane0])
+    ((State.wf_iff_bool exampleState).2 (by native_decide))
+    (by simp [State.getWarp?, State.getCTA?, exampleState, baseCTA])
+    ((WarpState.wf_iff_bool baseWarp).2 (by native_decide))
+    ((Helpers.lockstepRunnable_iff_bool baseWarp).2 (by native_decide))
+    ((Helpers.runnablePc_iff_bool baseWarp ("entry", 0)).2 (by native_decide))
+    (by simp [exampleState, exampleBlock])
+    (by simp [exampleBlock, exampleAssign])
+    ((Helpers.participatingRunnable_iff_bool baseWarp exampleAssign.guard? [lane0]).2 (by native_decide))
+    (by native_decide)
+
+example : ∃ st', StepMachine exampleState st' :=
+  ⟨afterAssignState, example_step_assign⟩
 
 private theorem example_step_terminate : StepMachine afterAssignState afterTerminateState := by
-  cases hstep : Helpers.stepTerminator? afterAssignState 0 0 .terminate with
+  unfold afterTerminateState
+  cases hwarp : afterAssignState.getWarp? 0 0 with
   | none =>
-      have hisSome : (Helpers.stepTerminator? afterAssignState 0 0 .terminate).isSome = true := by
-        native_decide
-      simp [hstep] at hisSome
-  | some st' =>
-      cases hwarp : afterAssignState.getWarp? 0 0 with
-      | none =>
-          have hisSome := afterAssignState_getWarp_isSome
-          simp [hwarp] at hisSome
-      | some warpState =>
-          have hAfterWarp : afterAssignWarp = warpState := by
-            simp [afterAssignWarp, hwarp]
-          refine StepMachine.mk (cta := 0) (warp := 0) ?_ ?_
-          · exact (State.wf_iff_bool afterAssignState).2 (by native_decide)
-          · refine StepWarp.mk (cta := 0) (warp := 0) ?_ ?_
-            · exact (State.wf_iff_bool afterAssignState).2 (by native_decide)
-            · refine StepBlock.term (warpState := warpState) (pc := ("entry", 1)) (block := exampleBlock)
-                ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_
-              · exact (State.wf_iff_bool afterAssignState).2 (by native_decide)
-              · exact hwarp
-              · rw [← hAfterWarp]
-                exact (WarpState.wf_iff_bool afterAssignWarp).2 (by native_decide)
-              · rw [← hAfterWarp]
-                exact (Helpers.lockstepRunnable_iff_bool afterAssignWarp).2 (by native_decide)
-              · rw [← hAfterWarp]
-                exact (Helpers.runnablePc_iff_bool afterAssignWarp ("entry", 1)).2 (by native_decide)
-              · exact afterAssignState_block_entry
-              · simp [exampleBlock]
-              ·
-                have hmatch :
-                    (match Helpers.stepTerminator? afterAssignState 0 0 .terminate with
-                    | some st => st
-                    | none => afterAssignState) = st' := by
-                  rw [hstep]
-                simpa [afterTerminateState, hmatch] using hstep
+      have hisSome := afterAssignState_getWarp_isSome
+      simp [hwarp] at hisSome
+  | some warpState =>
+      have hAfterWarp : afterAssignWarp = warpState := by
+        simp [afterAssignWarp, hwarp]
+      exact StepMachine.term_of_stepTerminator?_computed
+        (cta := 0) (warp := 0) (warpState := warpState) (pc := ("entry", 1))
+        (block := exampleBlock)
+        ((State.wf_iff_bool afterAssignState).2 (by native_decide))
+        hwarp
+        (by
+          rw [← hAfterWarp]
+          exact (WarpState.wf_iff_bool afterAssignWarp).2 (by native_decide))
+        (by
+          rw [← hAfterWarp]
+          exact (Helpers.lockstepRunnable_iff_bool afterAssignWarp).2 (by native_decide))
+        (by
+          rw [← hAfterWarp]
+          exact (Helpers.runnablePc_iff_bool afterAssignWarp ("entry", 1)).2 (by native_decide))
+        afterAssignState_block_entry
+        (by simp [exampleBlock])
+        (by native_decide)
 
 
 theorem toy_assign_kernel_functional :
@@ -318,12 +257,15 @@ private theorem copyAfterLoadState_getWarp_isSome :
 private theorem copyAfterLoadState_block_copy :
     copyAfterLoadState.kernelEnv.blocks["copy"]? = some copyBlock := by
   unfold copyAfterLoadState
-  cases hstep : Helpers.stepInstr? copyState 0 0 copyLoad with
-  | none =>
-      simp [copyState, copyBlock]
-  | some st' =>
-      have hk := stepInstr?_preserves_kernelEnv hstep
-      simp [hk, copyState, copyBlock]
+  calc
+    (match Helpers.stepInstr? copyState 0 0 copyLoad with
+     | some st => st
+     | none => copyState).kernelEnv.blocks["copy"]? =
+        copyState.kernelEnv.blocks["copy"]? :=
+          stepInstr?_computed_preserves_block?
+            (st := copyState) (cta := 0) (warp := 0) (gi := copyLoad)
+            "copy" (by native_decide)
+    _ = some copyBlock := by simp [copyState, copyBlock]
 
 private def copyAfterStoreState : State :=
   match Helpers.stepInstr? copyAfterLoadState 0 0 copyStore with
@@ -342,13 +284,15 @@ private theorem copyAfterStoreState_getWarp_isSome :
 private theorem copyAfterStoreState_block_copy :
     copyAfterStoreState.kernelEnv.blocks["copy"]? = some copyBlock := by
   unfold copyAfterStoreState
-  cases hstep : Helpers.stepInstr? copyAfterLoadState 0 0 copyStore with
-  | none =>
-      exact copyAfterLoadState_block_copy
-  | some st' =>
-      have hk := stepInstr?_preserves_kernelEnv hstep
-      rw [hk]
-      exact copyAfterLoadState_block_copy
+  calc
+    (match Helpers.stepInstr? copyAfterLoadState 0 0 copyStore with
+     | some st => st
+     | none => copyAfterLoadState).kernelEnv.blocks["copy"]? =
+        copyAfterLoadState.kernelEnv.blocks["copy"]? :=
+          stepInstr?_computed_preserves_block?
+            (st := copyAfterLoadState) (cta := 0) (warp := 0) (gi := copyStore)
+            "copy" (by native_decide)
+    _ = some copyBlock := copyAfterLoadState_block_copy
 
 private def copyAfterTerminateState : State :=
   match Helpers.stepTerminator? copyAfterStoreState 0 0 .terminate with
@@ -375,116 +319,76 @@ private def copyLane0Terminated (st : State) : Bool :=
 
 private theorem copy_step_load : StepMachine copyState copyAfterLoadState := by
   unfold copyAfterLoadState
-  cases hstep : Helpers.stepInstr? copyState 0 0 copyLoad with
-  | none =>
-      have hisSome : (Helpers.stepInstr? copyState 0 0 copyLoad).isSome = true := by
-        native_decide
-      simp [hstep] at hisSome
-  | some st' =>
-      exact StepMachine.body_of_stepInstr?
-        (cta := 0) (warp := 0) (warpState := copyWarp0) (pc := ("copy", 0))
-        (block := copyBlock) (gi := copyLoad) (participants := [lane0])
-        ((State.wf_iff_bool copyState).2 (by native_decide))
-        (by simp [State.getWarp?, State.getCTA?, copyState, copyCTA0])
-        ((WarpState.wf_iff_bool copyWarp0).2 (by native_decide))
-        ((Helpers.lockstepRunnable_iff_bool copyWarp0).2 (by native_decide))
-        ((Helpers.runnablePc_iff_bool copyWarp0 ("copy", 0)).2 (by native_decide))
-        (by simp [copyState, copyBlock])
-        (by simp [copyBlock, copyLoad])
-        ((Helpers.participatingRunnable_iff_bool copyWarp0 copyLoad.guard? [lane0]).2 (by native_decide))
-        (by
-          have hstepLit : Helpers.stepInstr? copyState 0 0 copyLoad = some st' := hstep
-          have hmatch :
-              (match Helpers.stepInstr? copyState 0 0 copyLoad with
-              | some st => st
-              | none => copyState) = st' := by
-            rw [hstepLit]
-          simpa [hmatch] using hstepLit)
+  exact StepMachine.body_of_stepInstr?_computed
+    (cta := 0) (warp := 0) (warpState := copyWarp0) (pc := ("copy", 0))
+    (block := copyBlock) (gi := copyLoad) (participants := [lane0])
+    ((State.wf_iff_bool copyState).2 (by native_decide))
+    (by simp [State.getWarp?, State.getCTA?, copyState, copyCTA0])
+    ((WarpState.wf_iff_bool copyWarp0).2 (by native_decide))
+    ((Helpers.lockstepRunnable_iff_bool copyWarp0).2 (by native_decide))
+    ((Helpers.runnablePc_iff_bool copyWarp0 ("copy", 0)).2 (by native_decide))
+    (by simp [copyState, copyBlock])
+    (by simp [copyBlock, copyLoad])
+    ((Helpers.participatingRunnable_iff_bool copyWarp0 copyLoad.guard? [lane0]).2 (by native_decide))
+    (by native_decide)
 
 private theorem copy_step_store : StepMachine copyAfterLoadState copyAfterStoreState := by
   unfold copyAfterStoreState
-  cases hstep : Helpers.stepInstr? copyAfterLoadState 0 0 copyStore with
+  cases hwarp : copyAfterLoadState.getWarp? 0 0 with
   | none =>
-      have hisSome : (Helpers.stepInstr? copyAfterLoadState 0 0 copyStore).isSome = true := by
-        native_decide
-      simp [hstep] at hisSome
-  | some st' =>
-      cases hwarp : copyAfterLoadState.getWarp? 0 0 with
-      | none =>
-          have hisSome := copyAfterLoadState_getWarp_isSome
-          simp [hwarp] at hisSome
-      | some warpState =>
-          have hCopyWarp : copyAfterLoadWarp = warpState := by
-            simp [copyAfterLoadWarp, hwarp]
-          refine StepMachine.body_of_stepInstr?
-            (cta := 0) (warp := 0) (warpState := warpState) (pc := ("copy", 1))
-            (block := copyBlock) (gi := copyStore) (participants := [lane0])
-            ((State.wf_iff_bool copyAfterLoadState).2 (by native_decide))
-            hwarp
-            ?_
-            ?_
-            ?_
-            copyAfterLoadState_block_copy
-            ?_
-            ?_
-            ?_
-          · rw [← hCopyWarp]
-            exact (WarpState.wf_iff_bool copyAfterLoadWarp).2 (by native_decide)
-          · rw [← hCopyWarp]
-            exact (Helpers.lockstepRunnable_iff_bool copyAfterLoadWarp).2 (by native_decide)
-          · rw [← hCopyWarp]
-            exact (Helpers.runnablePc_iff_bool copyAfterLoadWarp ("copy", 1)).2 (by native_decide)
-          · simp [copyBlock, copyStore]
-          · rw [← hCopyWarp]
-            exact (Helpers.participatingRunnable_iff_bool copyAfterLoadWarp copyStore.guard? [lane0]).2 (by native_decide)
-          ·
-            have hmatch :
-                (match Helpers.stepInstr? copyAfterLoadState 0 0 copyStore with
-                | some st => st
-                | none => copyAfterLoadState) = st' := by
-              rw [hstep]
-            simpa [hmatch] using hstep
+      have hisSome := copyAfterLoadState_getWarp_isSome
+      simp [hwarp] at hisSome
+  | some warpState =>
+      have hCopyWarp : copyAfterLoadWarp = warpState := by
+        simp [copyAfterLoadWarp, hwarp]
+      exact StepMachine.body_of_stepInstr?_computed
+        (cta := 0) (warp := 0) (warpState := warpState) (pc := ("copy", 1))
+        (block := copyBlock) (gi := copyStore) (participants := [lane0])
+        ((State.wf_iff_bool copyAfterLoadState).2 (by native_decide))
+        hwarp
+        (by
+          rw [← hCopyWarp]
+          exact (WarpState.wf_iff_bool copyAfterLoadWarp).2 (by native_decide))
+        (by
+          rw [← hCopyWarp]
+          exact (Helpers.lockstepRunnable_iff_bool copyAfterLoadWarp).2 (by native_decide))
+        (by
+          rw [← hCopyWarp]
+          exact (Helpers.runnablePc_iff_bool copyAfterLoadWarp ("copy", 1)).2 (by native_decide))
+        copyAfterLoadState_block_copy
+        (by simp [copyBlock, copyStore])
+        (by
+          rw [← hCopyWarp]
+          exact (Helpers.participatingRunnable_iff_bool copyAfterLoadWarp copyStore.guard? [lane0]).2
+            (by native_decide))
+        (by native_decide)
 
 private theorem copy_step_terminate : StepMachine copyAfterStoreState copyAfterTerminateState := by
   unfold copyAfterTerminateState
-  cases hstep : Helpers.stepTerminator? copyAfterStoreState 0 0 .terminate with
+  cases hwarp : copyAfterStoreState.getWarp? 0 0 with
   | none =>
-      have hisSome : (Helpers.stepTerminator? copyAfterStoreState 0 0 .terminate).isSome = true := by
-        native_decide
-      simp [hstep] at hisSome
-  | some st' =>
-      cases hwarp : copyAfterStoreState.getWarp? 0 0 with
-      | none =>
-          have hisSome := copyAfterStoreState_getWarp_isSome
-          simp [hwarp] at hisSome
-      | some warpState =>
-          have hCopyWarp : copyAfterStoreWarp = warpState := by
-            simp [copyAfterStoreWarp, hwarp]
-          refine StepMachine.term_of_stepTerminator?
-            (cta := 0) (warp := 0) (warpState := warpState) (pc := ("copy", 2))
-            (block := copyBlock)
-            ((State.wf_iff_bool copyAfterStoreState).2 (by native_decide))
-            hwarp
-            ?_
-            ?_
-            ?_
-            copyAfterStoreState_block_copy
-            ?_
-            ?_
-          · rw [← hCopyWarp]
-            exact (WarpState.wf_iff_bool copyAfterStoreWarp).2 (by native_decide)
-          · rw [← hCopyWarp]
-            exact (Helpers.lockstepRunnable_iff_bool copyAfterStoreWarp).2 (by native_decide)
-          · rw [← hCopyWarp]
-            exact (Helpers.runnablePc_iff_bool copyAfterStoreWarp ("copy", 2)).2 (by native_decide)
-          · simp [copyBlock]
-          ·
-            have hmatch :
-                (match Helpers.stepTerminator? copyAfterStoreState 0 0 .terminate with
-                | some st => st
-                | none => copyAfterStoreState) = st' := by
-              rw [hstep]
-            simpa [hmatch] using hstep
+      have hisSome := copyAfterStoreState_getWarp_isSome
+      simp [hwarp] at hisSome
+  | some warpState =>
+      have hCopyWarp : copyAfterStoreWarp = warpState := by
+        simp [copyAfterStoreWarp, hwarp]
+      exact StepMachine.term_of_stepTerminator?_computed
+        (cta := 0) (warp := 0) (warpState := warpState) (pc := ("copy", 2))
+        (block := copyBlock)
+        ((State.wf_iff_bool copyAfterStoreState).2 (by native_decide))
+        hwarp
+        (by
+          rw [← hCopyWarp]
+          exact (WarpState.wf_iff_bool copyAfterStoreWarp).2 (by native_decide))
+        (by
+          rw [← hCopyWarp]
+          exact (Helpers.lockstepRunnable_iff_bool copyAfterStoreWarp).2 (by native_decide))
+        (by
+          rw [← hCopyWarp]
+          exact (Helpers.runnablePc_iff_bool copyAfterStoreWarp ("copy", 2)).2 (by native_decide))
+        copyAfterStoreState_block_copy
+        (by simp [copyBlock])
+        (by native_decide)
 
 theorem toy_copy_kernel_functional :
     ∃ st1 st2 st3,

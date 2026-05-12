@@ -474,6 +474,22 @@ theorem StepMachine.preserves_wf
   | mk _ hwarp =>
       exact StepWarp.preserves_wf hwarp
 
+theorem StepInstr.exists_of_stepInstr?_isSome
+    {st : State} {cta : CTAId} {warp : WarpId}
+    {warpState : WarpState} {gi : GInstr} {participants : List LaneId}
+    (hwf : State.wf st)
+    (hwarp : st.getWarp? cta warp = some warpState)
+    (hwfWarp : WarpState.wf warpState)
+    (hlock : Helpers.lockstepRunnable warpState)
+    (hpart : Helpers.ParticipatingRunnable warpState gi.guard? participants)
+    (hisSome : (Helpers.stepInstr? st cta warp gi).isSome = true) :
+    ∃ st', StepInstr st cta warp gi st' := by
+  cases hstep : Helpers.stepInstr? st cta warp gi with
+  | none =>
+      simp [hstep] at hisSome
+  | some st' =>
+      exact ⟨st', StepInstr.mk hwf hwarp hwfWarp hlock hpart hstep⟩
+
 theorem StepMachine.body_of_stepInstr?
     {st st' : State} {cta : CTAId} {warp : WarpId}
     {warpState : WarpState} {pc : PC} {block : Block} {gi : GInstr}
@@ -508,4 +524,80 @@ theorem StepMachine.term_of_stepTerminator?
   StepMachine.mk hwf <|
     StepWarp.mk hwf <|
       StepBlock.term hwf hwarp hwfWarp hlock hrpc hblock hbodyDone hstep
+
+theorem StepMachine.body_of_stepInstr?_computed
+    {st : State} {cta : CTAId} {warp : WarpId}
+    {warpState : WarpState} {pc : PC} {block : Block} {gi : GInstr}
+    {participants : List LaneId}
+    (hwf : State.wf st)
+    (hwarp : st.getWarp? cta warp = some warpState)
+    (hwfWarp : WarpState.wf warpState)
+    (hlock : Helpers.lockstepRunnable warpState)
+    (hrpc : Helpers.RunnablePc warpState pc)
+    (hblock : st.kernelEnv.blocks[pc.1]? = some block)
+    (hgi : block.body[pc.2]? = some gi)
+    (hpart : Helpers.ParticipatingRunnable warpState gi.guard? participants)
+    (hisSome : (Helpers.stepInstr? st cta warp gi).isSome = true) :
+    StepMachine st
+      (match Helpers.stepInstr? st cta warp gi with
+       | some st' => st'
+       | none => st) := by
+  cases hstep : Helpers.stepInstr? st cta warp gi with
+  | none =>
+      simp [hstep] at hisSome
+  | some st' =>
+      simpa [hstep] using
+        StepMachine.body_of_stepInstr?
+          (st := st) (st' := st') (cta := cta) (warp := warp)
+          (warpState := warpState) (pc := pc) (block := block) (gi := gi)
+          (participants := participants)
+          hwf hwarp hwfWarp hlock hrpc hblock hgi hpart hstep
+
+theorem StepMachine.term_of_stepTerminator?_computed
+    {st : State} {cta : CTAId} {warp : WarpId}
+    {warpState : WarpState} {pc : PC} {block : Block}
+    (hwf : State.wf st)
+    (hwarp : st.getWarp? cta warp = some warpState)
+    (hwfWarp : WarpState.wf warpState)
+    (hlock : Helpers.lockstepRunnable warpState)
+    (hrpc : Helpers.RunnablePc warpState pc)
+    (hblock : st.kernelEnv.blocks[pc.1]? = some block)
+    (hbodyDone : block.body[pc.2]? = none)
+    (hisSome : (Helpers.stepTerminator? st cta warp block.term).isSome = true) :
+    StepMachine st
+      (match Helpers.stepTerminator? st cta warp block.term with
+       | some st' => st'
+       | none => st) := by
+  cases hstep : Helpers.stepTerminator? st cta warp block.term with
+  | none =>
+      simp [hstep] at hisSome
+  | some st' =>
+      simpa [hstep] using
+        StepMachine.term_of_stepTerminator?
+          (st := st) (st' := st') (cta := cta) (warp := warp)
+          (warpState := warpState) (pc := pc) (block := block)
+          hwf hwarp hwfWarp hlock hrpc hblock hbodyDone hstep
+
+theorem stepInstr?_computed_preserves_kernelEnv
+    {st : State} {cta : CTAId} {warp : WarpId} {gi : GInstr}
+    (hisSome : (Helpers.stepInstr? st cta warp gi).isSome = true) :
+    (match Helpers.stepInstr? st cta warp gi with
+     | some st' => st'
+     | none => st).kernelEnv = st.kernelEnv := by
+  cases hstep : Helpers.stepInstr? st cta warp gi with
+  | none =>
+      simp [hstep] at hisSome
+  | some st' =>
+      simpa [hstep] using stepInstr?_preserves_kernelEnv hstep
+
+theorem stepInstr?_computed_preserves_block?
+    {st : State} {cta : CTAId} {warp : WarpId} {gi : GInstr}
+    (label : BlockLabel)
+    (hisSome : (Helpers.stepInstr? st cta warp gi).isSome = true) :
+    (match Helpers.stepInstr? st cta warp gi with
+     | some st' => st'
+     | none => st).kernelEnv.blocks[label]? = st.kernelEnv.blocks[label]? := by
+  have hk := stepInstr?_computed_preserves_kernelEnv
+    (st := st) (cta := cta) (warp := warp) (gi := gi) hisSome
+  exact congrArg (fun env : KernelEnv => env.blocks[label]?) hk
 end CLean
