@@ -1,4 +1,4 @@
-import CLean.Lemmas
+import CLean.Execution
 import Mathlib.Tactic
 namespace CLean
 
@@ -140,6 +140,23 @@ theorem toy_assign_kernel_functional :
   · native_decide
   · native_decide
 
+private def exampleRunFinalState : State :=
+  StepMachine.runN 2 exampleState
+
+theorem toy_assign_kernel_run_functional :
+    Reaches exampleState exampleRunFinalState ∧
+      lane0HasR1Seven exampleRunFinalState = true ∧
+      lane0Terminated exampleRunFinalState = true := by
+  refine ⟨StepMachine.runN_reaches 2 exampleState, ?_, ?_⟩
+  · native_decide
+  · native_decide
+
+example : (StepMachine.traceN 2 exampleState).length = 3 := by
+  native_decide
+
+example : (StepMachine.runN? 2 exampleState).isSome = true := by
+  native_decide
+
 example : lane0HasR1Seven afterAssignState = true := by
   native_decide
 
@@ -237,6 +254,25 @@ theorem toy_copy_kernel_functional :
   · native_decide
   · native_decide
 
+private def copyRunFinalState : State :=
+  StepMachine.runN 3 copyState
+
+theorem toy_copy_kernel_run_functional :
+    Reaches copyState copyRunFinalState ∧
+      copyLane0Loaded copyRunFinalState = true ∧
+      copyDstHasValue copyRunFinalState = true ∧
+      copyLane0Terminated copyRunFinalState = true := by
+  refine ⟨StepMachine.runN_reaches 3 copyState, ?_, ?_, ?_⟩
+  · native_decide
+  · native_decide
+  · native_decide
+
+example : (StepMachine.traceN 3 copyState).length = 4 := by
+  native_decide
+
+example : (StepMachine.runN? 3 copyState).isSome = true := by
+  native_decide
+
 example : copyLane0Loaded copyAfterLoadState = true := by
   native_decide
 
@@ -320,6 +356,25 @@ theorem toy_barrier_kernel_functional :
   · native_decide
   · native_decide
   · native_decide
+
+private def barrierRunFinalState : State :=
+  StepMachine.runN 3 barrierState
+
+theorem toy_barrier_kernel_run_functional :
+    Reaches barrierState barrierRunFinalState ∧
+      barrier0Released barrierRunFinalState = true ∧
+      lane0HasR1Seven barrierRunFinalState = true ∧
+      lane0Terminated barrierRunFinalState = true := by
+  refine ⟨StepMachine.runN_reaches 3 barrierState, ?_, ?_, ?_⟩
+  · native_decide
+  · native_decide
+  · native_decide
+
+example : (StepMachine.traceN 3 barrierState).length = 4 := by
+  native_decide
+
+example : (StepMachine.runN? 3 barrierState).isSome = true := by
+  native_decide
 
 example : lane0RunningAt ("barrier", 1) afterBarrierState = true := by
   native_decide
