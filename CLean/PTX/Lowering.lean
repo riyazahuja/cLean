@@ -1,6 +1,6 @@
-import CLean.State
-import CLean.Typing
-import CLean.PTXAst
+import CLean.Core.State
+import CLean.Core.Typing
+import CLean.PTX.Ast
 
 namespace CLean
 
@@ -128,8 +128,29 @@ def lowerAddressOperandChecked? (env : Typing.TypeEnv) (space : AddrSpace) : Ope
 
 def expectOperandType (env : Typing.TypeEnv) (expected : ScalarTy) (operand : Operand) : LowerM Unit := do
   let actual <- operandType? env operand
-  if actual == expected then
+  if Typing.scalarCompatible? expected actual then
     pure ()
+  else
+    throw (.typeMismatch expected actual)
+
+def coerceOperandTo? (expected actual : ScalarTy) (rv : RValue) : RValue :=
+  if expected == actual then
+    rv
+  else
+    match expected, actual with
+    | .s32, .u32 | .s32, .b32 => .unop (.cvt .s32) rv
+    | .u32, .s32 | .u32, .b32 => .unop (.cvt .u32) rv
+    -- Keep 64-bit address-shaped values unwrapped: `cvta` registers carry generic
+    -- address values at runtime even when the PTX declaration says `.b64`/`.u64`.
+    | .s64, .u64 | .s64, .b64 | .u64, .s64 | .u64, .b64 => rv
+    | _, _ => rv
+
+def lowerOperandCheckedAs? (env : Typing.TypeEnv) (expected : ScalarTy) (operand : Operand) :
+    LowerM RValue := do
+  let actual <- operandType? env operand
+  if Typing.scalarCompatible? expected actual then
+    let rv <- lowerOperandChecked? env operand
+    pure (coerceOperandTo? expected actual rv)
   else
     throw (.typeMismatch expected actual)
 
@@ -157,6 +178,7 @@ def lowerInstr : Instr → CLean.Instr
   | .mov _ dst src => .assignReg dst (lowerOperand src)
   | .unop op _ dst src => .assignReg dst (.unop op (lowerOperand src))
   | .binop op _ dst lhs rhs => .assignReg dst (.binop op (lowerOperand lhs) (lowerOperand rhs))
+  | .triop op _ dst a b c => .assignReg dst (.triop op (lowerOperand a) (lowerOperand b) (lowerOperand c))
   | .setp op _ dst lhs rhs => .assignPred dst { op := op, lhs := lowerOperand lhs, rhs := lowerOperand rhs }
   | .ld space ty dst addr => .load dst { space := space, ty := ty, addr := lowerOperand addr }
   | .st space ty addr value => .store { space := space, ty := ty, addr := lowerOperand addr } (lowerOperand value)
@@ -168,11 +190,11 @@ def lowerInstr : Instr → CLean.Instr
 def lowerInstrChecked? (env : Typing.TypeEnv) : Instr → LowerM (CLean.Instr × Typing.TypeEnv)
   | .mov ty dst src => do
       expectOperandType env ty src
-      let src <- lowerOperandChecked? env src
+      let src <- lowerOperandCheckedAs? env ty src
       pure (.assignReg dst src, { env with regs := env.regs.insert dst ty })
   | .unop op srcTy dst src => do
       expectOperandType env srcTy src
-      let src <- lowerOperandChecked? env src
+      let src <- lowerOperandCheckedAs? env srcTy src
       match Typing.unarySig? op srcTy with
       | some outTy =>
           pure (.assignReg dst (.unop op src), { env with regs := env.regs.insert dst outTy })
@@ -180,18 +202,30 @@ def lowerInstrChecked? (env : Typing.TypeEnv) : Instr → LowerM (CLean.Instr ×
   | .binop op ty dst lhs rhs => do
       expectOperandType env ty lhs
       expectOperandType env ty rhs
-      let lhs <- lowerOperandChecked? env lhs
-      let rhs <- lowerOperandChecked? env rhs
+      let lhs <- lowerOperandCheckedAs? env ty lhs
+      let rhs <- lowerOperandCheckedAs? env ty rhs
       match Typing.binarySig? op ty ty with
       | some outTy =>
           pure (.assignReg dst (.binop op lhs rhs),
             { env with regs := env.regs.insert dst outTy })
       | none => throw (.unsupportedOp "binop")
+  | .triop op ty dst a b c => do
+      expectOperandType env ty a
+      expectOperandType env ty b
+      expectOperandType env ty c
+      let a <- lowerOperandCheckedAs? env ty a
+      let b <- lowerOperandCheckedAs? env ty b
+      let c <- lowerOperandCheckedAs? env ty c
+      match Typing.ternarySig? op ty ty ty with
+      | some outTy =>
+          pure (.assignReg dst (.triop op a b c),
+            { env with regs := env.regs.insert dst outTy })
+      | none => throw (.unsupportedOp "triop")
   | .setp op ty dst lhs rhs => do
       expectOperandType env ty lhs
       expectOperandType env ty rhs
-      let lhs <- lowerOperandChecked? env lhs
-      let rhs <- lowerOperandChecked? env rhs
+      let lhs <- lowerOperandCheckedAs? env ty lhs
+      let rhs <- lowerOperandCheckedAs? env ty rhs
       match Typing.cmpSig? op ty ty with
       | some .pred =>
           pure (.assignPred dst { op := op, lhs := lhs, rhs := rhs },
@@ -201,7 +235,7 @@ def lowerInstrChecked? (env : Typing.TypeEnv) : Instr → LowerM (CLean.Instr ×
       ensureCodecType ty
       let addrTy <- addressOperandType? env space addr
       match addrTy with
-      | .u32 | .u64 =>
+      | .u32 | .u64 | .s64 | .b64 =>
           let addr <- lowerAddressOperandChecked? env space addr
           pure (.load dst { space := space, ty := ty, addr := addr },
             { env with regs := env.regs.insert dst ty })
@@ -210,10 +244,10 @@ def lowerInstrChecked? (env : Typing.TypeEnv) : Instr → LowerM (CLean.Instr ×
       ensureCodecType ty
       let addrTy <- addressOperandType? env space addr
       match addrTy with
-      | .u32 | .u64 =>
+      | .u32 | .u64 | .s64 | .b64 =>
           expectOperandType env ty value
           let addr <- lowerAddressOperandChecked? env space addr
-          let value <- lowerOperandChecked? env value
+          let value <- lowerOperandCheckedAs? env ty value
           pure (.store { space := space, ty := ty, addr := addr } value, env)
       | _ => throw (.unsupportedType addrTy)
   | .cvta space dst src => do

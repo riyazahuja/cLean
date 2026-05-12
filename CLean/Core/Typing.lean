@@ -1,5 +1,5 @@
-import CLean.Types
-import CLean.IR
+import CLean.Core.Types
+import CLean.Core.IR
 
 namespace CLean
 
@@ -23,12 +23,23 @@ def scalarCodecSupported? : ScalarTy → Bool
   | .f16 | .bf16 | .f32 | .f64 => true
 
 def cvtaSourceSupported? : ScalarTy → Bool
-  | .u32 | .u64 => true
+  | .u32 | .u64 | .b32 | .b64 => true
   | _ => false
 
 def isGenericAddrValue? : Value → Bool
   | .gaddr _ _ => true
   | _ => false
+
+def scalarCompatible? (expected actual : ScalarTy) : Bool :=
+  if expected == actual then
+    true
+  else
+    match expected, actual with
+    | .s32, .u32 | .u32, .s32
+    | .s32, .b32 | .u32, .b32 | .b32, .s32 | .b32, .u32 => true
+    | .s64, .u64 | .u64, .s64
+    | .s64, .b64 | .u64, .b64 | .b64, .s64 | .b64, .u64 => true
+    | _, _ => false
 
 def valueHasType : Value → ScalarTy → Prop
   | .pred _, .pred => True
@@ -76,12 +87,16 @@ private def cvtSig? (dst src : ScalarTy) : Option ScalarTy :=
     match dst, src with
     | .u32, .s32 => some .u32
     | .u32, .u64 => some .u32
+    | .u32, .b32 => some .u32
     | .u64, .s64 => some .u64
     | .u64, .u32 => some .u64
+    | .u64, .b64 => some .u64
     | .s32, .u32 => some .s32
     | .s32, .s64 => some .s32
+    | .s32, .b32 => some .s32
     | .s64, .u64 => some .s64
     | .s64, .s32 => some .s64
+    | .s64, .b64 => some .s64
     | .f32, .u32 => some .f32
     | .f32, .s32 => some .f32
     | .f64, .u64 => some .f64
@@ -106,6 +121,7 @@ def unarySig? : ScalarUnaryOp → ScalarTy → Option ScalarTy
   | _, _ => none
 
 def binarySig? : ScalarBinaryOp → ScalarTy → ScalarTy → Option ScalarTy
+  | .mulWideS32, .s32, .s32 => some .s64
   | .add, a, b | .sub, a, b | .mul, a, b =>
       if binarySameWidthInt? a b || binaryFloat? a b then some a else none
   | .min, .s32, .s32 => some .s32

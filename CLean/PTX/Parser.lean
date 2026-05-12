@@ -1,5 +1,5 @@
 import Std.Internal.Parsec.String
-import CLean.PTXAst
+import CLean.PTX.Ast
 
 namespace CLean
 namespace PTX
@@ -186,6 +186,9 @@ def cmpOp : Parser CmpOp :=
 
 def comma : Parser Unit := symbol ","
 def semi : Parser Unit := symbol ";"
+def optionalSemi : Parser Unit := do
+  let _ ← optional? semi
+  pure ()
 def colon : Parser Unit := symbol ":"
 def lbrace : Parser Unit := symbol "{"
 def rbrace : Parser Unit := symbol "}"
@@ -298,6 +301,32 @@ def instrCvt : Parser Instr := do
   let src ← operandWithTy srcTy
   pure (.unop (.cvt dstTy) srcTy dst src)
 
+def instrMadLo : Parser Instr := do
+  rawSymbol "mad.lo"
+  let ty ← scalarTySuffix
+  trivia
+  let dst ← ident
+  comma
+  let a ← operandWithTy ty
+  comma
+  let b ← operandWithTy ty
+  comma
+  let c ← operandWithTy ty
+  pure (.triop .mad ty dst a b c)
+
+def instrFmaRn : Parser Instr := do
+  rawSymbol "fma.rn"
+  let ty ← scalarTySuffix
+  trivia
+  let dst ← ident
+  comma
+  let a ← operandWithTy ty
+  comma
+  let b ← operandWithTy ty
+  comma
+  let c ← operandWithTy ty
+  pure (.triop .fma ty dst a b c)
+
 def scalarBinaryOp : Parser ScalarBinaryOp :=
   attempt (rawSymbol "add" *> pure .add) <|>
   attempt (rawSymbol "sub" *> pure .sub) <|>
@@ -309,6 +338,27 @@ def scalarBinaryOp : Parser ScalarBinaryOp :=
   attempt (rawSymbol "shr" *> pure .shr) <|>
   attempt (rawSymbol "min" *> pure .min) <|>
   attempt (rawSymbol "max" *> pure .max)
+
+def instrMulLo : Parser Instr := do
+  rawSymbol "mul.lo"
+  let ty ← scalarTySuffix
+  trivia
+  let dst ← ident
+  comma
+  let lhs ← operandWithTy ty
+  comma
+  let rhs ← operandWithTy ty
+  pure (.binop .mul ty dst lhs rhs)
+
+def instrMulWideS32 : Parser Instr := do
+  rawSymbol "mul.wide.s32"
+  trivia
+  let dst ← ident
+  comma
+  let lhs ← operandWithTy .s32
+  comma
+  let rhs ← operandWithTy .s32
+  pure (.binop .mulWideS32 .s32 dst lhs rhs)
 
 def instrBinop : Parser Instr := do
   let op ← scalarBinaryOp
@@ -355,6 +405,7 @@ def instrSt : Parser Instr := do
 
 def instrCvta : Parser Instr := do
   rawSymbol "cvta"
+  let _ ← optional? (rawSymbol ".to")
   let space ← addrSpaceSuffix
   let _ ← optional? scalarTySuffix
   trivia
@@ -398,6 +449,10 @@ def instr : Parser Instr :=
   attempt instrCvta <|>
   attempt instrBarSync <|>
   attempt instrCvt <|>
+  attempt instrMadLo <|>
+  attempt instrFmaRn <|>
+  attempt instrMulWideS32 <|>
+  attempt instrMulLo <|>
   attempt instrMov <|>
   attempt instrUnop <|>
   attempt instrBinop <|>
@@ -434,12 +489,20 @@ def terminator : Parser Terminator :=
 inductive Stmt where
   | instr (i : GInstr)
   | term (t : Terminator)
+  | guardedBra (g : Guard) (label : BlockLabel)
   deriving Repr
 
 def stmt : Parser Stmt := do
-  let s ← attempt (Stmt.term <$> terminator) <|> (Stmt.instr <$> gInstr)
-  semi
-  pure s
+  attempt (do
+    let g ← guard
+    symbol "bra"
+    let label ← ident
+    semi
+    pure (.guardedBra g label)) <|>
+  (do
+    let s ← attempt (Stmt.term <$> terminator) <|> (Stmt.instr <$> gInstr)
+    semi
+    pure s)
 
 def blockOfStmts (label : BlockLabel) (stmts : Array Stmt) : Block := Id.run do
   let mut body : Array GInstr := #[]
@@ -448,13 +511,35 @@ def blockOfStmts (label : BlockLabel) (stmts : Array Stmt) : Block := Id.run do
     match st with
     | .instr i => body := body.push i
     | .term t => term := t
+    | .guardedBra g target => term := .cbra g.pred g.negate target (label ++ "$fallthrough")
   pure { label := label, body := body, term := term }
 
-def block : Parser Block := do
+def fallthroughLabel (label : BlockLabel) (idx : Nat) : BlockLabel :=
+  label ++ "$fallthrough" ++ toString idx
+
+partial def blocksOfStmts (label : BlockLabel) (stmts : Array Stmt) : Array Block := Id.run do
+  let rec go (label : BlockLabel) (idx : Nat) (body : Array GInstr) : List Stmt → Array Block
+    | [] => #[{ label := label, body := body, term := .exit }]
+    | .instr instr :: rest => go label idx (body.push instr) rest
+    | .term term :: _ => #[{ label := label, body := body, term := term }]
+    | .guardedBra g target :: rest =>
+        let cont := fallthroughLabel label idx
+        let block : Block := {
+          label := label
+          body := body
+          term := .cbra g.pred g.negate target cont
+        }
+        if rest.isEmpty then
+          #[block, { label := cont, body := #[], term := .exit }]
+        else
+          #[block] ++ go cont (idx + 1) #[] rest
+  go label 0 #[] stmts.toList
+
+def block : Parser (Array Block) := do
   let label ← ident
   colon
   let stmts ← many (attempt stmt)
-  pure (blockOfStmts label stmts)
+  pure (blocksOfStmts label stmts)
 
 structure NameDecl where
   name : String
@@ -477,6 +562,16 @@ def regDecl : Parser (Array RegDecl) := do
   let name ← nameDecl
   semi
   pure ((expandNames name).map fun n => { name := n, ty := ty })
+
+def regPredDecl : Parser (Array PredDecl) := do
+  symbol ".reg"
+  let ty ← scalarTy
+  if ty == .pred then
+    let name ← nameDecl
+    semi
+    pure ((expandNames name).map fun n => { name := n })
+  else
+    fail "expected .reg .pred"
 
 def predDecl : Parser (Array PredDecl) := do
   symbol ".pred"
@@ -538,6 +633,7 @@ inductive Decl where
 def decl : Parser Decl :=
   attempt (Decl.shared <$> sharedDecl) <|>
   attempt (Decl.param <$> paramDecl) <|>
+  attempt (Decl.preds <$> regPredDecl) <|>
   attempt (Decl.preds <$> predDecl) <|>
   attempt (Decl.regs <$> regDecl)
 
@@ -554,8 +650,8 @@ def splitDecls (decls : Array Decl) : Array RegDecl × Array PredDecl × Array P
     | .shared d => shareds := shareds.push d
   pure (regs, preds, params, shareds)
 
-def withLeadingBlock (entry : BlockLabel) (leading : Array Stmt) (blocks : Array Block) : Array Block :=
-  if leading.isEmpty then blocks else #[blockOfStmts entry leading] ++ blocks
+def withLeadingBlocks (entry : BlockLabel) (leading : Array Stmt) (blocks : Array Block) : Array Block :=
+  if leading.isEmpty then blocks else blocksOfStmts entry leading ++ blocks
 
 def entryParamList : Parser (Array ParamDecl) :=
   lparen *> sepBy paramDeclCore comma <* rparen
@@ -563,7 +659,8 @@ def entryParamList : Parser (Array ParamDecl) :=
 def kernelBody (entry : BlockLabel) (entryParams : Array ParamDecl) : Parser Kernel := do
   let decls ← many (attempt decl)
   let leading ← many (attempt stmt)
-  let blocks ← many (attempt block)
+  let blockGroups ← many (attempt block)
+  let blocks := blockGroups.foldl (init := #[]) (fun out bs => out ++ bs)
   let (regs, preds, params, shareds) := splitDecls decls
   pure {
     entry := entry
@@ -571,10 +668,11 @@ def kernelBody (entry : BlockLabel) (entryParams : Array ParamDecl) : Parser Ker
     preds := preds
     params := entryParams ++ params
     shareds := shareds
-    blocks := withLeadingBlock entry leading blocks
+    blocks := withLeadingBlocks entry leading blocks
   }
 
 def kernel : Parser Kernel := do
+  let _ ← optional? (symbol ".visible")
   symbol ".entry"
   let entry ← ident
   let entryParams? ← optional? entryParamList
@@ -591,20 +689,20 @@ def kernel : Parser Kernel := do
 def versionDirective : Parser ModuleDirective := do
   symbol ".version"
   let value ← rawToken
-  semi
+  optionalSemi
   pure (.version value)
 
 def targetDirective : Parser ModuleDirective := do
   symbol ".target"
   let first ← rawToken
   let rest ← many (attempt (comma *> rawToken))
-  semi
+  optionalSemi
   pure (.target (rest.foldl (init := #[first]) (fun out x => out.push x)))
 
 def addressSizeDirective : Parser ModuleDirective := do
   symbol ".address_size"
   let bits ← natLit
-  semi
+  optionalSemi
   pure (.addressSize bits)
 
 def directive : Parser ModuleDirective :=

@@ -1,5 +1,5 @@
-import CLean.State
-import CLean.Typing
+import CLean.Core.State
+import CLean.Core.Typing
 
 namespace CLean
 
@@ -318,18 +318,28 @@ def writeMem? (st : State) (space : AddrSpace) (ty : ScalarTy) (addr : Addr) (va
 def evalCvta? (space : AddrSpace) (value : Value) : Option Value :=
   match space, value with
   | .generic, .gaddr s off => some (.gaddr s off)
+  | .global, .b32 off => some (.gaddr .global off.toNat)
+  | .global, .b64 off => some (.gaddr .global off.toNat)
   | .global, .u32 off => some (.gaddr .global off.toNat)
   | .global, .u64 off => some (.gaddr .global off.toNat)
   | .global, .gaddr .global off => some (.gaddr .global off)
+  | .shared, .b32 off => some (.gaddr .shared off.toNat)
+  | .shared, .b64 off => some (.gaddr .shared off.toNat)
   | .shared, .u32 off => some (.gaddr .shared off.toNat)
   | .shared, .u64 off => some (.gaddr .shared off.toNat)
   | .shared, .gaddr .shared off => some (.gaddr .shared off)
+  | .local, .b32 off => some (.gaddr .local off.toNat)
+  | .local, .b64 off => some (.gaddr .local off.toNat)
   | .local, .u32 off => some (.gaddr .local off.toNat)
   | .local, .u64 off => some (.gaddr .local off.toNat)
   | .local, .gaddr .local off => some (.gaddr .local off)
+  | .param, .b32 off => some (.gaddr .param off.toNat)
+  | .param, .b64 off => some (.gaddr .param off.toNat)
   | .param, .u32 off => some (.gaddr .param off.toNat)
   | .param, .u64 off => some (.gaddr .param off.toNat)
   | .param, .gaddr .param off => some (.gaddr .param off)
+  | .const, .b32 off => some (.gaddr .const off.toNat)
+  | .const, .b64 off => some (.gaddr .const off.toNat)
   | .const, .u32 off => some (.gaddr .const off.toNat)
   | .const, .u64 off => some (.gaddr .const off.toNat)
   | .const, .gaddr .const off => some (.gaddr .const off)
@@ -380,12 +390,16 @@ mutual
     | .bitnot, .b64 x => some (.b64 (~~~x))
     | .cvt .u32, .s32 x => some (.u32 (UInt32.ofNat (signedToNat 32 x)))
     | .cvt .u32, .u64 x => some (.u32 (UInt32.ofNat x.toNat))
+    | .cvt .u32, .b32 x => some (.u32 x)
     | .cvt .u64, .s64 x => some (.u64 (UInt64.ofNat (signedToNat 64 x)))
     | .cvt .u64, .u32 x => some (.u64 (UInt64.ofNat x.toNat))
+    | .cvt .u64, .b64 x => some (.u64 x)
     | .cvt .s32, .u32 x => some (.s32 (normalizeSigned 32 (Int.ofNat x.toNat)))
     | .cvt .s32, .s64 x => some (.s32 (normalizeSigned 32 x))
+    | .cvt .s32, .b32 x => some (.s32 (normalizeSigned 32 (Int.ofNat x.toNat)))
     | .cvt .s64, .u64 x => some (.s64 (normalizeSigned 64 (Int.ofNat x.toNat)))
     | .cvt .s64, .s32 x => some (.s64 (normalizeSigned 64 x))
+    | .cvt .s64, .b64 x => some (.s64 (normalizeSigned 64 (Int.ofNat x.toNat)))
     | .cvt .f32, .u32 x => some (.f32 x.toFloat)
     | .cvt .f32, .s32 x => some (.f32 (intToFloat x))
     | .cvt .f64, .u64 x => some (.f64 x.toFloat)
@@ -397,16 +411,23 @@ mutual
     | _, _ => none
 
   partial def evalBinary? : ScalarBinaryOp → Value → Value → Option Value
+    | .mulWideS32, .s32 a, .s32 b => some (.s64 (normalizeSigned 64 (a * b)))
     | .add, .u32 a, .u32 b => some (.u32 (a + b))
     | .add, .u64 a, .u64 b => some (.u64 (a + b))
     | .add, .s32 a, .s32 b => some (.s32 (normalizeSigned 32 (a + b)))
     | .add, .s64 a, .s64 b => some (.s64 (normalizeSigned 64 (a + b)))
+    | .add, .gaddr s off, .s64 b => some (.gaddr s (Int.toNat (Int.ofNat off + b)))
+    | .add, .s64 b, .gaddr s off => some (.gaddr s (Int.toNat (Int.ofNat off + b)))
+    | .add, .gaddr s off, .u64 b => some (.gaddr s (off + b.toNat))
+    | .add, .u64 b, .gaddr s off => some (.gaddr s (off + b.toNat))
     | .add, .f32 a, .f32 b => some (.f32 (a + b))
     | .add, .f64 a, .f64 b => some (.f64 (a + b))
     | .sub, .u32 a, .u32 b => some (.u32 (a - b))
     | .sub, .u64 a, .u64 b => some (.u64 (a - b))
     | .sub, .s32 a, .s32 b => some (.s32 (normalizeSigned 32 (a - b)))
     | .sub, .s64 a, .s64 b => some (.s64 (normalizeSigned 64 (a - b)))
+    | .sub, .gaddr s off, .s64 b => some (.gaddr s (Int.toNat (Int.ofNat off - b)))
+    | .sub, .gaddr s off, .u64 b => some (.gaddr s (off - b.toNat))
     | .sub, .f32 a, .f32 b => some (.f32 (a - b))
     | .sub, .f64 a, .f64 b => some (.f64 (a - b))
     | .mul, .u32 a, .u32 b => some (.u32 (a * b))
@@ -489,10 +510,20 @@ def resolveAddr? (st : State) (cta : CTAId) (warp : WarpId) (lane : LaneId) (ta 
   let base <- evalRValue? st cta warp lane ta.addr
   match ta.space, base with
   | .global, .u64 off => some (.global off.toNat)
+  | .global, .s64 off => some (.global off.toNat)
+  | .global, .b64 off => some (.global off.toNat)
   | .shared, .u64 off => some (.shared cta off.toNat)
+  | .shared, .s64 off => some (.shared cta off.toNat)
+  | .shared, .b64 off => some (.shared cta off.toNat)
   | .local, .u64 off => some (.local cta warp lane off.toNat)
+  | .local, .s64 off => some (.local cta warp lane off.toNat)
+  | .local, .b64 off => some (.local cta warp lane off.toNat)
   | .param, .u64 off => some (.param off.toNat)
+  | .param, .s64 off => some (.param off.toNat)
+  | .param, .b64 off => some (.param off.toNat)
   | .const, .u64 off => some (.const off.toNat)
+  | .const, .s64 off => some (.const off.toNat)
+  | .const, .b64 off => some (.const off.toNat)
   | .global, .gaddr .global off => some (.global off)
   | .shared, .gaddr .shared off => some (.shared cta off)
   | .local, .gaddr .local off => some (.local cta warp lane off)

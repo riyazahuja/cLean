@@ -1,4 +1,4 @@
-import CLean.Helpers
+import CLean.Semantics.Helpers
 
 namespace CLean
 

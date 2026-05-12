@@ -1,6 +1,6 @@
 -- import Mathlib.Tactic
 import Std.Data.HashMap.Lemmas
-import CLean.Semantics
+import CLean.Semantics.SmallStep
 
 namespace CLean
 

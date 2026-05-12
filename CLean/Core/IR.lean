@@ -1,4 +1,4 @@
-import CLean.Types
+import CLean.Core.Types
 
 namespace CLean
 
@@ -12,6 +12,7 @@ inductive ScalarUnaryOp where
 
 inductive ScalarBinaryOp where
   | add | sub | mul | div | rem
+  | mulWideS32
   | min | max
   | bitand | bitor | bitxor
   | shl | shr

@@ -1,6 +1,6 @@
 import Std
-import CLean.Types
-import CLean.IR
+import CLean.Core.Types
+import CLean.Core.IR
 
 namespace CLean
 

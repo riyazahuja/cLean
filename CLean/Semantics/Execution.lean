@@ -1,4 +1,4 @@
-import CLean.Lemmas
+import CLean.Proof.Lemmas
 
 namespace CLean
 
