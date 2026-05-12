@@ -9,12 +9,33 @@ open Std.Internal.Parsec
 
 abbrev Parser := Std.Internal.Parsec.String.Parser
 
-/--
-A small runtime parser-combinator frontend for the normalized PTX subset.
-This intentionally uses Lean's parser-combinator infrastructure instead of ad hoc line splitting.
--/
-def runParser (p : Parser α) (input : String) : Except String α :=
-  Std.Internal.Parsec.String.Parser.run p input
+structure ParseError where
+  offset : Nat
+  line : Nat
+  column : Nat
+  message : String
+  deriving Repr, Inhabited
+
+def lineColumnFromOffset (input : String) (offset : Nat) : Nat × Nat :=
+  let rec loop : List Char → Nat → Nat → Nat → Nat × Nat
+    | [], _, line, column => (line, column)
+    | c :: cs, idx, line, column =>
+        if idx >= offset then
+          (line, column)
+        else if c = '\n' then
+          loop cs (idx + 1) (line + 1) 1
+        else
+          loop cs (idx + 1) line (column + 1)
+  loop input.toList 0 1 1
+
+/-- Runtime parser-combinator entrypoint with source-position diagnostics. -/
+def runParser (p : Parser α) (input : String) : Except ParseError α :=
+  match p input.mkIterator with
+  | .success _ res => .ok res
+  | .error it err =>
+      let offset := it.i.byteIdx
+      let (line, column) := lineColumnFromOffset input offset
+      .error { offset := offset, line := line, column := column, message := err }
 
 def whitespace : Parser Unit :=
   Std.Internal.Parsec.String.ws
@@ -24,9 +45,19 @@ def lineComment : Parser Unit := do
   let _ ← many (satisfy fun c : Char => c != '\n' && c != '\r')
   pure ()
 
+partial def blockComment : Parser Unit := do
+  Std.Internal.Parsec.String.skipString "/*"
+  let rec loop : Parser Unit := do
+    match (← peek?) with
+    | none => fail "unterminated block comment"
+    | some _ =>
+        (attempt (Std.Internal.Parsec.String.skipString "*/")) <|>
+          (skip *> loop)
+  loop
+
 partial def trivia : Parser Unit := do
   whitespace
-  let _ ← many (attempt (lineComment *> whitespace))
+  let _ ← many (attempt ((lineComment <|> blockComment) *> whitespace))
   pure ()
 
 def lexeme (p : Parser α) : Parser α :=
@@ -41,6 +72,12 @@ def rawSymbol (s : String) : Parser Unit :=
 def optional? (p : Parser α) : Parser (Option α) :=
   (some <$> attempt p) <|> pure none
 
+def sepBy (p : Parser α) (sep : Parser Unit) : Parser (Array α) :=
+  (do
+    let first ← p
+    let rest ← many (attempt (sep *> p))
+    pure (rest.foldl (init := #[first]) (fun out x => out.push x))) <|> pure #[]
+
 def charBetween (lo hi c : Char) : Bool :=
   decide (lo ≤ c ∧ c ≤ hi)
 
@@ -50,14 +87,61 @@ def identStart (c : Char) : Bool :=
 def identRest (c : Char) : Bool :=
   identStart c || charBetween '0' '9' c || c == '.'
 
-def ident : Parser String := lexeme do
-  let _ ← optional? (Std.Internal.Parsec.String.skipChar '%')
+def tokenChar (c : Char) : Bool :=
+  identRest c || c == '%'
+
+structure NameRef where
+  name : String
+  hasPercent : Bool
+  deriving Repr, Inhabited
+
+def nameRef : Parser NameRef := lexeme do
+  let hasPercent := (← optional? (Std.Internal.Parsec.String.skipChar '%')) |>.isSome
   let head ← satisfy identStart
   let tail ← manyChars (satisfy identRest)
-  pure (head.toString ++ tail)
+  pure { name := head.toString ++ tail, hasPercent := hasPercent }
 
-def natLit : Parser Nat :=
-  lexeme Std.Internal.Parsec.String.digits
+def ident : Parser String := do
+  pure (← nameRef).name
+
+def rawToken : Parser String :=
+  lexeme (many1Chars (satisfy tokenChar))
+
+def natFromDigits (digits : Array Char) : Nat :=
+  digits.foldl (init := 0) fun acc c => acc * 10 + (c.toNat - '0'.toNat)
+
+def hexDigitValue? (c : Char) : Option Nat :=
+  if charBetween '0' '9' c then some (c.toNat - '0'.toNat)
+  else if charBetween 'a' 'f' c then some (10 + c.toNat - 'a'.toNat)
+  else if charBetween 'A' 'F' c then some (10 + c.toNat - 'A'.toNat)
+  else none
+
+def natFromHexDigits (digits : Array Char) : Nat :=
+  digits.foldl (init := 0) fun acc c =>
+    match hexDigitValue? c with
+    | some d => acc * 16 + d
+    | none => acc
+
+def decNatRaw : Parser Nat := do
+  let digits ← many1 (Std.Internal.Parsec.String.digit)
+  pure (natFromDigits digits)
+
+def hexNatRaw : Parser Nat := do
+  (rawSymbol "0x" <|> rawSymbol "0X")
+  let digits ← many1 (Std.Internal.Parsec.String.hexDigit)
+  pure (natFromHexDigits digits)
+
+def natRaw : Parser Nat :=
+  attempt hexNatRaw <|> decNatRaw
+
+def intLit : Parser Int := lexeme do
+  let neg := (← optional? (Std.Internal.Parsec.String.skipChar '-')) |>.isSome
+  let n ← natRaw
+  if neg then pure (-(Int.ofNat n)) else pure (Int.ofNat n)
+
+def natLit : Parser Nat := do
+  let n ← intLit
+  if n < 0 then fail "expected non-negative integer" else pure n.toNat
 
 def scalarTySuffix : Parser ScalarTy :=
   attempt (rawSymbol ".pred" *> pure .pred) <|>
@@ -100,32 +184,31 @@ def cmpOp : Parser CmpOp :=
   attempt (rawSymbol "gt" *> pure .gt) <|>
   attempt (rawSymbol "ge" *> pure .ge)
 
-def comma : Parser Unit :=
-  symbol ","
+def comma : Parser Unit := symbol ","
+def semi : Parser Unit := symbol ";"
+def colon : Parser Unit := symbol ":"
+def lbrace : Parser Unit := symbol "{"
+def rbrace : Parser Unit := symbol "}"
+def lparen : Parser Unit := symbol "("
+def rparen : Parser Unit := symbol ")"
 
-def semi : Parser Unit :=
-  symbol ";"
-
-def colon : Parser Unit :=
-  symbol ":"
-
-def immediateValue? (ty : ScalarTy) (n : Nat) : Option Value :=
+def immediateValue? (ty : ScalarTy) (n : Int) : Option Value :=
   match ty with
   | .pred => some (.pred (n != 0))
-  | .u8 => some (.u8 (UInt8.ofNat n))
-  | .u16 => some (.u16 (UInt16.ofNat n))
-  | .u32 => some (.u32 (UInt32.ofNat n))
-  | .u64 => some (.u64 (UInt64.ofNat n))
+  | .u8 => if n < 0 then none else some (.u8 (UInt8.ofNat n.toNat))
+  | .u16 => if n < 0 then none else some (.u16 (UInt16.ofNat n.toNat))
+  | .u32 => if n < 0 then none else some (.u32 (UInt32.ofNat n.toNat))
+  | .u64 => if n < 0 then none else some (.u64 (UInt64.ofNat n.toNat))
   | .s8 => some (.s8 n)
   | .s16 => some (.s16 n)
   | .s32 => some (.s32 n)
   | .s64 => some (.s64 n)
-  | .b8 => some (.b8 (UInt8.ofNat n))
-  | .b16 => some (.b16 (UInt16.ofNat n))
-  | .b32 => some (.b32 (UInt32.ofNat n))
-  | .b64 => some (.b64 (UInt64.ofNat n))
-  | .f16 => some (.f16 (UInt16.ofNat n))
-  | .bf16 => some (.bf16 (UInt16.ofNat n))
+  | .b8 => if n < 0 then none else some (.b8 (UInt8.ofNat n.toNat))
+  | .b16 => if n < 0 then none else some (.b16 (UInt16.ofNat n.toNat))
+  | .b32 => if n < 0 then none else some (.b32 (UInt32.ofNat n.toNat))
+  | .b64 => if n < 0 then none else some (.b64 (UInt64.ofNat n.toNat))
+  | .f16 => if n < 0 then none else some (.f16 (UInt16.ofNat n.toNat))
+  | .bf16 => if n < 0 then none else some (.bf16 (UInt16.ofNat n.toNat))
   | .f32 | .f64 => none
 
 def specialReg? : String → Option SpecialReg
@@ -143,22 +226,38 @@ def specialReg? : String → Option SpecialReg
   | "nctaid.z" => some .nctaidZ
   | _ => none
 
-def operandOfIdent (name : String) : Operand :=
-  match specialReg? name with
+def operandOfNameRef (ref : NameRef) : Operand :=
+  match specialReg? ref.name with
   | some s => .special s
-  | none => .reg name
+  | none => if ref.hasPercent then .reg ref.name else .symbol ref.name
 
 def operandWithTy (ty : ScalarTy) : Parser Operand :=
   attempt (do
-    let n ← natLit
+    let n ← intLit
     match immediateValue? ty n with
     | some v => pure (.imm v)
     | none => fail s!"numeric literals for {repr ty} are not supported by this parser") <|>
-  (operandOfIdent <$> ident)
+  (operandOfNameRef <$> nameRef)
+
+def addrAtom : Parser Operand :=
+  attempt (do
+    let n ← natLit
+    pure (.imm (.u64 (UInt64.ofNat n)))) <|>
+  (operandOfNameRef <$> nameRef)
+
+def signedOffset : Parser Int :=
+  attempt (symbol "+" *> intLit) <|>
+  attempt (do let n ← symbol "-" *> natLit; pure (-(Int.ofNat n)))
+
+def bracketAddrOperand : Parser Operand := do
+  symbol "["
+  let base ← addrAtom
+  let off ← optional? signedOffset
+  symbol "]"
+  pure (.addr base (off.getD 0))
 
 def addrOperand : Parser Operand :=
-  attempt ((fun n => Operand.imm (.u64 (UInt64.ofNat n))) <$> natLit) <|>
-  (operandOfIdent <$> ident)
+  attempt bracketAddrOperand <|> addrAtom
 
 def guard : Parser Guard := do
   symbol "@"
@@ -175,8 +274,44 @@ def instrMov : Parser Instr := do
   let src ← operandWithTy ty
   pure (.mov ty dst src)
 
-def instrAdd : Parser Instr := do
-  rawSymbol "add"
+def unaryOpcode : Parser ScalarUnaryOp :=
+  attempt (rawSymbol "neg" *> pure .neg) <|>
+  attempt (rawSymbol "abs" *> pure .abs) <|>
+  attempt (rawSymbol "not" *> pure .bitnot)
+
+def instrUnop : Parser Instr := do
+  let op ← unaryOpcode
+  let ty ← scalarTySuffix
+  trivia
+  let dst ← ident
+  comma
+  let src ← operandWithTy ty
+  pure (.unop op ty dst src)
+
+def instrCvt : Parser Instr := do
+  rawSymbol "cvt"
+  let dstTy ← scalarTySuffix
+  let srcTy ← scalarTySuffix
+  trivia
+  let dst ← ident
+  comma
+  let src ← operandWithTy srcTy
+  pure (.unop (.cvt dstTy) srcTy dst src)
+
+def scalarBinaryOp : Parser ScalarBinaryOp :=
+  attempt (rawSymbol "add" *> pure .add) <|>
+  attempt (rawSymbol "sub" *> pure .sub) <|>
+  attempt (rawSymbol "mul" *> pure .mul) <|>
+  attempt (rawSymbol "and" *> pure .bitand) <|>
+  attempt (rawSymbol "or" *> pure .bitor) <|>
+  attempt (rawSymbol "xor" *> pure .bitxor) <|>
+  attempt (rawSymbol "shl" *> pure .shl) <|>
+  attempt (rawSymbol "shr" *> pure .shr) <|>
+  attempt (rawSymbol "min" *> pure .min) <|>
+  attempt (rawSymbol "max" *> pure .max)
+
+def instrBinop : Parser Instr := do
+  let op ← scalarBinaryOp
   let ty ← scalarTySuffix
   trivia
   let dst ← ident
@@ -184,7 +319,7 @@ def instrAdd : Parser Instr := do
   let lhs ← operandWithTy ty
   comma
   let rhs ← operandWithTy ty
-  pure (.add ty dst lhs rhs)
+  pure (.binop op ty dst lhs rhs)
 
 def instrSetp : Parser Instr := do
   rawSymbol "setp."
@@ -238,20 +373,37 @@ def instrIsspacep : Parser Instr := do
   pure (.isspacep space dst src)
 
 def instrBarSync : Parser Instr := do
-  rawSymbol "bar.sync"
+  (rawSymbol "bar.sync" <|> rawSymbol "barrier.sync")
   trivia
   let barrierId ← natLit
   pure (.barSync barrierId)
+
+def unsupportedOperand : Parser Operand :=
+  attempt addrOperand <|> attempt (operandWithTy .u64) <|> (operandOfNameRef <$> nameRef)
+
+def opcodeParts (tok : String) : String × Array String :=
+  match tok.splitOn "." with
+  | [] => (tok, #[])
+  | op :: mods => (op, mods.toArray)
+
+def instrUnsupported : Parser Instr := do
+  let tok ← rawToken
+  let (opcode, modifiers) := opcodeParts tok
+  let operands ← sepBy unsupportedOperand comma
+  pure (.unsupported opcode modifiers operands)
 
 def instr : Parser Instr :=
   attempt instrSetp <|>
   attempt instrIsspacep <|>
   attempt instrCvta <|>
   attempt instrBarSync <|>
+  attempt instrCvt <|>
   attempt instrMov <|>
-  attempt instrAdd <|>
+  attempt instrUnop <|>
+  attempt instrBinop <|>
   attempt instrLd <|>
-  attempt instrSt
+  attempt instrSt <|>
+  instrUnsupported
 
 def gInstr : Parser GInstr := do
   let g? ← optional? guard
@@ -273,7 +425,7 @@ def terminatorCbra : Parser Terminator := do
   pure (.cbra p false tLabel fLabel)
 
 def terminatorExit : Parser Terminator := do
-  symbol "exit"
+  (symbol "exit" <|> symbol "ret")
   pure .exit
 
 def terminator : Parser Terminator :=
@@ -304,33 +456,202 @@ def block : Parser Block := do
   let stmts ← many (attempt stmt)
   pure (blockOfStmts label stmts)
 
-def regDecl : Parser RegDecl := do
+structure NameDecl where
+  name : String
+  count? : Option Nat := none
+  deriving Repr, Inhabited
+
+def nameDecl : Parser NameDecl := do
+  let name ← ident
+  let count? ← optional? (symbol "<" *> natLit <* symbol ">")
+  pure { name := name, count? := count? }
+
+def expandNames (decl : NameDecl) : Array String :=
+  match decl.count? with
+  | none => #[decl.name]
+  | some n => (Array.range n).map fun i => decl.name ++ toString i
+
+def regDecl : Parser (Array RegDecl) := do
   symbol ".reg"
   let ty ← scalarTy
-  let name ← ident
+  let name ← nameDecl
   semi
-  pure { name := name, ty := ty }
+  pure ((expandNames name).map fun n => { name := n, ty := ty })
 
-def predDecl : Parser PredDecl := do
+def predDecl : Parser (Array PredDecl) := do
   symbol ".pred"
-  let name ← ident
+  let name ← nameDecl
   semi
-  pure { name := name }
+  pure ((expandNames name).map fun n => { name := n })
+
+def ptrAttr : Parser (Option AddrSpace × Nat) := do
+  rawSymbol ".ptr"
+  let space? ← optional? addrSpaceSuffix
+  trivia
+  let align? ← optional? (symbol ".align" *> natLit)
+  pure (space?, align?.getD 1)
+
+def paramDeclCore : Parser ParamDecl := do
+  symbol ".param"
+  let ptr? ← optional? ptrAttr
+  let ty ← scalarTy
+  let name ← ident
+  match ptr? with
+  | some (space?, align) =>
+      pure { name := name, ty := ty, isPtr := true, ptrSpace? := space?, align := align }
+  | none =>
+      pure { name := name, ty := ty }
+
+def paramDecl : Parser ParamDecl := do
+  let decl ← paramDeclCore
+  semi
+  pure decl
+
+def sharedDeclCore : Parser SharedDecl := do
+  symbol ".shared"
+  let align? ← optional? (symbol ".align" *> natLit)
+  let ty ← scalarTy
+  let name ← ident
+  let count? ← optional? (symbol "[" *> natLit <* symbol "]")
+  pure { name := name, ty := ty, count := count?.getD 1, align := align?.getD 1 }
+
+def sharedDecl : Parser SharedDecl := do
+  let decl ← sharedDeclCore
+  semi
+  pure decl
+
+def moduleMemoryDecl (space : ModuleMemorySpace) : Parser ModuleMemoryDecl := do
+  let align? ← optional? (symbol ".align" *> natLit)
+  let ty ← scalarTy
+  let name ← ident
+  let count? ← optional? (symbol "[" *> natLit <* symbol "]")
+  semi
+  pure { space := space, name := name, ty := ty, count := count?.getD 1, align := align?.getD 1 }
+
+inductive Decl where
+  | regs (decls : Array RegDecl)
+  | preds (decls : Array PredDecl)
+  | param (decl : ParamDecl)
+  | shared (decl : SharedDecl)
+  deriving Repr
+
+def decl : Parser Decl :=
+  attempt (Decl.shared <$> sharedDecl) <|>
+  attempt (Decl.param <$> paramDecl) <|>
+  attempt (Decl.preds <$> predDecl) <|>
+  attempt (Decl.regs <$> regDecl)
+
+def splitDecls (decls : Array Decl) : Array RegDecl × Array PredDecl × Array ParamDecl × Array SharedDecl := Id.run do
+  let mut regs : Array RegDecl := #[]
+  let mut preds : Array PredDecl := #[]
+  let mut params : Array ParamDecl := #[]
+  let mut shareds : Array SharedDecl := #[]
+  for decl in decls do
+    match decl with
+    | .regs ds => regs := regs ++ ds
+    | .preds ds => preds := preds ++ ds
+    | .param d => params := params.push d
+    | .shared d => shareds := shareds.push d
+  pure (regs, preds, params, shareds)
+
+def withLeadingBlock (entry : BlockLabel) (leading : Array Stmt) (blocks : Array Block) : Array Block :=
+  if leading.isEmpty then blocks else #[blockOfStmts entry leading] ++ blocks
+
+def entryParamList : Parser (Array ParamDecl) :=
+  lparen *> sepBy paramDeclCore comma <* rparen
+
+def kernelBody (entry : BlockLabel) (entryParams : Array ParamDecl) : Parser Kernel := do
+  let decls ← many (attempt decl)
+  let leading ← many (attempt stmt)
+  let blocks ← many (attempt block)
+  let (regs, preds, params, shareds) := splitDecls decls
+  pure {
+    entry := entry
+    regs := regs
+    preds := preds
+    params := entryParams ++ params
+    shareds := shareds
+    blocks := withLeadingBlock entry leading blocks
+  }
 
 def kernel : Parser Kernel := do
-  trivia
   symbol ".entry"
   let entry ← ident
+  let entryParams? ← optional? entryParamList
+  let entryParams := entryParams?.getD #[]
+  (attempt (do
+      lbrace
+      let k ← kernelBody entry entryParams
+      rbrace
+      pure k)) <|>
+    (do
+      semi
+      kernelBody entry entryParams)
+
+def versionDirective : Parser ModuleDirective := do
+  symbol ".version"
+  let value ← rawToken
   semi
-  let regs ← many (attempt regDecl)
-  let preds ← many (attempt predDecl)
-  let blocks ← many (attempt block)
+  pure (.version value)
+
+def targetDirective : Parser ModuleDirective := do
+  symbol ".target"
+  let first ← rawToken
+  let rest ← many (attempt (comma *> rawToken))
+  semi
+  pure (.target (rest.foldl (init := #[first]) (fun out x => out.push x)))
+
+def addressSizeDirective : Parser ModuleDirective := do
+  symbol ".address_size"
+  let bits ← natLit
+  semi
+  pure (.addressSize bits)
+
+def directive : Parser ModuleDirective :=
+  attempt versionDirective <|> attempt targetDirective <|> addressSizeDirective
+
+inductive ModuleItem where
+  | directive (d : ModuleDirective)
+  | memory (d : ModuleMemoryDecl)
+  | shared (d : SharedDecl)
+  | kernel (k : Kernel)
+  deriving Repr
+
+def moduleItem : Parser ModuleItem :=
+  attempt (ModuleItem.directive <$> directive) <|>
+  attempt (ModuleItem.memory <$> (symbol ".global" *> moduleMemoryDecl .global)) <|>
+  attempt (ModuleItem.memory <$> (symbol ".const" *> moduleMemoryDecl .const)) <|>
+  attempt (ModuleItem.shared <$> sharedDecl) <|>
+  (ModuleItem.kernel <$> kernel)
+
+def moduleOfItems (items : Array ModuleItem) : Module := Id.run do
+  let mut directives : Array ModuleDirective := #[]
+  let mut memories : Array ModuleMemoryDecl := #[]
+  let mut shareds : Array SharedDecl := #[]
+  let mut kernels : Array Kernel := #[]
+  for item in items do
+    match item with
+    | .directive d => directives := directives.push d
+    | .memory d => memories := memories.push d
+    | .shared d => shareds := shareds.push d
+    | .kernel k => kernels := kernels.push { k with shareds := shareds ++ k.shareds }
+  pure { directives := directives, memories := memories, shareds := shareds, kernels := kernels }
+
+def moduleParser : Parser Module := do
+  trivia
+  let items ← many (attempt moduleItem)
   trivia
   eof
-  pure { entry := entry, regs := regs, preds := preds, blocks := blocks }
+  pure (moduleOfItems items)
 
-def parseKernel (input : String) : Except String Kernel :=
-  runParser kernel input
+def parseModule (input : String) : Except ParseError Module :=
+  runParser moduleParser input
+
+def parseKernel (input : String) : Except ParseError Kernel := do
+  let m ← parseModule input
+  match m.kernels[0]? with
+  | some k => pure k
+  | none => .error { offset := 0, line := 1, column := 1, message := "expected one .entry kernel" }
 
 end Parser
 end PTX

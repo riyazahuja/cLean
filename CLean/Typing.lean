@@ -55,6 +55,8 @@ def valueHasType : Value → ScalarTy → Prop
 structure TypeEnv where
   regs : Std.HashMap RegName ScalarTy := {}
   preds : Std.HashMap PredName ScalarTy := {}
+  params : Std.HashMap String ParamInfo := {}
+  shareds : Std.HashMap String SharedDecl := {}
   deriving Inhabited
 
 private def binarySameWidthInt? (lhs rhs : ScalarTy) : Bool :=
@@ -73,9 +75,13 @@ private def cvtSig? (dst src : ScalarTy) : Option ScalarTy :=
   else
     match dst, src with
     | .u32, .s32 => some .u32
+    | .u32, .u64 => some .u32
     | .u64, .s64 => some .u64
+    | .u64, .u32 => some .u64
     | .s32, .u32 => some .s32
+    | .s32, .s64 => some .s32
     | .s64, .u64 => some .s64
+    | .s64, .s32 => some .s64
     | .f32, .u32 => some .f32
     | .f32, .s32 => some .f32
     | .f64, .u64 => some .f64

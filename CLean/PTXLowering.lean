@@ -9,10 +9,15 @@ namespace PTX
 inductive LowerError where
   | unknownReg (r : RegName)
   | unknownPred (p : PredName)
+  | unknownParam (p : String)
+  | unknownShared (s : String)
+  | unknownSymbol (s : String)
+  | unknownBlock (label : BlockLabel)
   | valueHasNoScalarType (v : Value)
   | typeMismatch (expected actual : ScalarTy)
   | unsupportedType (ty : ScalarTy)
   | unsupportedOp (op : String)
+  | unsupportedModifier (modifier : String)
   | unsupportedTerminator
   deriving Repr
 
@@ -21,8 +26,39 @@ abbrev LowerM := Except LowerError
 def lowerOperand : Operand → RValue
   | .reg r => .reg r
   | .pred p => .pred p
+  | .symbol s => .reg s
+  | .addr base 0 => lowerOperand base
+  | .addr base (Int.ofNat n) => .binop .add (lowerOperand base) (.imm (.u64 (UInt64.ofNat n)))
+  | .addr base (Int.negSucc n) => .binop .sub (lowerOperand base) (.imm (.u64 (UInt64.ofNat (n + 1))))
   | .imm v => .imm v
   | .special s => .special s
+
+def lowerParamOperand (info : ParamInfo) : RValue :=
+  .imm (.u64 (UInt64.ofNat info.offset))
+
+def lowerSharedOperand (info : CLean.SharedDecl) : RValue :=
+  .imm (.u64 (UInt64.ofNat info.offset))
+
+def addressOffsetValue? (ty : ScalarTy) (offset : Nat) : Option Value :=
+  match ty with
+  | .u32 => some (.u32 (UInt32.ofNat offset))
+  | .u64 => some (.u64 (UInt64.ofNat offset))
+  | _ => none
+
+def lowerOperandChecked? (env : Typing.TypeEnv) : Operand → LowerM RValue
+  | .reg r =>
+      match env.regs[r]? with
+      | some _ => pure (.reg r)
+      | none => throw (.unknownReg r)
+  | .pred p =>
+      match env.preds[p]? with
+      | some .pred => pure (.pred p)
+      | some ty => throw (.typeMismatch .pred ty)
+      | none => throw (.unknownPred p)
+  | .symbol s => throw (.unknownSymbol s)
+  | .addr _ _ => throw (.unsupportedOp "address operand outside memory")
+  | .imm v => pure (.imm v)
+  | .special s => pure (.special s)
 
 def operandType? (env : Typing.TypeEnv) : Operand → LowerM ScalarTy
   | .reg r =>
@@ -34,6 +70,8 @@ def operandType? (env : Typing.TypeEnv) : Operand → LowerM ScalarTy
       | some .pred => pure .pred
       | some ty => throw (.typeMismatch .pred ty)
       | none => throw (.unknownPred p)
+  | .symbol s => throw (.unknownSymbol s)
+  | .addr _ _ => throw (.unsupportedOp "address operand outside memory")
   | .imm v =>
       match Typing.valueType? v with
       | some ty => pure ty
@@ -42,6 +80,51 @@ def operandType? (env : Typing.TypeEnv) : Operand → LowerM ScalarTy
       match Typing.specialType? s with
       | some ty => pure ty
       | none => throw (.unsupportedOp "special")
+
+def addressOperandType? (env : Typing.TypeEnv) (space : AddrSpace) : Operand → LowerM ScalarTy
+  | .addr base _ => addressOperandType? env space base
+  | .symbol s =>
+      match space with
+      | .param =>
+          match env.params[s]? with
+          | some _ => pure .u64
+          | none => throw (.unknownParam s)
+      | .shared =>
+          match env.shareds[s]? with
+          | some _ => pure .u64
+          | none => throw (.unknownShared s)
+      | _ => throw (.unknownSymbol s)
+  | operand => operandType? env operand
+
+def lowerAddressOperandChecked? (env : Typing.TypeEnv) (space : AddrSpace) : Operand → LowerM RValue
+  | .addr base offset => do
+      let baseTy <- addressOperandType? env space base
+      let baseRv <- lowerAddressOperandChecked? env space base
+      if offset = 0 then
+        pure baseRv
+      else if offset > 0 then
+        let off <- match addressOffsetValue? baseTy offset.toNat with
+          | some v => pure v
+          | none => throw (.unsupportedType baseTy)
+        pure (.binop .add baseRv (.imm off))
+      else
+        let magnitude := (-offset).toNat
+        let off <- match addressOffsetValue? baseTy magnitude with
+          | some v => pure v
+          | none => throw (.unsupportedType baseTy)
+        pure (.binop .sub baseRv (.imm off))
+  | .symbol s =>
+      match space with
+      | .param =>
+          match env.params[s]? with
+          | some info => pure (lowerParamOperand info)
+          | none => throw (.unknownParam s)
+      | .shared =>
+          match env.shareds[s]? with
+          | some info => pure (lowerSharedOperand info)
+          | none => throw (.unknownShared s)
+      | _ => throw (.unknownSymbol s)
+  | operand => lowerOperandChecked? env operand
 
 def expectOperandType (env : Typing.TypeEnv) (expected : ScalarTy) (operand : Operand) : LowerM Unit := do
   let actual <- operandType? env operand
@@ -72,62 +155,85 @@ def ensureGuard? (env : Typing.TypeEnv) : Option Guard → LowerM Unit
 
 def lowerInstr : Instr → CLean.Instr
   | .mov _ dst src => .assignReg dst (lowerOperand src)
-  | .add _ dst lhs rhs => .assignReg dst (.binop .add (lowerOperand lhs) (lowerOperand rhs))
+  | .unop op _ dst src => .assignReg dst (.unop op (lowerOperand src))
+  | .binop op _ dst lhs rhs => .assignReg dst (.binop op (lowerOperand lhs) (lowerOperand rhs))
   | .setp op _ dst lhs rhs => .assignPred dst { op := op, lhs := lowerOperand lhs, rhs := lowerOperand rhs }
   | .ld space ty dst addr => .load dst { space := space, ty := ty, addr := lowerOperand addr }
   | .st space ty addr value => .store { space := space, ty := ty, addr := lowerOperand addr } (lowerOperand value)
   | .cvta space dst src => .cvta dst space (lowerOperand src)
   | .isspacep space dst src => .isspacep dst space (lowerOperand src)
   | .barSync barrierId => .barrierCTA barrierId
+  | .unsupported _ _ _ => .assignReg "__unsupported" (.imm (.u32 0))
 
 def lowerInstrChecked? (env : Typing.TypeEnv) : Instr → LowerM (CLean.Instr × Typing.TypeEnv)
   | .mov ty dst src => do
       expectOperandType env ty src
-      pure (.assignReg dst (lowerOperand src), { env with regs := env.regs.insert dst ty })
-  | .add ty dst lhs rhs => do
+      let src <- lowerOperandChecked? env src
+      pure (.assignReg dst src, { env with regs := env.regs.insert dst ty })
+  | .unop op srcTy dst src => do
+      expectOperandType env srcTy src
+      let src <- lowerOperandChecked? env src
+      match Typing.unarySig? op srcTy with
+      | some outTy =>
+          pure (.assignReg dst (.unop op src), { env with regs := env.regs.insert dst outTy })
+      | none => throw (.unsupportedOp "unop")
+  | .binop op ty dst lhs rhs => do
       expectOperandType env ty lhs
       expectOperandType env ty rhs
-      match Typing.binarySig? .add ty ty with
+      let lhs <- lowerOperandChecked? env lhs
+      let rhs <- lowerOperandChecked? env rhs
+      match Typing.binarySig? op ty ty with
       | some outTy =>
-          pure (.assignReg dst (.binop .add (lowerOperand lhs) (lowerOperand rhs)),
+          pure (.assignReg dst (.binop op lhs rhs),
             { env with regs := env.regs.insert dst outTy })
-      | none => throw (.unsupportedOp "add")
+      | none => throw (.unsupportedOp "binop")
   | .setp op ty dst lhs rhs => do
       expectOperandType env ty lhs
       expectOperandType env ty rhs
+      let lhs <- lowerOperandChecked? env lhs
+      let rhs <- lowerOperandChecked? env rhs
       match Typing.cmpSig? op ty ty with
       | some .pred =>
-          pure (.assignPred dst { op := op, lhs := lowerOperand lhs, rhs := lowerOperand rhs },
+          pure (.assignPred dst { op := op, lhs := lhs, rhs := rhs },
             { env with preds := env.preds.insert dst .pred })
       | _ => throw (.unsupportedOp "setp")
   | .ld space ty dst addr => do
       ensureCodecType ty
-      let addrTy <- operandType? env addr
+      let addrTy <- addressOperandType? env space addr
       match addrTy with
       | .u32 | .u64 =>
-          pure (.load dst { space := space, ty := ty, addr := lowerOperand addr },
+          let addr <- lowerAddressOperandChecked? env space addr
+          pure (.load dst { space := space, ty := ty, addr := addr },
             { env with regs := env.regs.insert dst ty })
       | _ => throw (.unsupportedType addrTy)
   | .st space ty addr value => do
       ensureCodecType ty
-      let addrTy <- operandType? env addr
+      let addrTy <- addressOperandType? env space addr
       match addrTy with
       | .u32 | .u64 =>
           expectOperandType env ty value
-          pure (.store { space := space, ty := ty, addr := lowerOperand addr } (lowerOperand value), env)
+          let addr <- lowerAddressOperandChecked? env space addr
+          let value <- lowerOperandChecked? env value
+          pure (.store { space := space, ty := ty, addr := addr } value, env)
       | _ => throw (.unsupportedType addrTy)
   | .cvta space dst src => do
-      let srcTy <- operandType? env src
+      let srcTy <- addressOperandType? env space src
       ensureCvtaSourceType srcTy
-      pure (.cvta dst space (lowerOperand src), { env with regs := env.regs.insert dst .u64 })
+      let src <- lowerAddressOperandChecked? env space src
+      pure (.cvta dst space src, { env with regs := env.regs.insert dst .u64 })
   | .isspacep space dst src => do
       let srcTy <- operandType? env src
       -- In the initial checked layer, generic addresses have no ScalarTy, so this accepts integer
       -- pointer-shaped operands and relies on the semantic helper to reject non-generic runtime values.
       ensureCvtaSourceType srcTy
-      pure (.isspacep dst space (lowerOperand src), { env with preds := env.preds.insert dst .pred })
+      let src <- lowerOperandChecked? env src
+      pure (.isspacep dst space src, { env with preds := env.preds.insert dst .pred })
   | .barSync barrierId =>
       pure (.barrierCTA barrierId, env)
+  | .unsupported opcode modifiers _ =>
+      match modifiers[0]? with
+      | some modifier => throw (.unsupportedModifier modifier)
+      | none => throw (.unsupportedOp opcode)
 
 def lowerGInstr (gi : GInstr) : CLean.GInstr :=
   { guard? := gi.guard?, instr := lowerInstr gi.instr }
@@ -143,14 +249,29 @@ def lowerTerminator : Terminator → CLean.Terminator
   | .cbra pred true tLabel fLabel => .cbr (.pred pred) fLabel tLabel
   | .exit => .terminate
 
-def lowerTerminatorChecked? (env : Typing.TypeEnv) : Terminator → LowerM CLean.Terminator
-  | .bra label => pure (.br label)
+def blockLabels (blocks : Array Block) : Std.HashMap BlockLabel Unit :=
+  blocks.foldl (fun out block => out.insert block.label ()) {}
+
+def requireBlockLabel (labels : Std.HashMap BlockLabel Unit) (label : BlockLabel) : LowerM Unit :=
+  match labels[label]? with
+  | some () => pure ()
+  | none => throw (.unknownBlock label)
+
+def lowerTerminatorChecked? (labels : Std.HashMap BlockLabel Unit) (env : Typing.TypeEnv) :
+    Terminator → LowerM CLean.Terminator
+  | .bra label => do
+      requireBlockLabel labels label
+      pure (.br label)
   | .cbra pred false tLabel fLabel => do
+      requireBlockLabel labels tLabel
+      requireBlockLabel labels fLabel
       match env.preds[pred]? with
       | some .pred => pure (.cbr (.pred pred) tLabel fLabel)
       | some ty => throw (.typeMismatch .pred ty)
       | none => throw (.unknownPred pred)
   | .cbra pred true tLabel fLabel => do
+      requireBlockLabel labels tLabel
+      requireBlockLabel labels fLabel
       match env.preds[pred]? with
       | some .pred => pure (.cbr (.pred pred) fLabel tLabel)
       | some ty => throw (.typeMismatch .pred ty)
@@ -172,35 +293,102 @@ def lowerGInstrsChecked? (env : Typing.TypeEnv) (body : Array GInstr) :
     env := env'
   pure (out, env)
 
-def lowerBlockChecked? (env : Typing.TypeEnv) (block : Block) : LowerM (CLean.Block × Typing.TypeEnv) := do
+def lowerBlockChecked? (labels : Std.HashMap BlockLabel Unit) (env : Typing.TypeEnv)
+    (block : Block) : LowerM (CLean.Block × Typing.TypeEnv) := do
   let (body, env') <- lowerGInstrsChecked? env block.body
-  let term <- lowerTerminatorChecked? env' block.term
+  let term <- lowerTerminatorChecked? labels env' block.term
   pure ({ label := block.label, body := body, term := term }, env')
 
 def lowerBlocks (blocks : Array Block) : Std.HashMap BlockLabel CLean.Block :=
   blocks.foldl (fun out block => out.insert block.label (lowerBlock block)) {}
 
-def initialTypeEnv (kernel : Kernel) : Typing.TypeEnv :=
-  let env : Typing.TypeEnv := {}
+def alignUp (offset align : Nat) : Nat :=
+  if align = 0 then
+    offset
+  else
+    ((offset + align - 1) / align) * align
+
+def lowerParamsChecked? (params : Array ParamDecl) : LowerM (Array ParamInfo) := do
+  let mut out : Array ParamInfo := #[]
+  let mut offset : Nat := 0
+  for param in params do
+    let size <- match Typing.byteWidth? param.ty with
+      | some size => pure size
+      | none => throw (.unsupportedType param.ty)
+    let storageAlign := (Typing.alignment? param.ty).getD 1
+    let offset' := alignUp offset storageAlign
+    out := out.push {
+      name := param.name
+      ty := param.ty
+      isPtr := param.isPtr
+      ptrSpace? := param.ptrSpace?
+      align := param.align
+      offset := offset'
+      size := size
+    }
+    offset := offset' + size
+  pure out
+
+def paramInfoMap (params : Array ParamInfo) : Std.HashMap String ParamInfo :=
+  params.foldl (fun out info => out.insert info.name info) {}
+
+def lowerSharedsChecked? (shareds : Array SharedDecl) : LowerM (Array CLean.SharedDecl) := do
+  let mut out : Array CLean.SharedDecl := #[]
+  let mut offset : Nat := 0
+  for shared in shareds do
+    let elemSize <- match Typing.byteWidth? shared.ty with
+      | some size => pure size
+      | none => throw (.unsupportedType shared.ty)
+    let storageAlign := if shared.align = 0 then (Typing.alignment? shared.ty).getD 1 else shared.align
+    let offset' := alignUp offset storageAlign
+    let count := shared.count
+    let size := elemSize * count
+    out := out.push {
+      name := shared.name
+      size := size
+      align := storageAlign
+      offset := offset'
+    }
+    offset := offset' + size
+  pure out
+
+def sharedInfoMap (shareds : Array CLean.SharedDecl) : Std.HashMap String CLean.SharedDecl :=
+  shareds.foldl (fun out info => out.insert info.name info) {}
+
+def initialTypeEnv (kernel : Kernel) (params : Array ParamInfo := #[])
+    (shareds : Array CLean.SharedDecl := #[]) : Typing.TypeEnv :=
+  let env : Typing.TypeEnv := { params := paramInfoMap params, shareds := sharedInfoMap shareds }
   let env := kernel.regs.foldl (fun env decl => { env with regs := env.regs.insert decl.name decl.ty }) env
   kernel.preds.foldl (fun env decl => { env with preds := env.preds.insert decl.name .pred }) env
 
-def lowerBlocksChecked? (env : Typing.TypeEnv) (blocks : Array Block) :
+def lowerBlocksChecked? (labels : Std.HashMap BlockLabel Unit) (env : Typing.TypeEnv) (blocks : Array Block) :
     LowerM (Std.HashMap BlockLabel CLean.Block) := do
   let mut out : Std.HashMap BlockLabel CLean.Block := {}
   for block in blocks do
-    let (block', _) <- lowerBlockChecked? env block
+    let (block', _) <- lowerBlockChecked? labels env block
     out := out.insert block.label block'
   pure out
 
 def lowerKernelEnv (kernel : Kernel) : KernelEnv :=
   { entry := kernel.entry
     gridCtx := kernel.gridCtx
+    params := (lowerParamsChecked? kernel.params).toOption.getD #[]
+    sharedDecls := (lowerSharedsChecked? kernel.shareds).toOption.getD #[]
     blocks := lowerBlocks kernel.blocks }
 
 def lowerKernelEnvChecked? (kernel : Kernel) : LowerM KernelEnv := do
-  let blocks <- lowerBlocksChecked? (initialTypeEnv kernel) kernel.blocks
-  pure { entry := kernel.entry, gridCtx := kernel.gridCtx, blocks := blocks }
+  let labels := blockLabels kernel.blocks
+  requireBlockLabel labels kernel.entry
+  let params <- lowerParamsChecked? kernel.params
+  let shareds <- lowerSharedsChecked? kernel.shareds
+  let blocks <- lowerBlocksChecked? labels (initialTypeEnv kernel params shareds) kernel.blocks
+  pure {
+    entry := kernel.entry
+    gridCtx := kernel.gridCtx
+    params := params
+    sharedDecls := shareds
+    blocks := blocks
+  }
 
 def lowerKernelEnvCheckedD (kernel : Kernel) (default : KernelEnv := {}) : KernelEnv :=
   (lowerKernelEnvChecked? kernel).toOption.getD default
