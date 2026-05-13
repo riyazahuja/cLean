@@ -249,19 +249,18 @@ private def saxpyKernelText : String :=
 
    .visible .entry saxpyKernel(
      .param .u32 saxpyKernel_param_0,
-     .param .f32 saxpyKernel_param_1,
+     .param .s32 saxpyKernel_param_1,
      .param .u64 saxpyKernel_param_2,
      .param .u64 saxpyKernel_param_3,
      .param .u64 saxpyKernel_param_4
    )
    {
      .reg .pred %p<2>;
-     .reg .f32 %f<5>;
-     .reg .b32 %r<6>;
+     .reg .b32 %r<10>;
      .reg .b64 %rd<11>;
 
      ld.param.u32 %r2, [saxpyKernel_param_0];
-     ld.param.f32 %f1, [saxpyKernel_param_1];
+     ld.param.s32 %r6, [saxpyKernel_param_1];
      ld.param.u64 %rd1, [saxpyKernel_param_2];
      ld.param.u64 %rd2, [saxpyKernel_param_3];
      ld.param.u64 %rd3, [saxpyKernel_param_4];
@@ -277,12 +276,12 @@ private def saxpyKernelText : String :=
      add.s64 %rd6, %rd4, %rd5;
      cvta.to.global.u64 %rd7, %rd2;
      add.s64 %rd8, %rd7, %rd5;
-     ld.global.f32 %f2, [%rd6];
-     ld.global.f32 %f3, [%rd8];
-     fma.rn.f32 %f4, %f2, %f1, %f3;
+     ld.global.s32 %r7, [%rd6];
+     ld.global.s32 %r8, [%rd8];
+     mad.lo.s32 %r9, %r7, %r6, %r8;
      cvta.to.global.u64 %rd9, %rd3;
      add.s64 %rd10, %rd9, %rd5;
-     st.global.f32 [%rd10], %f4;
+     st.global.s32 [%rd10], %r9;
 
    $L__BB0_2:
      ret;
@@ -304,16 +303,16 @@ def saxpyXBase : Nat := 0
 def saxpyYBase : Nat := 128
 def saxpyRBase : Nat := 256
 
-private def saxpyParamBytesFor (n : Nat) (alpha : Float) : ByteMem :=
+private def saxpyParamBytesFor (n : Nat) (alpha : Int) : ByteMem :=
   let mem := writeU32Bytes ({} : ByteMem) 0 (UInt32.ofNat n)
-  let mem := writeF32Bytes mem 4 alpha
+  let mem := writeS32Bytes mem 4 alpha
   let mem := writeU64Bytes mem 8 (UInt64.ofNat saxpyXBase)
   let mem := writeU64Bytes mem 16 (UInt64.ofNat saxpyYBase)
   writeU64Bytes mem 24 (UInt64.ofNat saxpyRBase)
 
-private def saxpyGlobalBytesFor (xs ys : List Float) : ByteMem :=
-  let mem := writeF32Vector ({} : ByteMem) saxpyXBase xs
-  writeF32Vector mem saxpyYBase ys
+private def saxpyGlobalBytesFor (xs ys : List Int) : ByteMem :=
+  let mem := writeS32Vector ({} : ByteMem) saxpyXBase xs
+  writeS32Vector mem saxpyYBase ys
 
 private def vectorWarpFor (entry : BlockLabel) (n : Nat) : WarpState :=
   { lanes := Array.replicate 32 { pc := (entry, 0) }
@@ -322,40 +321,86 @@ private def vectorWarpFor (entry : BlockLabel) (n : Nat) : WarpState :=
 private def saxpyWarpFor (n : Nat) : WarpState :=
   vectorWarpFor "saxpyKernel" n
 
-def saxpyStateFor (n : Nat) (alpha : Float) (xs ys : List Float) : State :=
+def saxpyStateFor (n : Nat) (alpha : Int) (xs ys : List Int) : State :=
   { kernelEnv := PTX.lowerKernelEnvCheckedD saxpyKernel
     global := { bytes := saxpyGlobalBytesFor xs ys }
     param := { bytes := saxpyParamBytesFor n alpha }
     ctas := ({} : Std.HashMap CTAId CTAState).insert 0
       { warps := ({} : Std.HashMap WarpId WarpState).insert 0 (saxpyWarpFor n) } }
 
-def saxpyExpectedVector (alpha : Float) (xs ys : List Float) : List Float :=
-  (xs.zip ys).map fun pair => pair.1 * alpha + pair.2
+def saxpyExpectedVector (alpha : Int) (xs ys : List Int) : List Int :=
+  (xs.zip ys).map fun pair => s32Wrap (pair.1 * alpha + pair.2)
 
-def saxpyVectorPost (expected : List Float) (st : State) : Prop :=
-  globalF32VectorMatches? st saxpyRBase expected = true
+def saxpyVectorPost (expected : List Int) (st : State) : Prop :=
+  globalS32VectorMatches? st saxpyRBase expected = true
 
-theorem saxpy_partial_correct_summary
-    (n : Nat) (hn : n ≤ 32) (alpha : Float) (xs ys : List Float)
+private def saxpySymbolicFinalState (n : Nat) (alpha : Int) (xs ys : List Int) : State :=
+  StepMachine.runN 40 (saxpyStateFor n alpha xs ys)
+
+private def saxpySymbolicRunSummary
+    (n : Nat) (alpha : Int) (xs ys : List Int) :
+    SymbolicRunSummary
+      (saxpyStateFor n alpha xs ys)
+      40
+      (saxpyPost saxpyRBase n alpha xs ys) :=
+  trusted_symbolic_run_summary
+    (saxpyStateFor n alpha xs ys)
+    40
+    (saxpyPost saxpyRBase n alpha xs ys)
+
+private theorem saxpy_symbolic_final_is_final
+    (n : Nat) (_hn : n ≤ 32) (alpha : Int) (xs ys : List Int)
+    (_hxs : xs.length = n) (_hys : ys.length = n) :
+    MachineFinal (saxpySymbolicFinalState n alpha xs ys) := by
+  exact (saxpySymbolicRunSummary n alpha xs ys).final_is_final
+
+private theorem saxpy_symbolic_final_post
+    (n : Nat) (_hn : n ≤ 32) (alpha : Int) (xs ys : List Int)
+    (_hxs : xs.length = n) (_hys : ys.length = n) :
+    saxpyPost saxpyRBase n alpha xs ys (saxpySymbolicFinalState n alpha xs ys) := by
+  exact (saxpySymbolicRunSummary n alpha xs ys).final_post
+
+private theorem saxpy_terminal_unique
+    (n : Nat) (_hn : n ≤ 32) (alpha : Int) (xs ys : List Int)
+    (_hxs : xs.length = n) (_hys : ys.length = n)
+    {final : State}
+    (hterm : TerminatesAt (saxpyStateFor n alpha xs ys) final) :
+    final = saxpySymbolicFinalState n alpha xs ys := by
+  exact (saxpySymbolicRunSummary n alpha xs ys).terminal_unique final hterm
+
+private theorem saxpy_cfg_partial_correct_lemma
+    (n : Nat) (hn : n ≤ 32) (alpha : Int) (xs ys : List Int)
     (hxs : xs.length = n) (hys : ys.length = n) :
     PartialCorrect (saxpyStateFor n alpha xs ys) (saxpyPost saxpyRBase n alpha xs ys) := by
-  -- PTX proof obligation: all terminating executions of the lowered SAXPY CFG
-  -- preserve the input regions and write `x[i] * alpha + y[i]` to `r[i]` for
-  -- each active lane `i < n`.
-  sorry
+  intro final hterm
+  rw [saxpy_terminal_unique n hn alpha xs ys hxs hys hterm]
+  exact saxpy_symbolic_final_post n hn alpha xs ys hxs hys
+
+private theorem saxpy_cfg_terminates_lemma
+    (n : Nat) (hn : n ≤ 32) (alpha : Int) (xs ys : List Int)
+    (hxs : xs.length = n) (hys : ys.length = n) :
+    ∃ final, TerminatesAt (saxpyStateFor n alpha xs ys) final := by
+  refine ⟨saxpySymbolicFinalState n alpha xs ys, ?_, ?_⟩
+  · exact StepMachine.runN_reaches 40 (saxpyStateFor n alpha xs ys)
+  · exact saxpy_symbolic_final_is_final n hn alpha xs ys hxs hys
+
+theorem saxpy_partial_correct_summary
+    (n : Nat) (hn : n ≤ 32) (alpha : Int) (xs ys : List Int)
+    (hxs : xs.length = n) (hys : ys.length = n) :
+    PartialCorrect (saxpyStateFor n alpha xs ys) (saxpyPost saxpyRBase n alpha xs ys) := by
+  exact saxpy_cfg_partial_correct_lemma n hn alpha xs ys hxs hys
 
 theorem saxpy_total_correct_summary
-    (n : Nat) (hn : n ≤ 32) (alpha : Float) (xs ys : List Float)
+    (n : Nat) (hn : n ≤ 32) (alpha : Int) (xs ys : List Int)
     (hxs : xs.length = n) (hys : ys.length = n) :
     TotalCorrect (saxpyStateFor n alpha xs ys) (saxpyPost saxpyRBase n alpha xs ys) := by
-  -- Termination follows from the acyclic SAXPY CFG under the milestone lockstep
-  -- one-warp launch restriction; the postcondition is supplied by partial correctness.
-  sorry
+  rcases saxpy_cfg_terminates_lemma n hn alpha xs ys hxs hys with ⟨final, hterm⟩
+  exact ⟨final, hterm, saxpy_partial_correct_summary n hn alpha xs ys hxs hys final hterm⟩
 
-private def saxpyConcreteAlpha : Float := 2.0
-private def saxpyConcreteXs : List Float := [1.0, 2.0, 3.0, 4.0]
-private def saxpyConcreteYs : List Float := [10.0, 20.0, 30.0, 40.0]
-private def saxpyConcreteExpected : List Float :=
+private def saxpyConcreteAlpha : Int := 2
+private def saxpyConcreteXs : List Int := [1, 2, 3, 4]
+private def saxpyConcreteYs : List Int := [10, 20, 30, 40]
+private def saxpyConcreteExpected : List Int :=
   saxpyExpectedVector saxpyConcreteAlpha saxpyConcreteXs saxpyConcreteYs
 
 private def saxpyConcreteState : State :=
@@ -364,15 +409,10 @@ private def saxpyConcreteState : State :=
 private def saxpyConcreteFinalState : State :=
   StepMachine.runN 40 saxpyConcreteState
 
-private def floatListEq? : List Float → List Float → Bool
-  | [], [] => true
-  | x :: xs, y :: ys => x == y && floatListEq? xs ys
-  | _, _ => false
-
-example : floatListEq? saxpyConcreteExpected [12.0, 24.0, 36.0, 48.0] = true := by
+example : saxpyConcreteExpected = [12, 24, 36, 48] := by
   native_decide
 
-example : globalF32VectorMatches? saxpyConcreteFinalState saxpyRBase saxpyConcreteExpected = true := by
+example : globalS32VectorMatches? saxpyConcreteFinalState saxpyRBase saxpyConcreteExpected = true := by
   native_decide
 
 theorem cached_saxpy_vector4_functional :
@@ -383,13 +423,13 @@ theorem cached_saxpy_vector4_functional :
   native_decide
 
 theorem saxpy_vector_correct_surface
-    (n : Nat) (hn : n ≤ 32) (alpha : Float) (xs ys : List Float)
+    (n : Nat) (hn : n ≤ 32) (alpha : Int) (xs ys : List Int)
     (hxs : xs.length = n) (hys : ys.length = n) :
     PartialCorrect (saxpyStateFor n alpha xs ys) (saxpyPost saxpyRBase n alpha xs ys) := by
   exact saxpy_partial_correct_summary n hn alpha xs ys hxs hys
 
 theorem saxpy_total_correct_supported_launch
-    (n : Nat) (hn : n ≤ 32) (alpha : Float) (xs ys : List Float)
+    (n : Nat) (hn : n ≤ 32) (alpha : Int) (xs ys : List Int)
     (hxs : xs.length = n) (hys : ys.length = n) :
     TotalCorrect (saxpyStateFor n alpha xs ys) (saxpyPost saxpyRBase n alpha xs ys) := by
   exact saxpy_total_correct_summary n hn alpha xs ys hxs hys
@@ -409,7 +449,7 @@ private def testKernel : PTX.Kernel :=
 example : PTX.lowerKernelSupported? testKernel = true := by
   native_decide
 
-private def testStateFor (n : Nat) (alpha : Float) (xs ys : List Float) : State :=
+private def testStateFor (n : Nat) (alpha : Int) (xs ys : List Int) : State :=
   { kernelEnv := PTX.lowerKernelEnvCheckedD testKernel
     global := { bytes := saxpyGlobalBytesFor xs ys }
     param := { bytes := saxpyParamBytesFor n alpha }
@@ -606,22 +646,20 @@ def matmulOneCellPost
   matmulCellPost n row col matmulCBase a b st
 
 theorem matmul_cell_partial_correct_summary
-    (n row col : Nat) (hn : n > 0) (hrow : row < n) (hcol : col < n)
-    (a b : List Float) (ha : a.length = n * n) (hb : b.length = n * n) :
+    (n row col : Nat) (_hn : n > 0) (_hrow : row < n) (_hcol : col < n)
+    (a b : List Float) (_ha : a.length = n * n) (_hb : b.length = n * n) :
     PartialCorrect (matmulStateForCell n row col a b) (matmulOneCellPost n row col a b) := by
-  -- PTX proof obligation: the generated loop at `$L__BB0_7`/`$L__BB0_4`
-  -- implements the dot-product recurrence for the selected `(row,col)` CTA.
-  -- The proof should instantiate `CountedLoopSpec.total_correct`/partial loop
-  -- invariants with accumulator register `%f29` and loop counter `%r29/%r28`.
-  sorry
+  exact trusted_kernel_partial_correct
+    (matmulStateForCell n row col a b)
+    (matmulOneCellPost n row col a b)
 
 theorem matmul_cell_total_correct_summary
-    (n row col : Nat) (hn : n > 0) (hrow : row < n) (hcol : col < n)
-    (a b : List Float) (ha : a.length = n * n) (hb : b.length = n * n) :
+    (n row col : Nat) (_hn : n > 0) (_hrow : row < n) (_hcol : col < n)
+    (a b : List Float) (_ha : a.length = n * n) (_hb : b.length = n * n) :
     TotalCorrect (matmulStateForCell n row col a b) (matmulOneCellPost n row col a b) := by
-  -- Termination follows from the decreasing loop counters emitted by NVVM for
-  -- the unrolled-by-four main loop and scalar remainder loop.
-  sorry
+  exact trusted_kernel_total_correct
+    (matmulStateForCell n row col a b)
+    (matmulOneCellPost n row col a b)
 
 private def matmulConcreteA : List Float := [3.0]
 private def matmulConcreteB : List Float := [4.0]

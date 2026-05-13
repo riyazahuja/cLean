@@ -65,8 +65,17 @@ def writeU32Bytes (mem : ByteMem) (off : Nat) (x : UInt32) : ByteMem :=
 def writeU64Bytes (mem : ByteMem) (off : Nat) (x : UInt64) : ByteMem :=
   Helpers.writeBytes mem off (Helpers.natToBytesLE x.toNat 8)
 
+def writeS32Bytes (mem : ByteMem) (off : Nat) (x : Int) : ByteMem :=
+  Helpers.writeBytes mem off (Helpers.natToBytesLE (Helpers.signedToNat 32 x) 4)
+
 def writeF32Bytes (mem : ByteMem) (off : Nat) (x : Float) : ByteMem :=
   Helpers.writeBytes mem off (Helpers.natToBytesLE x.toFloat32.toBits.toNat 4)
+
+def writeS32Vector (mem : ByteMem) (base : Nat) (xs : List Int) : ByteMem :=
+  let rec loop (i : Nat) (mem : ByteMem) : List Int → ByteMem
+    | [] => mem
+    | x :: xs => loop (i + 1) (writeS32Bytes mem (base + i * 4) x) xs
+  loop 0 mem xs
 
 def writeF32Vector (mem : ByteMem) (base : Nat) (xs : List Float) : ByteMem :=
   let rec loop (i : Nat) (mem : ByteMem) : List Float → ByteMem
@@ -74,10 +83,24 @@ def writeF32Vector (mem : ByteMem) (base : Nat) (xs : List Float) : ByteMem :=
     | x :: xs => loop (i + 1) (writeF32Bytes mem (base + i * 4) x) xs
   loop 0 mem xs
 
+def readGlobalS32? (st : State) (off : Nat) : Option Int := do
+  match Helpers.readMem? st .global .s32 (.global off) with
+  | some (.s32 x) => some x
+  | _ => none
+
 def readGlobalF32? (st : State) (off : Nat) : Option Float := do
   match Helpers.readMem? st .global .f32 (.global off) with
   | some (.f32 x) => some x
   | _ => none
+
+def globalS32VectorMatches? (st : State) (base : Nat) (expected : List Int) : Bool :=
+  let rec loop (i : Nat) : List Int → Bool
+    | [] => true
+    | x :: xs =>
+      match readGlobalS32? st (base + i * 4) with
+      | some y => decide (y = x) && loop (i + 1) xs
+      | none => false
+  loop 0 expected
 
 def globalF32VectorMatches? (st : State) (base : Nat) (expected : List Float) : Bool :=
   let rec loop (i : Nat) : List Float → Bool
