@@ -33,28 +33,28 @@ structure SymbolicRunSummary (init : State) (fuel : Nat) (post : State → Prop)
   terminal_unique :
     ∀ final, TerminatesAt init final → final = StepMachine.runN fuel init
 
-/-- Temporary trusted bridge for generated-CFG symbolic execution summaries.
-This keeps kernel example theorem statements honest while localizing the current
-proof debt to the proof layer instead of the example file. -/
-theorem trusted_symbolic_run_summary
-    (init : State) (fuel : Nat) (post : State → Prop) :
-    SymbolicRunSummary init fuel post := by
-  sorry
+-- The three blanket `trusted_*` lemmas (universally quantified `sorry`s that
+-- could derive `post = (fun _ => False)`) were removed in the proof-surface
+-- refactor. They are replaced by the named single-warp determinism /
+-- frame / lane-decomposition layers, plus one scheduler-independence axiom
+-- declared below.
 
-/-- Temporary trusted bridge for loop-heavy kernels whose correctness proof is
-not yet connected to executable `runN` fuel. This is intended to be replaced by
-kernel-specific loop invariants using `CountedLoopSpec`. -/
-theorem trusted_kernel_partial_correct
-    (init : State) (post : State → Prop) :
-    PartialCorrect init post := by
-  sorry
+/-! ### Per-CTA decomposition (logical, not load-bearing)
 
-/-- Temporary trusted bridge for loop-heavy kernel termination. This is intended
-to be replaced by decreasing-variant loop proofs. -/
-theorem trusted_kernel_total_correct
-    (init : State) (post : State → Prop) :
-    TotalCorrect init post := by
-  sorry
+This lemma packages the `∀`-distribution that lets a multi-CTA postcondition
+be proved by exhibiting it on each CTA's per-CTA postcondition and a combiner.
+It is **not** an axiom and **does no work toward scheduler independence** —
+all of that content lives in whatever proof discharges `hperCTA` for a
+particular kernel. It is kept only as an ergonomic API: callers state a
+per-CTA postcondition and a combine rule and avoid hand-rolling the
+`fun final hterm => …` shape. -/
+theorem cta_scheduler_independence
+    (init : State) (post : State → Prop)
+    (perCTAPost : CTAId → State → Prop)
+    (hcombine : ∀ final, (∀ cta, perCTAPost cta final) → post final)
+    (hperCTA : ∀ cta, PartialCorrect init (perCTAPost cta)) :
+    PartialCorrect init post :=
+  fun final hterm => hcombine final (fun cta => hperCTA cta final hterm)
 
 theorem TotalCorrect.partial {init : State} {post : State → Prop}
     (h : TotalCorrect init post) :
@@ -81,6 +81,35 @@ theorem post_of_final_invariant {P post : State → Prop} {st st' : State}
     (hinit : P st) :
     post st' :=
   hexit st' hfinal (preserves hstep hreach hinit)
+
+/-- One-step `step?` ⇒ one-step `Reaches`. -/
+theorem step?_to_reaches {st st' : State}
+    (h : StepMachine.step? st = some st') :
+    Reaches st st' :=
+  Reaches.step (StepMachine.step?_sound h) Reaches.refl
+
+/-- `runN` produces a `Reaches` trace. Already proven in `Execution.lean` as
+`runN_reaches`; re-exported here for convenience under the loop API namespace. -/
+theorem runN_reaches' (fuel : Nat) (st : State) :
+    Reaches st (StepMachine.runN fuel st) :=
+  StepMachine.runN_reaches fuel st
+
+/-- Big-step "n executable steps" reachability. The fuel-conditioned hypothesis
+is currently unused (`runN_reaches` works for any fuel) but is the natural
+shape callers will have when they've checked `step?` returns `some _` for
+each step of a loop body. -/
+theorem reaches_runN_step {fuel : Nat} {st : State}
+    (_h : ∀ k < fuel, (StepMachine.step? (StepMachine.runN k st)).isSome = true) :
+    Reaches st (StepMachine.runN fuel st) :=
+  StepMachine.runN_reaches fuel st
+
+/-- Reachability chains compose. If `Reaches a b` and `Reaches b c`, then
+`Reaches a c`. This is already `Reaches.trans` in `Semantics/Execution.lean`;
+re-stated here as the canonical composition primitive for CFG-segment chaining. -/
+theorem Reaches.compose {st₀ st₁ st₂ : State}
+    (h01 : Reaches st₀ st₁) (h12 : Reaches st₁ st₂) :
+    Reaches st₀ st₂ :=
+  h01.trans h12
 
 end Reaches
 
@@ -143,9 +172,66 @@ theorem total_correct {σ : Type u} (spec : CountedLoopSpec σ)
       spec.variant s' < spec.variant s)
     (hexit : ∀ s : σ, spec.Exited s → spec.post s) :
     ∃ final, RelReaches spec.body init final ∧ spec.post final := by
-  sorry
+  -- Strong induction on the variant (a Nat) at the current state.
+  suffices h : ∀ n : Nat, ∀ s : σ, spec.inv s → spec.variant s = n →
+      ∃ final, RelReaches spec.body s final ∧ spec.post final by
+    exact h (spec.variant init) init hinit rfl
+  intro n
+  induction n using Nat.strong_induction_on with
+  | _ n ih =>
+      intro s hinvS hvarS
+      by_cases hg : spec.guard s
+      · -- Take a body step, decrease variant, recurse.
+        obtain ⟨s', hStep⟩ := hbody s hinvS hg
+        have hinv' : spec.inv s' := hpres hStep hinvS
+        have hdec' : spec.variant s' < spec.variant s := hdec hStep hinvS hg
+        rw [hvarS] at hdec'
+        obtain ⟨final, hReach', hPost'⟩ := ih (spec.variant s') hdec' s' hinv' rfl
+        exact ⟨final, RelReaches.step hStep hReach', hPost'⟩
+      · -- Exit: not guard, invariant holds → post by hexit.
+        exact ⟨s, RelReaches.refl, hexit s ⟨hinvS, hg⟩⟩
 
 end CountedLoopSpec
+
+/-! ## Machine-state loop bridges
+
+Helpers for instantiating `CountedLoopSpec` against `StepMachine`-level
+reachability. The intended workflow for a kernel's inner loop:
+
+1. Define `inv : State → Prop`, `guard : State → Prop`, `variant : State → Nat`
+   tied to the kernel's loop header register file (e.g., for matmul:
+   `inv` says the accumulator equals the partial dot product and the
+   loop counter is correctly decremented, `guard` says the counter is
+   nonzero, `variant` is the counter value).
+2. Define `body : State → State → Prop` as
+   `fun s s' => SingleWarpRunnable s ∧ ∃ fuel, runN fuel s = s' ∧ inv s'` or
+   similar — a witnessed multi-step transition that lands back at the loop
+   header.
+3. Discharge `body s s' → inv s → inv s'` (invariant preservation) and
+   `Exited s → post s` (exit condition).
+4. Apply `CountedLoopSpec.partial_correct`.
+
+The bridge below packages "any multi-step machine trace satisfies the body
+relation" so that `CountedLoopSpec.body` can be defined in terms of
+`Reaches`. -/
+
+/-- A `Reaches`-witnessed loop body relation factory. -/
+def reachesBody (predicate : State → State → Prop) : State → State → Prop :=
+  fun s s' => Reaches s s' ∧ predicate s s'
+
+theorem reachesBody.fromReaches {predicate : State → State → Prop}
+    {s s' : State} (hr : Reaches s s') (hp : predicate s s') :
+    reachesBody predicate s s' :=
+  ⟨hr, hp⟩
+
+/-- A relReaches chain over `reachesBody _` lifts to a single `Reaches`. -/
+theorem RelReaches.reachesBody_to_reaches {predicate : State → State → Prop}
+    {init final : State}
+    (h : RelReaches (reachesBody predicate) init final) :
+    Reaches init final := by
+  induction h with
+  | refl => exact Reaches.refl
+  | step hs _ ih => exact hs.1.trans ih
 
 def globalF32At? (st : State) (base index : Nat) : Option Float := do
   match Helpers.readMem? st .global .f32 (.global (base + index * 4)) with

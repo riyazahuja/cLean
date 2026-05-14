@@ -1,4 +1,4 @@
--- import Mathlib.Tactic
+import Mathlib.Tactic
 import Std.Data.HashMap.Lemmas
 import CLean.Semantics.SmallStep
 
@@ -250,15 +250,40 @@ theorem decode_encode_u64 (x : UInt64) :
   simp [Helpers.encodeScalar?, Helpers.decodeScalar?, bytesToNatLE_natToBytesLE_8, UInt64.ofNat_toNat,
     Nat.mod_eq_of_lt x.toNat_lt_size]
 
+theorem signedToNat_lt (bits : Nat) (_hb : 0 < bits) (x : Int) :
+    Helpers.signedToNat bits x < 2 ^ bits := by
+  unfold Helpers.signedToNat
+  simp only
+  have hmod_pos_nat : 0 < 2 ^ bits := Nat.two_pow_pos bits
+  have hmod_pos : (0 : Int) < Int.ofNat (2 ^ bits) := Int.ofNat_pos.mpr hmod_pos_nat
+  have hub : x % (Int.ofNat (2 ^ bits)) < Int.ofNat (2 ^ bits) :=
+    Int.emod_lt_of_pos x hmod_pos
+  have hlb : 0 ≤ x % (Int.ofNat (2 ^ bits)) :=
+    Int.emod_nonneg x (Int.ne_of_gt hmod_pos)
+  have : (x % Int.ofNat (2 ^ bits)).toNat < (Int.ofNat (2 ^ bits)).toNat := by
+    rw [Int.toNat_lt hlb]
+    exact hub
+  simpa using this
+
 theorem decode_encode_s32 (x : Int) :
     Helpers.decodeScalar? .s32 (Option.get! (Helpers.encodeScalar? .s32 (.s32 x))) =
       some (.s32 (Helpers.natToSigned 32 (Helpers.signedToNat 32 x))) := by
-  sorry
+  have hLt : Helpers.signedToNat 32 x < 2 ^ 32 := signedToNat_lt 32 (by decide) x
+  have hLt' : Helpers.signedToNat 32 x < 4294967296 := by
+    have : (2 : Nat) ^ 32 = 4294967296 := by decide
+    omega
+  simp [Helpers.encodeScalar?, Helpers.decodeScalar?, bytesToNatLE_natToBytesLE_4,
+    Nat.mod_eq_of_lt hLt']
 
 theorem decode_encode_s64 (x : Int) :
     Helpers.decodeScalar? .s64 (Option.get! (Helpers.encodeScalar? .s64 (.s64 x))) =
       some (.s64 (Helpers.natToSigned 64 (Helpers.signedToNat 64 x))) := by
-  sorry
+  have hLt : Helpers.signedToNat 64 x < 2 ^ 64 := signedToNat_lt 64 (by decide) x
+  have hLt' : Helpers.signedToNat 64 x < 18446744073709551616 := by
+    have : (2 : Nat) ^ 64 = 18446744073709551616 := by decide
+    omega
+  simp [Helpers.encodeScalar?, Helpers.decodeScalar?, bytesToNatLE_natToBytesLE_8,
+    Nat.mod_eq_of_lt hLt']
 
 theorem decode_encode_f16 (bits : UInt16) :
     Helpers.decodeScalar? .f16 (Option.get! (Helpers.encodeScalar? .f16 (.f16 bits))) = some (.f16 bits) := by
@@ -270,47 +295,197 @@ theorem decode_encode_bf16 (bits : UInt16) :
   simp [Helpers.encodeScalar?, Helpers.decodeScalar?, bytesToNatLE_natToBytesLE_2, UInt16.ofNat_toNat,
     Nat.mod_eq_of_lt bits.toNat_lt_size]
 
+/-! ### writeBytes / readBytes characterization helpers -/
+
+/-- `writeBytes.loop` with an offset shift: starting at index `i` from base `offset`
+is equivalent to starting at index `0` from base `offset + i`. -/
+theorem writeBytes_loop_shift
+    (offset i : Nat) (acc : ByteMem) (bs : List Byte) :
+    Helpers.writeBytes.loop offset i acc bs =
+      Helpers.writeBytes.loop (offset + i) 0 acc bs := by
+  induction bs generalizing offset i acc with
+  | nil => simp [Helpers.writeBytes.loop]
+  | cons b rest ih =>
+      simp only [Helpers.writeBytes.loop]
+      rw [ih, ih (offset + i) 1 (acc.insert (offset + i + 0) b)]
+      ring_nf
+
+/-- `writeBytes` unfolded over a `cons` argument. -/
+theorem writeBytes_cons (mem : ByteMem) (offset : Nat) (b : Byte) (rest : List Byte) :
+    Helpers.writeBytes mem offset (b :: rest) =
+      Helpers.writeBytes (mem.insert offset b) (offset + 1) rest := by
+  show Helpers.writeBytes.loop offset 0 mem (b :: rest) =
+       Helpers.writeBytes.loop (offset + 1) 0 (mem.insert offset b) rest
+  simp only [Helpers.writeBytes.loop]
+  rw [writeBytes_loop_shift]
+  ring_nf
+
+/-- Lookup in `writeBytes` outside the written range is unchanged. -/
+theorem writeBytes_outside_range
+    (mem : ByteMem) (offset : Nat) (bs : List Byte) (k : Nat)
+    (h : k < offset ∨ k ≥ offset + bs.length) :
+    (Helpers.writeBytes mem offset bs)[k]? = mem[k]? := by
+  induction bs generalizing mem offset with
+  | nil => simp [Helpers.writeBytes, Helpers.writeBytes.loop]
+  | cons b rest ih =>
+      rw [writeBytes_cons]
+      have hk : k ≠ offset := by
+        rcases h with hLt | hGe
+        · exact Nat.ne_of_lt hLt
+        · intro heq
+          subst heq
+          simp [List.length] at hGe
+      have hRecur : k < offset + 1 ∨ k ≥ (offset + 1) + rest.length := by
+        rcases h with hLt | hGe
+        · left; omega
+        · right; simp [List.length] at hGe; omega
+      rw [ih (mem.insert offset b) (offset + 1) hRecur]
+      rw [Std.HashMap.getElem?_insert]
+      simp [beq_iff_eq, hk, Ne.symm hk]
+
+/-- Lookup in `writeBytes` inside the written range returns the corresponding byte. -/
+theorem writeBytes_getElem_in_range
+    (mem : ByteMem) (offset : Nat) (bs : List Byte) (j : Nat) (h : j < bs.length) :
+    (Helpers.writeBytes mem offset bs)[offset + j]? = bs[j]? := by
+  induction bs generalizing mem offset j with
+  | nil => simp at h
+  | cons b rest ih =>
+      rw [writeBytes_cons]
+      rcases j with _ | j'
+      · simp only [Nat.add_zero]
+        rw [writeBytes_outside_range _ (offset + 1) rest offset (Or.inl (Nat.lt_succ_self _))]
+        simp [Std.HashMap.getElem?_insert]
+      · have hLen : j' < rest.length := by
+          simpa [List.length] using Nat.lt_of_succ_lt_succ h
+        have hRec := ih (mem.insert offset b) (offset + 1) j' hLen
+        have hOff : offset + (j' + 1) = (offset + 1) + j' := by ring
+        rw [hOff, hRec]
+        simp
+
+/-- `bs.take (i+1) = bs.take i ++ [bs[i]]` when `i < bs.length`. -/
+theorem List.take_succ_split {α : Type*} (bs : List α) (i : Nat) (h : i < bs.length) :
+    bs.take (i+1) = bs.take i ++ [bs[i]] := by
+  induction bs generalizing i with
+  | nil => simp at h
+  | cons b rest ih =>
+      cases i with
+      | zero => simp
+      | succ j =>
+          have hj : j < rest.length := by
+            simpa [List.length_cons] using Nat.lt_of_succ_lt_succ h
+          have hrec := ih j hj
+          show b :: rest.take (j+1) = (b :: rest.take j) ++ [rest[j]]
+          rw [hrec]
+          rfl
+
+/-- The readBytes? loop, characterized over a partial accumulator. -/
+theorem readBytes?_loop_eq
+    (mem : ByteMem) (offset width : Nat) (bs : List Byte)
+    (hMem : ∀ i, i < width → mem[offset + i]? = bs[i]?)
+    (hLen : bs.length = width)
+    (i : Nat) (acc : List Byte) (hI : i ≤ width)
+    (hAcc : acc = (bs.take i).reverse) :
+    Helpers.readBytes?.loop mem offset width i acc = some bs := by
+  by_cases hlt : i < width
+  · have hbsi : i < bs.length := by omega
+    unfold Helpers.readBytes?.loop
+    simp only [hlt, ↓reduceIte]
+    rw [hMem i hlt, List.getElem?_eq_getElem hbsi]
+    have hSplit : bs.take (i+1) = bs.take i ++ [bs[i]] :=
+      CLean.List.take_succ_split bs i hbsi
+    have hAcc' : bs[i] :: acc = (bs.take (i+1)).reverse := by
+      rw [hSplit, List.reverse_append, hAcc]
+      simp
+    have hRec := readBytes?_loop_eq mem offset width bs hMem hLen (i+1) (bs[i] :: acc)
+      (by omega) hAcc'
+    exact hRec
+  · have hEq : i = width := by omega
+    unfold Helpers.readBytes?.loop
+    simp only [hlt, ↓reduceIte]
+    rw [hAcc]
+    have hlen' : i = bs.length := by omega
+    rw [hlen', List.take_length, List.reverse_reverse]
+termination_by width - i
+decreasing_by
+  simp_wf
+  omega
+
 theorem readBytes?_writeBytes_same (mem : ByteMem) (offset : Nat) (bs : List Byte) :
     Helpers.readBytes? (Helpers.writeBytes mem offset bs) offset bs.length = some bs := by
-  induction bs generalizing mem offset with
-  | nil =>
-      simp [Helpers.readBytes?, Helpers.writeBytes, readBytes?.loop, writeBytes.loop]
-  | cons b bs ih =>
-      simp [Helpers.readBytes?, Helpers.writeBytes]
-      sorry
+  unfold Helpers.readBytes?
+  apply readBytes?_loop_eq
+  · intro i hi
+    rw [writeBytes_getElem_in_range mem offset bs i hi, List.getElem?_eq_getElem hi]
+  · rfl
+  · exact Nat.zero_le _
+  · simp
 
+
+/-- Helper: typed-access preconditions hold for `.global .u32 (.global offset)`
+when `offset % 4 = 0`. -/
+private theorem typedAccessPre_global_u32 (offset : Nat) (halign : offset % 4 = 0) :
+    Typing.typedAccessPreconditions? .global .u32 (.global offset) = true := by
+  simp [Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?,
+    Typing.byteWidth?, Typing.aligned?, Typing.alignment?, Typing.addrSpaceMatches?,
+    Addr.space, Addr.offset, halign]
+
+private theorem typedAccessPre_global_u64 (offset : Nat) (halign : offset % 8 = 0) :
+    Typing.typedAccessPreconditions? .global .u64 (.global offset) = true := by
+  simp [Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?,
+    Typing.byteWidth?, Typing.aligned?, Typing.alignment?, Typing.addrSpaceMatches?,
+    Addr.space, Addr.offset, halign]
+
+private theorem typedAccessPre_global_s32 (offset : Nat) (halign : offset % 4 = 0) :
+    Typing.typedAccessPreconditions? .global .s32 (.global offset) = true := by
+  simp [Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?,
+    Typing.byteWidth?, Typing.aligned?, Typing.alignment?, Typing.addrSpaceMatches?,
+    Addr.space, Addr.offset, halign]
+
+private theorem typedAccessPre_global_s64 (offset : Nat) (halign : offset % 8 = 0) :
+    Typing.typedAccessPreconditions? .global .s64 (.global offset) = true := by
+  simp [Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?,
+    Typing.byteWidth?, Typing.aligned?, Typing.alignment?, Typing.addrSpaceMatches?,
+    Addr.space, Addr.offset, halign]
 
 theorem readMem_writeMem_same_global_u32
     (st st' : State) (offset : Nat) (x : UInt32)
     (halign : offset % 4 = 0)
     (hwrite : Helpers.writeMem? st .global .u32 (.global offset) (.u32 x) = some st') :
     Helpers.readMem? st' .global .u32 (.global offset) = some (.u32 x) := by
+  have hPre := typedAccessPre_global_u32 offset halign
   have hst' : st' = { st with global := { bytes := Helpers.writeBytes st.global.bytes offset (Helpers.natToBytesLE x.toNat 4) } } := by
-    simp [Helpers.writeMem?, Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?, Typing.byteWidth?,
-      Typing.aligned?, Typing.addrSpaceMatches?, Helpers.encodeScalar?, halign] at hwrite
-    -- simpa using hwrite.symm
-    sorry
+    simp [Helpers.writeMem?, hPre, Typing.byteWidth?, Helpers.encodeScalar?,
+      Helpers.getSpaceBaseMem?, Helpers.setSpaceBaseMem?] at hwrite
+    exact hwrite.symm
   subst st'
-  simp [Helpers.readMem?, Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?, Typing.byteWidth?,
-    Typing.aligned?, Typing.addrSpaceMatches?, halign, readBytes?_writeBytes_same, Helpers.decodeScalar?,
-    natToBytesLE_length, bytesToNatLE_natToBytesLE_4, UInt32.ofNat_toNat, Nat.mod_eq_of_lt x.toNat_lt_size]
-  sorry
+  have hLen : (Helpers.natToBytesLE x.toNat 4).length = 4 := natToBytesLE_length _ _
+  have hRead := readBytes?_writeBytes_same st.global.bytes offset
+    (Helpers.natToBytesLE x.toNat 4)
+  rw [hLen] at hRead
+  simp [Helpers.readMem?, hPre, Typing.byteWidth?, Helpers.getSpaceBaseMem?,
+    Addr.offset, hRead, Helpers.decodeScalar?,
+    bytesToNatLE_natToBytesLE_4, UInt32.ofNat_toNat,
+    Nat.mod_eq_of_lt x.toNat_lt_size]
 
 theorem readMem_writeMem_same_global_u64
     (st st' : State) (offset : Nat) (x : UInt64)
     (halign : offset % 8 = 0)
     (hwrite : Helpers.writeMem? st .global .u64 (.global offset) (.u64 x) = some st') :
     Helpers.readMem? st' .global .u64 (.global offset) = some (.u64 x) := by
+  have hPre := typedAccessPre_global_u64 offset halign
   have hst' : st' = { st with global := { bytes := Helpers.writeBytes st.global.bytes offset (Helpers.natToBytesLE x.toNat 8) } } := by
-    simp [Helpers.writeMem?, Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?, Typing.byteWidth?,
-      Typing.aligned?, Typing.addrSpaceMatches?, Helpers.encodeScalar?, halign] at hwrite
-    -- simpa using hwrite.symm
-    sorry
+    simp [Helpers.writeMem?, hPre, Typing.byteWidth?, Helpers.encodeScalar?,
+      Helpers.getSpaceBaseMem?, Helpers.setSpaceBaseMem?] at hwrite
+    exact hwrite.symm
   subst st'
-  simp [Helpers.readMem?, Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?, Typing.byteWidth?,
-    Typing.aligned?, Typing.addrSpaceMatches?, halign, readBytes?_writeBytes_same, Helpers.decodeScalar?,
-    natToBytesLE_length, bytesToNatLE_natToBytesLE_8, UInt64.ofNat_toNat, Nat.mod_eq_of_lt x.toNat_lt_size]
-  sorry
+  have hLen : (Helpers.natToBytesLE x.toNat 8).length = 8 := natToBytesLE_length _ _
+  have hRead := readBytes?_writeBytes_same st.global.bytes offset
+    (Helpers.natToBytesLE x.toNat 8)
+  rw [hLen] at hRead
+  simp [Helpers.readMem?, hPre, Typing.byteWidth?, Helpers.getSpaceBaseMem?,
+    Addr.offset, hRead, Helpers.decodeScalar?,
+    bytesToNatLE_natToBytesLE_8, UInt64.ofNat_toNat,
+    Nat.mod_eq_of_lt x.toNat_lt_size]
 
 theorem readMem_writeMem_same_global_s32
     (st st' : State) (offset : Nat) (x : Int)
@@ -318,7 +493,23 @@ theorem readMem_writeMem_same_global_s32
     (hwrite : Helpers.writeMem? st .global .s32 (.global offset) (.s32 x) = some st') :
     Helpers.readMem? st' .global .s32 (.global offset) =
       some (.s32 (Helpers.natToSigned 32 (Helpers.signedToNat 32 x))) := by
-  sorry
+  have hPre := typedAccessPre_global_s32 offset halign
+  have hst' : st' = { st with global := { bytes := Helpers.writeBytes st.global.bytes offset (Helpers.natToBytesLE (Helpers.signedToNat 32 x) 4) } } := by
+    simp [Helpers.writeMem?, hPre, Typing.byteWidth?, Helpers.encodeScalar?,
+      Helpers.getSpaceBaseMem?, Helpers.setSpaceBaseMem?] at hwrite
+    exact hwrite.symm
+  subst st'
+  have hLen : (Helpers.natToBytesLE (Helpers.signedToNat 32 x) 4).length = 4 := natToBytesLE_length _ _
+  have hRead := readBytes?_writeBytes_same st.global.bytes offset
+    (Helpers.natToBytesLE (Helpers.signedToNat 32 x) 4)
+  rw [hLen] at hRead
+  have hLt : Helpers.signedToNat 32 x < 2 ^ 32 := signedToNat_lt 32 (by decide) x
+  have hLt' : Helpers.signedToNat 32 x < 4294967296 := by
+    have : (2 : Nat) ^ 32 = 4294967296 := by decide
+    omega
+  simp [Helpers.readMem?, hPre, Typing.byteWidth?, Helpers.getSpaceBaseMem?,
+    Addr.offset, hRead, Helpers.decodeScalar?,
+    bytesToNatLE_natToBytesLE_4, Nat.mod_eq_of_lt hLt']
 
 theorem readMem_writeMem_same_global_s64
     (st st' : State) (offset : Nat) (x : Int)
@@ -326,7 +517,23 @@ theorem readMem_writeMem_same_global_s64
     (hwrite : Helpers.writeMem? st .global .s64 (.global offset) (.s64 x) = some st') :
     Helpers.readMem? st' .global .s64 (.global offset) =
       some (.s64 (Helpers.natToSigned 64 (Helpers.signedToNat 64 x))) := by
-  sorry
+  have hPre := typedAccessPre_global_s64 offset halign
+  have hst' : st' = { st with global := { bytes := Helpers.writeBytes st.global.bytes offset (Helpers.natToBytesLE (Helpers.signedToNat 64 x) 8) } } := by
+    simp [Helpers.writeMem?, hPre, Typing.byteWidth?, Helpers.encodeScalar?,
+      Helpers.getSpaceBaseMem?, Helpers.setSpaceBaseMem?] at hwrite
+    exact hwrite.symm
+  subst st'
+  have hLen : (Helpers.natToBytesLE (Helpers.signedToNat 64 x) 8).length = 8 := natToBytesLE_length _ _
+  have hRead := readBytes?_writeBytes_same st.global.bytes offset
+    (Helpers.natToBytesLE (Helpers.signedToNat 64 x) 8)
+  rw [hLen] at hRead
+  have hLt : Helpers.signedToNat 64 x < 2 ^ 64 := signedToNat_lt 64 (by decide) x
+  have hLt' : Helpers.signedToNat 64 x < 18446744073709551616 := by
+    have : (2 : Nat) ^ 64 = 18446744073709551616 := by decide
+    omega
+  simp [Helpers.readMem?, hPre, Typing.byteWidth?, Helpers.getSpaceBaseMem?,
+    Addr.offset, hRead, Helpers.decodeScalar?,
+    bytesToNatLE_natToBytesLE_8, Nat.mod_eq_of_lt hLt']
 
 def TopMemEq (st st' : State) : Prop :=
   st'.global = st.global ∧ st'.const = st.const ∧ st'.param = st.param
@@ -343,40 +550,271 @@ def LanePredFilesEq (st st' : State) (cta : CTAId) (warp : WarpId) : Prop :=
     st'.getLane? cta warp lane = some laneState' →
     laneState'.preds = laneState.preds
 
+/-! ## Structural preservation: state-update helpers only modify `ctas`
+
+These small lemmas factor the boilerplate for the per-instruction frame
+lemmas below. The key property is that `State.setCTA`, `State.setWarp`, and
+`State.setLane` only change the `ctas` field of `State`; the `global`,
+`const`, `param`, `kernelEnv`, and `atomics` fields are untouched. Any helper
+built on these (e.g., `Helpers.applyToLaneIds?`, `advanceRunnablePcs?`)
+inherits the property. -/
+
+@[simp] theorem State.setCTA_global (st : State) (cta : CTAId) (ctaState : CTAState) :
+    (st.setCTA cta ctaState).global = st.global := rfl
+
+@[simp] theorem State.setCTA_const (st : State) (cta : CTAId) (ctaState : CTAState) :
+    (st.setCTA cta ctaState).const = st.const := rfl
+
+@[simp] theorem State.setCTA_param (st : State) (cta : CTAId) (ctaState : CTAState) :
+    (st.setCTA cta ctaState).param = st.param := rfl
+
+@[simp] theorem State.setCTA_kernelEnv (st : State) (cta : CTAId) (ctaState : CTAState) :
+    (st.setCTA cta ctaState).kernelEnv = st.kernelEnv := rfl
+
+@[simp] theorem State.setCTA_atomics (st : State) (cta : CTAId) (ctaState : CTAState) :
+    (st.setCTA cta ctaState).atomics = st.atomics := rfl
+
+theorem State.setWarp_preserves_top
+    {st st' : State} {cta : CTAId} {warp : WarpId} {warpState : WarpState}
+    (h : st.setWarp cta warp warpState = some st') :
+    st'.global = st.global ∧ st'.const = st.const ∧ st'.param = st.param ∧
+      st'.kernelEnv = st.kernelEnv ∧ st'.atomics = st.atomics := by
+  unfold State.setWarp at h
+  cases hcta : st.getCTA? cta with
+  | none => simp [hcta] at h
+  | some ctaState =>
+      simp [hcta, pure, Option.bind] at h
+      subst h
+      simp
+
+theorem State.setLane_preserves_top
+    {st st' : State} {cta : CTAId} {warp : WarpId} {lane : LaneId} {laneState : LaneState}
+    (h : st.setLane cta warp lane laneState = some st') :
+    st'.global = st.global ∧ st'.const = st.const ∧ st'.param = st.param ∧
+      st'.kernelEnv = st.kernelEnv ∧ st'.atomics = st.atomics := by
+  unfold State.setLane at h
+  cases hwarp : st.getWarp? cta warp with
+  | none => simp [hwarp] at h
+  | some warpState =>
+      simp [hwarp, Option.bind] at h
+      exact State.setWarp_preserves_top h
+
+/-- Structural unfolding of `applyToLaneIds?` on `nil`. -/
+private theorem applyToLaneIds?_nil_local
+    (st : State) (cta : CTAId) (warp : WarpId)
+    (f : LaneId → LaneState → Option LaneState) :
+    Helpers.applyToLaneIds? st cta warp [] f = some st := by
+  unfold Helpers.applyToLaneIds?
+  simp [List.forIn_nil]
+
+/-- Structural unfolding of `applyToLaneIds?` on `cons`. -/
+private theorem applyToLaneIds?_cons_local
+    (st : State) (cta : CTAId) (warp : WarpId)
+    (lane : LaneId) (lanes : List LaneId)
+    (f : LaneId → LaneState → Option LaneState) :
+    Helpers.applyToLaneIds? st cta warp (lane :: lanes) f =
+      (st.getLane? cta warp lane).bind fun laneState =>
+        (f lane laneState).bind fun laneState' =>
+          (st.setLane cta warp lane laneState').bind fun stMid =>
+            Helpers.applyToLaneIds? stMid cta warp lanes f := by
+  unfold Helpers.applyToLaneIds?
+  simp [List.forIn_cons]
+  cases hLane : st.getLane? cta warp lane with
+  | none => simp [hLane, Option.bind]
+  | some laneState =>
+      simp [hLane]
+      cases hF : f lane laneState with
+      | none => simp [hF, Option.bind]
+      | some laneState' =>
+          simp [hF, Option.bind]
+          cases hSet : st.setLane cta warp lane laneState' with
+          | none => simp [hSet, Option.bind]
+          | some stMid => simp [hSet, Option.bind]
+
+theorem applyToLaneIds?_preserves_top
+    {st st' : State} {cta : CTAId} {warp : WarpId} {lanes : List LaneId}
+    {f : LaneId → LaneState → Option LaneState}
+    (h : Helpers.applyToLaneIds? st cta warp lanes f = some st') :
+    st'.global = st.global ∧ st'.const = st.const ∧ st'.param = st.param ∧
+      st'.kernelEnv = st.kernelEnv ∧ st'.atomics = st.atomics := by
+  induction lanes generalizing st with
+  | nil =>
+      rw [applyToLaneIds?_nil_local] at h
+      have heq : st' = st := Option.some.inj h.symm
+      rw [heq]
+      exact ⟨rfl, rfl, rfl, rfl, rfl⟩
+  | cons l rest ih =>
+      rw [applyToLaneIds?_cons_local] at h
+      cases hLane : st.getLane? cta warp l with
+      | none => simp [hLane] at h
+      | some ls =>
+          rw [hLane] at h; simp at h
+          cases hF : f l ls with
+          | none => simp [hF] at h
+          | some ls' =>
+              rw [hF] at h; simp at h
+              cases hSet : st.setLane cta warp l ls' with
+              | none => simp [hSet] at h
+              | some stMid =>
+                  rw [hSet] at h; simp at h
+                  have hMid := State.setLane_preserves_top hSet
+                  have hRec := ih h
+                  exact ⟨hRec.1.trans hMid.1, hRec.2.1.trans hMid.2.1,
+                         hRec.2.2.1.trans hMid.2.2.1,
+                         hRec.2.2.2.1.trans hMid.2.2.2.1,
+                         hRec.2.2.2.2.trans hMid.2.2.2.2⟩
+
+theorem advanceRunnablePcs?_preserves_top
+    {st st' : State} {cta : CTAId} {warp : WarpId}
+    (h : Helpers.advanceRunnablePcs? st cta warp = some st') :
+    st'.global = st.global ∧ st'.const = st.const ∧ st'.param = st.param ∧
+      st'.kernelEnv = st.kernelEnv ∧ st'.atomics = st.atomics := by
+  unfold Helpers.advanceRunnablePcs? at h
+  cases hwarp : st.getWarp? cta warp with
+  | none => simp [hwarp] at h
+  | some warpState =>
+      simp [hwarp, Option.bind] at h
+      cases hpc : Helpers.currentRunnablePc? warpState with
+      | none => simp [hpc] at h
+      | some pc =>
+          simp [hpc] at h
+          exact applyToLaneIds?_preserves_top h
+
+/-- A helper combining `applyToLaneIds?_preserves_top` and
+`advanceRunnablePcs?_preserves_top`: the common chain in non-store
+non-barrier `stepInstr?` cases preserves the top-level fields. -/
+private theorem applyAdvance_preserves_top
+    {st sMid st' : State} {cta : CTAId} {warp : WarpId} {lanes : List LaneId}
+    {f : LaneId → LaneState → Option LaneState}
+    (hApply : Helpers.applyToLaneIds? st cta warp lanes f = some sMid)
+    (hAdv : Helpers.advanceRunnablePcs? sMid cta warp = some st') :
+    st'.global = st.global ∧ st'.const = st.const ∧ st'.param = st.param ∧
+      st'.kernelEnv = st.kernelEnv ∧ st'.atomics = st.atomics := by
+  have h1 := applyToLaneIds?_preserves_top hApply
+  have h2 := advanceRunnablePcs?_preserves_top hAdv
+  exact ⟨h2.1.trans h1.1, h2.2.1.trans h1.2.1, h2.2.2.1.trans h1.2.2.1,
+         h2.2.2.2.1.trans h1.2.2.2.1, h2.2.2.2.2.trans h1.2.2.2.2⟩
+
+/-- Generic shape discharge for non-store non-barrier instruction cases:
+the body has the form `applyToLaneIds? st cta warp parts f >>= advanceRunnablePcs?`.
+-/
+private theorem step_applyAdvance_chain_top
+    {st st' : State} {cta : CTAId} {warp : WarpId} {parts : List LaneId}
+    {f : LaneId → LaneState → Option LaneState}
+    (h : ((Helpers.applyToLaneIds? st cta warp parts f).bind
+            fun y => Helpers.advanceRunnablePcs? y cta warp) = some st') :
+    st'.global = st.global ∧ st'.const = st.const ∧ st'.param = st.param ∧
+      st'.kernelEnv = st.kernelEnv ∧ st'.atomics = st.atomics := by
+  cases hApply : Helpers.applyToLaneIds? st cta warp parts f with
+  | none => rw [hApply] at h; simp at h
+  | some sMid =>
+      rw [hApply] at h; simp at h
+      exact applyAdvance_preserves_top hApply h
+
 theorem stepInstr_assignReg_preserves_mem
     {st st' : State} {cta : CTAId} {warp : WarpId} {dst : RegName} {rhs : RValue}
     {guard? : Option Guard}
     (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .assignReg dst rhs } = some st') :
     TopMemEq st st' := by
-  sorry
+  unfold Helpers.stepInstr? at hstep
+  cases hWarp : st.getWarp? cta warp with
+  | none => simp [hWarp] at hstep
+  | some ws =>
+      rw [hWarp] at hstep; simp at hstep
+      cases hLock : Helpers.lockstepRunnable? ws with
+      | false => simp [hLock] at hstep
+      | true =>
+          simp [hLock] at hstep
+          cases hPart : Helpers.participatingRunnableLaneIds? ws guard? with
+          | none => simp [hPart] at hstep
+          | some parts =>
+              rw [hPart] at hstep; simp at hstep
+              have hTop := step_applyAdvance_chain_top hstep
+              exact ⟨hTop.1, hTop.2.1, hTop.2.2.1⟩
 
 theorem stepInstr_assignPred_preserves_mem
     {st st' : State} {cta : CTAId} {warp : WarpId} {dst : PredName} {cmp : CmpExpr}
     {guard? : Option Guard}
     (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .assignPred dst cmp } = some st') :
     TopMemEq st st' := by
-  sorry
+  unfold Helpers.stepInstr? at hstep
+  cases hWarp : st.getWarp? cta warp with
+  | none => simp [hWarp] at hstep
+  | some ws =>
+      rw [hWarp] at hstep; simp at hstep
+      cases hLock : Helpers.lockstepRunnable? ws with
+      | false => simp [hLock] at hstep
+      | true =>
+          simp [hLock] at hstep
+          cases hPart : Helpers.participatingRunnableLaneIds? ws guard? with
+          | none => simp [hPart] at hstep
+          | some parts =>
+              rw [hPart] at hstep; simp at hstep
+              have hTop := step_applyAdvance_chain_top hstep
+              exact ⟨hTop.1, hTop.2.1, hTop.2.2.1⟩
 
 theorem stepInstr_load_preserves_mem
     {st st' : State} {cta : CTAId} {warp : WarpId} {dst : RegName} {src : TypedAddr}
     {guard? : Option Guard}
     (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .load dst src } = some st') :
     TopMemEq st st' := by
-  sorry
+  unfold Helpers.stepInstr? at hstep
+  cases hWarp : st.getWarp? cta warp with
+  | none => simp [hWarp] at hstep
+  | some ws =>
+      rw [hWarp] at hstep; simp at hstep
+      cases hLock : Helpers.lockstepRunnable? ws with
+      | false => simp [hLock] at hstep
+      | true =>
+          simp [hLock] at hstep
+          cases hPart : Helpers.participatingRunnableLaneIds? ws guard? with
+          | none => simp [hPart] at hstep
+          | some parts =>
+              rw [hPart] at hstep; simp at hstep
+              have hTop := step_applyAdvance_chain_top hstep
+              exact ⟨hTop.1, hTop.2.1, hTop.2.2.1⟩
 
 theorem stepInstr_cvta_preserves_mem
     {st st' : State} {cta : CTAId} {warp : WarpId} {dst : RegName} {space : AddrSpace} {src : RValue}
     {guard? : Option Guard}
     (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .cvta dst space src } = some st') :
     TopMemEq st st' := by
-  sorry
+  unfold Helpers.stepInstr? at hstep
+  cases hWarp : st.getWarp? cta warp with
+  | none => simp [hWarp] at hstep
+  | some ws =>
+      rw [hWarp] at hstep; simp at hstep
+      cases hLock : Helpers.lockstepRunnable? ws with
+      | false => simp [hLock] at hstep
+      | true =>
+          simp [hLock] at hstep
+          cases hPart : Helpers.participatingRunnableLaneIds? ws guard? with
+          | none => simp [hPart] at hstep
+          | some parts =>
+              rw [hPart] at hstep; simp at hstep
+              have hTop := step_applyAdvance_chain_top hstep
+              exact ⟨hTop.1, hTop.2.1, hTop.2.2.1⟩
 
 theorem stepInstr_isspacep_preserves_mem
     {st st' : State} {cta : CTAId} {warp : WarpId} {dst : PredName} {space : AddrSpace} {src : RValue}
     {guard? : Option Guard}
     (hstep : Helpers.stepInstr? st cta warp { guard? := guard?, instr := .isspacep dst space src } = some st') :
     TopMemEq st st' := by
-  sorry
+  unfold Helpers.stepInstr? at hstep
+  cases hWarp : st.getWarp? cta warp with
+  | none => simp [hWarp] at hstep
+  | some ws =>
+      rw [hWarp] at hstep; simp at hstep
+      cases hLock : Helpers.lockstepRunnable? ws with
+      | false => simp [hLock] at hstep
+      | true =>
+          simp [hLock] at hstep
+          cases hPart : Helpers.participatingRunnableLaneIds? ws guard? with
+          | none => simp [hPart] at hstep
+          | some parts =>
+              rw [hPart] at hstep; simp at hstep
+              have hTop := step_applyAdvance_chain_top hstep
+              exact ⟨hTop.1, hTop.2.1, hTop.2.2.1⟩
 
 theorem stepInstr_barrierCTA_preserves_mem
     {st st' : State} {cta : CTAId} {warp : WarpId} {barrierId : Nat}

@@ -304,7 +304,7 @@ instance (warp : WarpState) : Decidable (Helpers.lockstepRunnable warp) := by
   unfold Helpers.lockstepRunnable
   infer_instance
 
-private def getSpaceBaseMem? (st : State) (addr : Addr) : Option ByteMem :=
+def getSpaceBaseMem? (st : State) (addr : Addr) : Option ByteMem :=
   match addr with
   | .global _ => some st.global.bytes
   | .param _ => some st.param.bytes
@@ -317,7 +317,7 @@ private def getSpaceBaseMem? (st : State) (addr : Addr) : Option ByteMem :=
       pure laneState.localMem.bytes
   | .generic _ _ => none
 
-private def setSpaceBaseMem? (st : State) (addr : Addr) (bytes : ByteMem) : Option State :=
+def setSpaceBaseMem? (st : State) (addr : Addr) (bytes : ByteMem) : Option State :=
   match addr with
   | .global _ => some { st with global := { bytes := bytes } }
   | .param _ => some { st with param := { bytes := bytes } }
@@ -608,11 +608,11 @@ def uniformBranchDestination? (st : State) (cta : CTAId) (warp : WarpId)
   | [] => none
   | dest :: rest => if rest.all (fun pc' => pc' == dest) then some dest else none
 
-private def advancePcForLane (laneState : LaneState) : LaneState :=
+def advancePcForLane (laneState : LaneState) : LaneState :=
   let (lbl, idx) := laneState.pc
   { laneState with pc := (lbl, idx + 1) }
 
-private def applyToLaneIds? (st : State) (cta : CTAId) (warp : WarpId) (lanes : List LaneId)
+def applyToLaneIds? (st : State) (cta : CTAId) (warp : WarpId) (lanes : List LaneId)
     (f : LaneId → LaneState → Option LaneState) : Option State := do
   let mut cur := st
   for lane in lanes do

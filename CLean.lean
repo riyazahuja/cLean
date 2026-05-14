@@ -12,5 +12,9 @@ import CLean.PTX.Parser
 import CLean.PTX.Bridge
 import CLean.Proof.Bridge
 import CLean.Proof.Loops
+import CLean.Proof.Determinism
+import CLean.Proof.InstrCompute
+import CLean.Proof.IsSingleWarpPres
+import CLean.Proof.LaneDecomposition
 import CLean.Proof.Automation
 import CLean.Examples
