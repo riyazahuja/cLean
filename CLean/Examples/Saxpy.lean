@@ -42,7 +42,7 @@ namespace CLean
 
 open Helpers
 
-private def saxpyKernelText : String :=
+def saxpyKernelText : String :=
   ".version 8.5
    .target sm_75
    .address_size 64
@@ -91,7 +91,7 @@ private def saxpyKernelText : String :=
 example : PTX.parseAndLowerKernelOk? saxpyKernelText = true := by
   native_decide
 
-private def saxpyKernel : PTX.Kernel :=
+def saxpyKernel : PTX.Kernel :=
   match PTX.Parser.parseKernel saxpyKernelText with
   | .ok kernel => kernel
   | .error _ => default
@@ -103,18 +103,18 @@ def saxpyXBase : Nat := 0
 def saxpyYBase : Nat := 128
 def saxpyRBase : Nat := 256
 
-private def saxpyParamBytesFor (n : Nat) (alpha : Int) : ByteMem :=
+def saxpyParamBytesFor (n : Nat) (alpha : Int) : ByteMem :=
   let mem := writeU32Bytes ({} : ByteMem) 0 (UInt32.ofNat n)
   let mem := writeS32Bytes mem 4 alpha
   let mem := writeU64Bytes mem 8 (UInt64.ofNat saxpyXBase)
   let mem := writeU64Bytes mem 16 (UInt64.ofNat saxpyYBase)
   writeU64Bytes mem 24 (UInt64.ofNat saxpyRBase)
 
-private def saxpyGlobalBytesFor (xs ys : List Int) : ByteMem :=
+def saxpyGlobalBytesFor (xs ys : List Int) : ByteMem :=
   let mem := writeS32Vector ({} : ByteMem) saxpyXBase xs
   writeS32Vector mem saxpyYBase ys
 
-private def saxpyWarpFor (n : Nat) : WarpState :=
+def saxpyWarpFor (n : Nat) : WarpState :=
   { lanes := Array.replicate 32 { pc := ("saxpyKernel", 0) }
     activeMask := activeMaskPrefix n }
 
@@ -215,10 +215,10 @@ Each of the two pieces is a single named theorem below. -/
 Saxpy executes 12 instructions in the entry block + 1 terminator + 1
 terminator in BB2, all in lockstep. `K = 64` is a comfortable upper bound
 that ensures every lane reaches `.terminated`. -/
-private def saxpyFuel : Nat := 64
+def saxpyFuel : Nat := 64
 
 /-- The active-lane list for saxpy at launch `n`: lanes `0, 1, …, n-1`. -/
-private def saxpyActiveLanes (n : Nat) (hn : n ≤ 32) : List LaneId :=
+def saxpyActiveLanes (n : Nat) (hn : n ≤ 32) : List LaneId :=
   (List.range n).pmap
     (fun i (hi : i < n) => ⟨i, Nat.lt_of_lt_of_le hi hn⟩)
     (fun _ hi => List.mem_range.mp hi)
