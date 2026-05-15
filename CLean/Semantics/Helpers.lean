@@ -386,7 +386,7 @@ def evalIsspacep? (space : AddrSpace) (value : Value) : Option Bool :=
   | _ => none
 
 mutual
-  partial def evalRValue? (st : State) (cta : CTAId) (warp : WarpId) (lane : LaneId) : RValue → Option Value
+  def evalRValue? (st : State) (cta : CTAId) (warp : WarpId) (lane : LaneId) : RValue → Option Value
     | .imm v => some v
     | .reg r => do
         let laneState <- st.getLane? cta warp lane
@@ -409,7 +409,7 @@ mutual
         let vc <- evalRValue? st cta warp lane c
         evalTernary? op va vb vc
 
-  partial def evalUnary? : ScalarUnaryOp → Value → Option Value
+  def evalUnary? : ScalarUnaryOp → Value → Option Value
     | .mov, v => some v
     | .neg, .s32 x => some (.s32 (normalizeSigned 32 (-x)))
     | .neg, .s64 x => some (.s64 (normalizeSigned 64 (-x)))
@@ -449,7 +449,7 @@ mutual
         else none
     | _, _ => none
 
-  partial def evalBinary? : ScalarBinaryOp → Value → Value → Option Value
+  def evalBinary? : ScalarBinaryOp → Value → Value → Option Value
     | .mulWideS32, .s32 a, .s32 b => some (.s64 (normalizeSigned 64 (a * b)))
     | .bitor, .pred a, .pred b => some (.pred (a || b))
     | .bitand, .pred a, .pred b => some (.pred (a && b))
@@ -512,7 +512,7 @@ mutual
     | .max, .s64 a, .s64 b => some (.s64 (max a b))
     | _, _, _ => none
 
-  partial def evalTernary? : ScalarTernaryOp → Value → Value → Value → Option Value
+  def evalTernary? : ScalarTernaryOp → Value → Value → Value → Option Value
     | .mad, .u32 a, .u32 b, .u32 c => some (.u32 (a * b + c))
     | .mad, .u64 a, .u64 b, .u64 c => some (.u64 (a * b + c))
     | .mad, .s32 a, .s32 b, .s32 c => some (.s32 (normalizeSigned 32 (a * b + c)))
