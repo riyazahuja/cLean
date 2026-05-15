@@ -8,26 +8,16 @@ in terms suitable for stepping through the 24 step? applications that
 constitute one saxpy execution per active lane.
 
 These lemmas establish the structural preconditions for applying the
-`stepInstr?_*_lane_full` lemmas in `Proof/InstrValueCompute.lean`:
-
-- `saxpyStateFor_getWarp`: the initial warp state at `(cta=0, warp=0)` is `saxpyWarpFor n`.
-- `saxpyWarp_wf`: the initial warp state is well-formed (32 lanes).
-- `saxpyWarp_lockstepRunnable`: the initial warp state is in lockstep (all lanes at same PC).
-- `saxpyWarp_lane_pc`: every lane in the initial warp state is at `("saxpyKernel", 0)`.
-
-The chain proof itself (using these foundations + `stepInstr?_*_lane_full`)
-is left to a future session. See `MEMORY.md` for the proof plan.
+`stepInstr?_*_lane_full` lemmas in `Proof/InstrValueCompute.lean`.
 -/
 
 namespace CLean
 
 open Helpers
 
-/-- **Lane PC characterization (initial state):** every lane in
-`saxpyWarpFor n` is at PC `("saxpyKernel", 0)` — the entry of BB0.
+/-! ## Initial-state structural lemmas -/
 
-Used as a building block in `saxpyWarp_lockstepRunnable` and in establishing
-the `laneState.pc = pc` precondition of `stepInstr?_*_lane_full`. -/
+/-- Every lane in `saxpyWarpFor n` is at PC `("saxpyKernel", 0)`. -/
 lemma saxpyWarp_lane_pc (n : Nat) (lane : LaneId)
     (ls : LaneState) (h : (saxpyWarpFor n).getLane? lane = some ls) :
     ls.pc = ("saxpyKernel", 0) := by
@@ -35,9 +25,15 @@ lemma saxpyWarp_lane_pc (n : Nat) (lane : LaneId)
   simp at h
   rw [← h]
 
-/-- **Lockstep (initial state):** `lockstepRunnable` holds for `saxpyWarpFor n`.
-All 32 lanes are at the same PC (`("saxpyKernel", 0)`), so any subset of
-runnable lanes trivially satisfies the lockstep condition. -/
+/-- Every lane in `saxpyWarpFor n` has status `.running` (the LaneState default). -/
+lemma saxpyWarp_lane_status (n : Nat) (lane : LaneId)
+    (ls : LaneState) (h : (saxpyWarpFor n).getLane? lane = some ls) :
+    ls.status = .running := by
+  unfold saxpyWarpFor WarpState.getLane? at h
+  simp at h
+  rw [← h]
+
+/-- `lockstepRunnable` holds for `saxpyWarpFor n`: all 32 lanes share PC. -/
 lemma saxpyWarp_lockstepRunnable (n : Nat) :
     Helpers.lockstepRunnable (saxpyWarpFor n) := by
   unfold Helpers.lockstepRunnable Helpers.lockstepRunnable?
@@ -70,17 +66,74 @@ lemma saxpyWarp_lockstepRunnable (n : Nat) :
       rw [hNone] at hRun
       simp at hRun
 
-/-- **Warp extraction (initial state):** the warp at `(cta=0, warp=0)` of
-`saxpyStateFor n α xs ys` is exactly `saxpyWarpFor n` — independent of the
-data values `α, xs, ys`. -/
+/-- The warp at `(cta=0, warp=0)` of `saxpyStateFor n α xs ys` is
+`saxpyWarpFor n` — independent of the data values `α, xs, ys`. -/
 lemma saxpyStateFor_getWarp (n : Nat) (alpha : Int) (xs ys : List Int) :
     (saxpyStateFor n alpha xs ys).getWarp? 0 0 = some (saxpyWarpFor n) := by
   unfold saxpyStateFor State.getWarp? State.getCTA?
   simp
 
-/-- **Well-formedness (initial state):** `saxpyWarpFor n` has 32 lanes. -/
+/-- `saxpyWarpFor n` has 32 lanes. -/
 lemma saxpyWarp_wf (n : Nat) : WarpState.wf (saxpyWarpFor n) := by
   unfold WarpState.wf WarpState.wf? saxpyWarpFor
   simp [Array.size_replicate]
+
+/-! ## Lane-runnable characterization
+
+These lemmas show that lane `k` is runnable in `saxpyWarpFor n` iff `k < n`,
+and that `runnableLaneIds (saxpyWarpFor n) = saxpyActiveLanes n hn`. -/
+
+/-- `bitSet (activeMaskPrefix n) k` is `true` iff `k < n`, for `n ≤ 32`, `k < 32`.
+
+Proved by `interval_cases` on both `n` and `k` (33 × 32 cases, each closed by
+`decide` on a concrete `bitSet`/`activeMaskPrefix` evaluation). -/
+lemma bitSet_activeMaskPrefix (n k : Nat) (hn : n ≤ 32) (hk : k < 32) :
+    bitSet (activeMaskPrefix n) k = decide (k < n) := by
+  interval_cases n <;> interval_cases k <;> decide
+
+/-- Lane `k` is runnable in `saxpyWarpFor n` iff `k < n`. -/
+lemma laneIsRunnable_saxpyWarp (n : Nat) (hn : n ≤ 32) (lane : LaneId) :
+    laneIsRunnable (saxpyWarpFor n) lane = decide (lane.val < n) := by
+  unfold laneIsRunnable
+  cases h : (saxpyWarpFor n).getLane? lane with
+  | none =>
+    exfalso
+    unfold saxpyWarpFor WarpState.getLane? at h
+    simp at h
+  | some ls =>
+    have hstatus := saxpyWarp_lane_status n lane ls h
+    simp [hstatus]
+    rw [show (saxpyWarpFor n).activeMask = activeMaskPrefix n from rfl]
+    have := bitSet_activeMaskPrefix n lane.val hn lane.isLt
+    rw [this]
+
+/-- The runnable lanes of `saxpyWarpFor n` are exactly `saxpyActiveLanes n hn`. -/
+lemma runnableLaneIds_saxpyWarp (n : Nat) (hn : n ≤ 32) :
+    runnableLaneIds (saxpyWarpFor n) = saxpyActiveLanes n hn := by
+  interval_cases n <;> rfl
+
+/-! ## Initial PC characterization -/
+
+/-- For `n > 0`, the current runnable PC of `saxpyWarpFor n` is the BB0 entry. -/
+lemma currentRunnablePc_saxpyWarp_pos (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n) :
+    currentRunnablePc? (saxpyWarpFor n) = some ("saxpyKernel", 0) := by
+  unfold currentRunnablePc?
+  rw [runnableLaneIds_saxpyWarp n hn]
+  interval_cases n <;> rfl
+
+/-- For `n = 0`, no lane is runnable, so `currentRunnablePc?` is `none`. -/
+lemma currentRunnablePc_saxpyWarp_zero :
+    currentRunnablePc? (saxpyWarpFor 0) = none := by
+  unfold currentRunnablePc?
+  rw [runnableLaneIds_saxpyWarp 0 (by norm_num)]
+  rfl
+
+/-- Without a guard, all runnable lanes participate at the BB0 entry. -/
+lemma participatingRunnable_saxpyWarp_none (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n) :
+    participatingRunnableLaneIds? (saxpyWarpFor n) none = some (saxpyActiveLanes n hn) := by
+  unfold participatingRunnableLaneIds?
+  rw [currentRunnablePc_saxpyWarp_pos n hn hnpos]
+  simp
+  interval_cases n <;> rfl
 
 end CLean
