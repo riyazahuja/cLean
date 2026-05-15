@@ -1,0 +1,1445 @@
+\documentclass[aspectratio=169,10pt]{beamer}
+
+\usetheme{Madrid}
+\usecolortheme{dolphin}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\definecolor{leanblue}{RGB}{24,78,119}
+\definecolor{leangreen}{RGB}{42,157,143}
+\definecolor{leanorange}{RGB}{230,126,34}
+\definecolor{leanred}{RGB}{190,70,70}
+\definecolor{leanbg}{RGB}{248,249,250}
+
+\setbeamercolor{structure}{fg=leanblue}
+\setbeamercolor{frametitle}{fg=white,bg=leanblue}
+\setbeamercolor{title}{fg=white,bg=leanblue}
+\setbeamercolor{block title}{fg=white,bg=leanblue}
+\setbeamercolor{block body}{bg=leanbg}
+
+\lstdefinelanguage{Lean}{
+  morekeywords={def,theorem,inductive,structure,where,namespace,end,import,match,with,by,do,let,if,then,else,return,pure,some,none,Prop,Type,Option,List,Array,mutual,partial,private,syntax,macro_rules,example,axiom},
+  sensitive=true,
+  morecomment=[l]{--},
+  morecomment=[s]{/-}{-/},
+  morestring=[b]"
+}
+
+\lstset{
+  language=Lean,
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\color{leanblue}\bfseries,
+  commentstyle=\color{gray},
+  stringstyle=\color{leangreen},
+  backgroundcolor=\color{leanbg},
+  frame=single,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false
+}
+
+\newcommand{\file}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\lean}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\statusproved}{\textcolor{leangreen}{proved}}
+\newcommand{\statusexec}{\textcolor{leanblue}{executable}}
+\newcommand{\statusadmit}{\textcolor{leanred}{admitted}}
+\newcommand{\statusfuture}{\textcolor{leanorange}{future work}}
+
+\title[CLean Advisor Update]{CLean: Lean Semantics, PTX Ingestion, and the Saxpy Proof Path}
+\subtitle{Architecture, methodology, implementation, and remaining proof obligations}
+\author{Riyaza}
+\institute{Technical presentation for PhD advisor}
+\date{\today}
+
+\begin{document}
+
+% 1
+\begin{frame}
+  \titlepage
+\end{frame}
+
+% 2
+\begin{frame}{Deck Roadmap}
+  \begin{enumerate}
+    \item High-level research idea and design goals.
+    \item Core implementation: types, state, instructions, typing.
+    \item Semantics: executable helper layer and relational small-step layer.
+    \item Proof methodology: computation lemmas, frame lemmas, determinism, decomposition.
+    \item PTX front end: AST, parser, checked lowering, bridge theorem surface.
+    \item Saxpy case study: PTX input, state construction, correctness pipeline, current blockers.
+  \end{enumerate}
+\end{frame}
+
+% 3
+\begin{frame}{One-Sentence Thesis}
+  CLean is a Lean 4 framework for giving a proof-facing, executable semantics to a supported subset of PTX-like GPU kernels, then using that semantics to prove concrete and eventually parametric kernel correctness.
+
+  \vspace{1em}
+  \begin{block}{Current repo scope}
+    The repo already has a semantic state model, an IR, executable evaluation functions, relational small-step rules, PTX parsing and checked lowering, proof infrastructure, and case studies for toy kernels, saxpy, and matmul.
+  \end{block}
+\end{frame}
+
+% 4
+\begin{frame}{Why This Is Useful}
+  \begin{itemize}
+    \item GPU kernels are usually validated by testing, compiler inspection, and informal reasoning.
+    \item PTX is low-level enough to expose memory spaces, thread IDs, predicates, branches, barriers, and instruction effects.
+    \item Lean lets us state exactly what a parsed-and-lowered kernel computes.
+    \item Executable semantics let small concrete cases run by \lean{native_decide}; relational semantics support proof statements over arbitrary traces.
+  \end{itemize}
+\end{frame}
+
+% 5
+\begin{frame}{Design Principle}
+  The project avoids building a ``PTX text interpreter'' as the trusted core.
+
+  \vspace{0.5em}
+  Instead:
+  \begin{itemize}
+    \item parse raw PTX text into a syntax AST,
+    \item checked-lower that AST into a smaller semantic IR,
+    \item execute the IR against a concrete state model,
+    \item prove properties of the IR semantics,
+    \item expose parse/lower soundness as the trusted boundary.
+  \end{itemize}
+\end{frame}
+
+% 6
+\begin{frame}{Repo Topology}
+  \begin{tabular}{>{\ttfamily}p{0.32\linewidth}p{0.58\linewidth}}
+    \toprule
+    CLean/Core & scalar types, values, addresses, IR, state, typing \\
+    CLean/Semantics & helper evaluator, small-step relation, executable runner \\
+    CLean/Proof & frame lemmas, computation lemmas, loop API, determinism, decomposition \\
+    CLean/PTX & PTX AST, parser, lowering, checked bridge \\
+    CLean/Examples & semantic smoke tests, parser/lowering tests, saxpy, matmul \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+% 7
+\begin{frame}{Status Legend}
+  \begin{tabular}{>{\bfseries}p{0.22\linewidth}p{0.68\linewidth}}
+    \toprule
+    \statusproved & Lean proof has no local \lean{sorry}. \\
+    \statusexec & executable function or concrete example checked by \lean{native_decide}. \\
+    \statusadmit & theorem statement exists, but body contains \lean{sorry}; this is an explicit proof obligation. \\
+    \statusfuture & concept is architected but not implemented or not yet proof-complete. \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{1em}
+  The deck uses these statuses to separate implemented machinery from admitted proof surface.
+\end{frame}
+
+% 8
+\begin{frame}{Main Architectural Pipeline}
+  \begin{center}
+    PTX text
+    \quad $\rightarrow$ \quad
+    \file{PTX.Ast}
+    \quad $\rightarrow$ \quad
+    checked lowering
+    \quad $\rightarrow$ \quad
+    CLean IR
+    \quad $\rightarrow$ \quad
+    small-step semantics
+    \quad $\rightarrow$ \quad
+    kernel postcondition
+  \end{center}
+
+  \vspace{1em}
+  The core proofs are intended to live after lowering, where the instruction set is smaller and semantic cases are explicit.
+\end{frame}
+
+% 9
+\begin{frame}{Methodological Split}
+  \begin{itemize}
+    \item \textbf{Executable layer:} functions returning \lean{Option State}, used for simulation, tracing, and concrete regression tests.
+    \item \textbf{Relational layer:} inductive propositions \lean{StepInstr}, \lean{StepBlock}, \lean{StepWarp}, \lean{StepMachine}.
+    \item \textbf{Bridge layer:} soundness theorems from executable steps to relational steps.
+    \item \textbf{Correctness layer:} \lean{PartialCorrect}, \lean{TotalCorrect}, loop specs, and kernel-specific postconditions.
+  \end{itemize}
+\end{frame}
+
+% 10
+\begin{frame}{Implemented Surface Area}
+  \begin{itemize}
+    \item Scalar integer, predicate, bitwise, address conversion, load/store, branch, barrier, and simple float operations are represented.
+    \item Warp-level operations, atomics, and MMA are present in the IR shape, but most are not semantically executed yet.
+    \item PTX parser supports declarations, labels, predicated branches, params, shared declarations, memory operations, arithmetic, comparisons, and unsupported-instruction reporting.
+    \item Examples validate end-to-end parser, lowering, and execution on small kernels.
+  \end{itemize}
+\end{frame}
+
+% 11
+\begin{frame}{Current Proof Surface}
+  \begin{itemize}
+    \item \statusproved: executable-step soundness into \lean{StepMachine}.
+    \item \statusproved: runN reachability and stuck-stability theorems.
+    \item \statusproved: single-warp determinism bridge, modulo preservation lemmas used beneath it.
+    \item \statusadmit: several frame and preservation lemmas in \file{Proof/Lemmas.lean}.
+    \item \statusadmit: parser/lowering soundness theorem surfaces in \file{Proof/Bridge.lean}.
+    \item \statusadmit: parametric saxpy symbolic execution lemma.
+  \end{itemize}
+\end{frame}
+
+% 12
+\begin{frame}{Advisor-Level Takeaway}
+  The project has moved from design sketch to an executable, typed, PTX-ingesting semantic core.
+
+  \vspace{0.5em}
+  The remaining work is not a vague ``prove everything'' task. It decomposes into:
+  \begin{itemize}
+    \item finish frame/preservation lemmas,
+    \item complete lane-disjointness/decomposition,
+    \item do straight-line symbolic execution for saxpy,
+    \item package parser/lowering soundness,
+    \item then scale to loop kernels like matmul.
+  \end{itemize}
+\end{frame}
+
+\section{Core Model}
+
+% 13
+\begin{frame}{Core Files}
+  \begin{tabular}{>{\ttfamily}p{0.32\linewidth}p{0.58\linewidth}}
+    \toprule
+    Core/Types.lean & scalar types, values, address spaces, special registers \\
+    Core/IR.lean & semantic instruction vocabulary \\
+    Core/State.lean & machine state, lane/warp/CTA/global memory \\
+    Core/Typing.lean & computable type signatures and memory preconditions \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+% 14
+\begin{frame}{Scalar Type Universe}
+  \begin{itemize}
+    \item \lean{ScalarTy} includes predicates, unsigned/signed integers, bit-vectors, half/bfloat/f32/f64.
+    \item The semantic layer uses scalar tags directly rather than encoding everything as raw bitvectors.
+    \item This keeps type-directed memory encoding and instruction support explicit.
+    \item Unsupported or not-yet-modeled cases can fail by returning \lean{none} rather than silently inventing behavior.
+  \end{itemize}
+\end{frame}
+
+% 15
+\begin{frame}[fragile]{Scalar Types in Lean}
+\begin{lstlisting}
+inductive ScalarTy where
+  | pred
+  | u8 | u16 | u32 | u64
+  | s8 | s16 | s32 | s64
+  | b8 | b16 | b32 | b64
+  | f16 | bf16 | f32 | f64
+  deriving Repr, DecidableEq, Inhabited
+\end{lstlisting}
+
+  This is intentionally close to PTX scalar suffixes: \lean{.u32}, \lean{.s32}, \lean{.b64}, \lean{.f32}, etc.
+\end{frame}
+
+% 16
+\begin{frame}{Address Spaces}
+  \begin{itemize}
+    \item PTX state spaces are not erased into one integer address space.
+    \item \lean{AddrSpace} tracks \lean{global}, \lean{shared}, \lean{local}, \lean{param}, \lean{const}, and \lean{generic}.
+    \item Concrete \lean{Addr} constructors carry the scope needed for shared and local memory.
+    \item Generic addresses carry a tag and offset, letting \lean{cvta} and \lean{isspacep} have semantic content.
+  \end{itemize}
+\end{frame}
+
+% 17
+\begin{frame}[fragile]{Address Model}
+\begin{lstlisting}
+inductive Addr where
+  | global (offset : Nat)
+  | shared (cta : CTAId) (offset : Nat)
+  | local (cta : CTAId) (warp : WarpId) (lane : LaneId) (offset : Nat)
+  | param (offset : Nat)
+  | const (offset : Nat)
+  | generic (space : AddrSpace) (offset : Nat)
+\end{lstlisting}
+
+  This is one of the most important proof choices: state-space identity is part of the address.
+\end{frame}
+
+% 18
+\begin{frame}{Value Model}
+  \begin{itemize}
+    \item \lean{Value} mirrors scalar types and includes semantic addresses.
+    \item Signed integer values are stored as Lean \lean{Int}, with normalization helpers for fixed-width behavior.
+    \item Floating values are represented using Lean \lean{Float}; this is convenient but not bit-exact PTX f32 semantics.
+    \item Tensor fragments are represented by \lean{Value.frag}, but MMA execution is not yet implemented.
+  \end{itemize}
+\end{frame}
+
+% 19
+\begin{frame}[fragile]{Selected Value Constructors}
+\begin{lstlisting}
+inductive Value where
+  | pred (b : Bool)
+  | u32 (x : UInt32)
+  | u64 (x : UInt64)
+  | s32 (x : Int)
+  | s64 (x : Int)
+  | f32 (x : Float)
+  | f64 (x : Float)
+  | gaddr (space : AddrSpace) (offset : Nat)
+  | frag (ty : FragTy) (payload : Array Value)
+\end{lstlisting}
+\end{frame}
+
+% 20
+\begin{frame}{Thread and Grid Identity}
+  \begin{itemize}
+    \item \lean{CTAId} and \lean{WarpId} are natural numbers.
+    \item \lean{LaneId := Fin 32}, so lane identity is bounded at the type level.
+    \item \lean{GridCtx} stores \lean{gridDim} and \lean{blockDim}.
+    \item Helpers compute \lean{tid.x}, \lean{ctaid.x}, \lean{ntid.x}, and related special registers from this context.
+  \end{itemize}
+\end{frame}
+
+% 21
+\begin{frame}{Memory Model}
+  \begin{itemize}
+    \item Every memory space is modeled as a byte map: \lean{Std.HashMap Nat UInt8}.
+    \item Scalar loads/stores encode and decode little-endian byte sequences.
+    \item Typed memory access requires codec support, byte width, alignment, and address-space agreement.
+    \item This gives precise failure points for unsupported or ill-typed accesses.
+  \end{itemize}
+\end{frame}
+
+% 22
+\begin{frame}[fragile]{Top-Level State}
+\begin{lstlisting}
+structure State where
+  kernelEnv : KernelEnv := {}
+  global : GlobalMem := {}
+  const : ConstMem := {}
+  param : ParamMem := {}
+  ctas : Std.HashMap CTAId CTAState := {}
+  atomics : AtomicState := {}
+\end{lstlisting}
+
+  The top-level state separates immutable-ish launch environment from mutable memory and CTA state.
+\end{frame}
+
+% 23
+\begin{frame}[fragile]{CTA, Warp, Lane}
+\begin{lstlisting}
+structure LaneState where
+  regs : Std.HashMap RegName Value := {}
+  preds : Std.HashMap PredName Bool := {}
+  localMem : LocalMem := {}
+  pc : PC := ("entry", 0)
+  status : LaneStatus := .running
+
+structure WarpState where
+  lanes : Array LaneState := Array.replicate 32 {}
+  activeMask : UInt32 := 0xFFFFFFFF
+  exitedMask : UInt32 := 0
+\end{lstlisting}
+\end{frame}
+
+% 24
+\begin{frame}{Well-Formedness Checks}
+  \begin{itemize}
+    \item \lean{WarpState.wf?}: lane array size is exactly 32.
+    \item \lean{CTAState.wf?}: every warp in the CTA is well formed.
+    \item \lean{KernelEnv.wf?}: block map keys agree with block labels.
+    \item \lean{State.wf?}: kernel environment is well formed and every CTA is well formed.
+  \end{itemize}
+\end{frame}
+
+% 25
+\begin{frame}{Why Boolean and Prop Versions Exist}
+  \begin{itemize}
+    \item Functions like \lean{stepInstr?} need executable booleans.
+    \item Relational rules and proofs need propositions.
+    \item The project provides bridge theorems like \lean{wf_iff_bool}.
+    \item This pattern repeats for \lean{RunnablePc}, \lean{ParticipatingRunnable}, and \lean{lockstepRunnable}.
+  \end{itemize}
+\end{frame}
+
+% 26
+\begin{frame}{Instruction Vocabulary}
+  \begin{itemize}
+    \item Pure expression layer: \lean{RValue}.
+    \item Guarded instruction layer: \lean{GInstr}.
+    \item Block layer: array of guarded instructions plus a terminator.
+    \item Effects include register/predicate writes, load/store, address conversion, space tests, barriers, warp ops, atomics, and MMA.
+  \end{itemize}
+\end{frame}
+
+% 27
+\begin{frame}[fragile]{RValue}
+\begin{lstlisting}
+inductive RValue where
+  | imm (v : Value)
+  | reg (r : RegName)
+  | pred (p : PredName)
+  | special (s : SpecialReg)
+  | unop (op : ScalarUnaryOp) (a : RValue)
+  | binop (op : ScalarBinaryOp) (a b : RValue)
+  | triop (op : ScalarTernaryOp) (a b c : RValue)
+\end{lstlisting}
+
+  This is the pure expression language used by both instructions and branch conditions.
+\end{frame}
+
+% 28
+\begin{frame}[fragile]{Instruction Shape}
+\begin{lstlisting}
+inductive Instr where
+  | assignReg (dst : RegName) (rhs : RValue)
+  | assignPred (dst : PredName) (cmp : CmpExpr)
+  | assignPredValue (dst : PredName) (rhs : RValue)
+  | load (dst : RegName) (src : TypedAddr)
+  | store (dst : TypedAddr) (value : RValue)
+  | cvta (dst : RegName) (space : AddrSpace) (src : RValue)
+  | isspacep (dst : PredName) (space : AddrSpace) (src : RValue)
+  | barrierCTA (barrierId : Nat)
+  | warp (op : WarpOp)
+  | atomic ...
+  | mma ...
+\end{lstlisting}
+\end{frame}
+
+% 29
+\begin{frame}{Guarded Instructions}
+  \begin{itemize}
+    \item \lean{GInstr} pairs an optional guard with an instruction.
+    \item A guard is a predicate register plus an optional negation bit.
+    \item Participation is computed lane-by-lane against runnable lanes at the current PC.
+    \item Predicated-off lanes at barriers are explicitly advanced rather than blocked.
+  \end{itemize}
+\end{frame}
+
+% 30
+\begin{frame}{Terminators and Blocks}
+  \begin{itemize}
+    \item \lean{Terminator.br}: unconditional branch to a block label.
+    \item \lean{Terminator.cbr}: conditional branch with true and false labels.
+    \item \lean{Terminator.terminate}: marks current runnable lanes as terminated.
+    \item A \lean{Block} is a label, body array, and terminator.
+  \end{itemize}
+\end{frame}
+
+% 31
+\begin{frame}{Typing Layer}
+  \begin{itemize}
+    \item \file{Core/Typing.lean} is the repo's local type checker for the semantic IR and lowering phase.
+    \item It defines byte widths and alignments.
+    \item It computes signatures for unary, binary, ternary, and comparison operations.
+    \item It defines typed memory access preconditions.
+  \end{itemize}
+\end{frame}
+
+% 32
+\begin{frame}[fragile]{Typed Access Preconditions}
+\begin{lstlisting}
+def typedAccessPreconditions? (space : AddrSpace)
+    (ty : ScalarTy) (addr : Addr) : Bool :=
+  scalarCodecSupported? ty &&
+  (byteWidth? ty).isSome &&
+  aligned? ty addr &&
+  addrSpaceMatches? space addr
+\end{lstlisting}
+
+  This check is used by both \lean{readMem?} and \lean{writeMem?}.
+\end{frame}
+
+% 33
+\begin{frame}{Scalar Compatibility}
+  \begin{itemize}
+    \item Checked lowering accepts some PTX-compatible aliases: for example \lean{s32}, \lean{u32}, and \lean{b32}.
+    \item \lean{scalarCompatible?} captures these expected/actual relationships.
+    \item \lean{coerceOperandTo?} inserts conversions when the semantic value needs an explicit shape.
+    \item 64-bit pointer-shaped values are deliberately kept unwrapped in some cases because runtime \lean{cvta} may produce generic addresses.
+  \end{itemize}
+\end{frame}
+
+% 34
+\begin{frame}{Supported Operation Signatures}
+  \begin{itemize}
+    \item \lean{unarySig?}: moves, negation, abs, bitnot, conversion.
+    \item \lean{binarySig?}: add, sub, mul, wide multiply, bitwise logic, shifts, min/max.
+    \item \lean{ternarySig?}: \lean{mad}, \lean{fma}, \lean{selp}.
+    \item \lean{cmpSig?}: same-type integer/float comparisons returning predicate.
+  \end{itemize}
+\end{frame}
+
+% 35
+\begin{frame}{Core Model Summary}
+  \begin{itemize}
+    \item The state model is concrete enough to execute kernels.
+    \item The IR is small enough to reason about directly.
+    \item The typing layer rejects unsupported or inconsistent PTX before semantics.
+    \item The major abstraction boundary is already in place: PTX syntax lowers into semantic effects.
+  \end{itemize}
+\end{frame}
+
+\section{Semantics}
+
+% 36
+\begin{frame}{Semantics Files}
+  \begin{tabular}{>{\ttfamily}p{0.35\linewidth}p{0.55\linewidth}}
+    \toprule
+    Semantics/Helpers.lean & executable evaluator and state transformers \\
+    Semantics/SmallStep.lean & relational small-step rules \\
+    Semantics/Execution.lean & reachability, step driver, runN, traceN \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+% 37
+\begin{frame}{Executable Helper Layer}
+  \begin{itemize}
+    \item Most semantic content lives in functions ending with \lean{?}.
+    \item Failure is represented by \lean{Option.none}.
+    \item This keeps unsupported cases, bad lookups, invalid alignment, and divergent branch conditions explicit.
+    \item The same functions are used for concrete execution and for proof rules.
+  \end{itemize}
+\end{frame}
+
+% 38
+\begin{frame}{Runnable Lanes}
+  \begin{itemize}
+    \item \lean{laneIsRunnable} checks lane status and active mask bit.
+    \item \lean{runnableLaneIds} filters all 32 lanes.
+    \item \lean{currentRunnablePc?} takes the first runnable lane's PC.
+    \item \lean{lockstepRunnable?} requires all runnable lanes to have the same PC.
+  \end{itemize}
+\end{frame}
+
+% 39
+\begin{frame}{Participation}
+  \begin{itemize}
+    \item \lean{participatingRunnableLaneIds?} starts from runnable lanes.
+    \item It filters to lanes at the current PC.
+    \item It evaluates the optional guard per lane.
+    \item It returns the lane list that actually participates in the instruction effect.
+  \end{itemize}
+\end{frame}
+
+% 40
+\begin{frame}{Special Registers}
+  \begin{itemize}
+    \item \lean{evalSpecial} maps PTX special registers to values.
+    \item Thread IDs come from block-local linear lane identity plus \lean{blockDim}.
+    \item CTA IDs are decoded from a linear \lean{CTAId} and \lean{gridDim}.
+    \item \lean{ntid} and \lean{nctaid} come directly from launch context.
+  \end{itemize}
+\end{frame}
+
+% 41
+\begin{frame}{Expression Evaluation}
+  \begin{itemize}
+    \item \lean{evalRValue?} is mutually recursive with scalar operator evaluation.
+    \item Register and predicate reads are lane-local.
+    \item Special registers are computed from \lean{GridCtx}, CTA, warp, and lane.
+    \item Pure operators implement arithmetic, logical, conversion, and address arithmetic behavior.
+  \end{itemize}
+\end{frame}
+
+% 42
+\begin{frame}[fragile]{RValue Evaluation Skeleton}
+\begin{lstlisting}
+partial def evalRValue? st cta warp lane : RValue -> Option Value
+  | .imm v => some v
+  | .reg r => do
+      let laneState <- st.getLane? cta warp lane
+      readReg laneState r
+  | .pred p => do
+      let laneState <- st.getLane? cta warp lane
+      let b <- readPred laneState p
+      pure (.pred b)
+  | .special s => some <| evalSpecial st.kernelEnv.gridCtx cta warp lane s
+  | .binop op a b => ...
+\end{lstlisting}
+\end{frame}
+
+% 43
+\begin{frame}{Memory Read and Write}
+  \begin{itemize}
+    \item \lean{readMem?} checks typed access preconditions.
+    \item It finds the correct byte map for the address space.
+    \item It reads the required byte width and decodes the scalar.
+    \item \lean{writeMem?} performs the dual encode/write/update operation.
+  \end{itemize}
+\end{frame}
+
+% 44
+\begin{frame}{Address Resolution}
+  \begin{itemize}
+    \item \lean{resolveAddr?} evaluates a \lean{TypedAddr}'s address expression.
+    \item Integer-like offsets lower into concrete state-space addresses.
+    \item Generic addresses resolve only when their tag matches the requested space, except \lean{.generic} keeps the tag.
+    \item Shared and local addresses add CTA, warp, and lane scope.
+  \end{itemize}
+\end{frame}
+
+% 45
+\begin{frame}{Address Conversion}
+  \begin{itemize}
+    \item \lean{evalCvta?} maps integer or already-generic pointer-shaped values to \lean{Value.gaddr}.
+    \item \lean{evalIsspacep?} tests the tag of a generic address.
+    \item This supports kernels that load pointers from parameter memory before global memory access.
+    \item Saxpy relies on this path: parameter pointers are loaded, converted to global addresses, offset, and dereferenced.
+  \end{itemize}
+\end{frame}
+
+% 46
+\begin{frame}{Instruction Step Function}
+  \begin{itemize}
+    \item \lean{stepInstr?} fetches warp state and checks lockstep.
+    \item It computes participating lanes under the optional guard.
+    \item For register/predicate operations, it applies a lane-local update over participants.
+    \item For stores, it sequentializes participating lanes in lane-list order.
+    \item It then advances runnable PCs, except for barriers which have special handling.
+  \end{itemize}
+\end{frame}
+
+% 47
+\begin{frame}[fragile]{stepInstr? Shape}
+\begin{lstlisting}
+def stepInstr? (st : State) (cta : CTAId) (warp : WarpId)
+    (gi : GInstr) : Option State := do
+  let warpState <- st.getWarp? cta warp
+  if !lockstepRunnable? warpState then none else
+    let participants <- participatingRunnableLaneIds? warpState gi.guard?
+    match gi.instr with
+    | .barrierCTA barrierId => stepBarrierCTA? st cta warp barrierId participants
+    | _ => do
+        let st <- match gi.instr with
+          | .assignReg dst rhs => ...
+          | .load dst src => ...
+          | .store dst value => ...
+          | _ => none
+        advanceRunnablePcs? st cta warp
+\end{lstlisting}
+\end{frame}
+
+% 48
+\begin{frame}{Barrier Semantics}
+  \begin{itemize}
+    \item \lean{stepBarrierCTA?} models a CTA barrier instance keyed by barrier id.
+    \item Predicated-off lanes skip the barrier and advance.
+    \item Participating lanes record arrival and become \lean{blockedBarrier}.
+    \item Once arrivals reach expected count, all arrived lanes are released, advanced, and marked running.
+  \end{itemize}
+\end{frame}
+
+% 49
+\begin{frame}{Terminator Semantics}
+  \begin{itemize}
+    \item \lean{br}: sets PC of current lanes to target block index 0.
+    \item \lean{terminate}: marks current lanes terminated.
+    \item \lean{cbr}: evaluates condition for all current lanes and requires a uniform destination.
+    \item Non-uniform branch conditions currently fail by returning \lean{none}.
+  \end{itemize}
+\end{frame}
+
+% 50
+\begin{frame}{Relational Small-Step Layer}
+  \begin{itemize}
+    \item \lean{StepInstr} wraps \lean{stepInstr?} with preconditions.
+    \item \lean{StepBlock} chooses between body instruction and block terminator.
+    \item \lean{StepWarp} packages a block step for a CTA/warp.
+    \item \lean{StepMachine} is the global one-step relation.
+  \end{itemize}
+\end{frame}
+
+% 51
+\begin{frame}[fragile]{StepInstr Rule}
+\begin{lstlisting}
+inductive StepInstr : State -> CTAId -> WarpId -> GInstr -> State -> Prop where
+  | mk :
+      State.wf st ->
+      st.getWarp? cta warp = some warpState ->
+      WarpState.wf warpState ->
+      Helpers.lockstepRunnable warpState ->
+      Helpers.ParticipatingRunnable warpState gi.guard? participants ->
+      Helpers.stepInstr? st cta warp gi = some st' ->
+      StepInstr st cta warp gi st'
+\end{lstlisting}
+\end{frame}
+
+% 52
+\begin{frame}{Executable Driver}
+  \begin{itemize}
+    \item \lean{currentInstrStep?}: attempt the current body instruction.
+    \item \lean{currentTermStep?}: attempt the terminator when body index is past the body.
+    \item \lean{stepAt?}: instruction first, then terminator.
+    \item \lean{step?}: default scheduler for CTA 0, warp 0.
+  \end{itemize}
+\end{frame}
+
+% 53
+\begin{frame}{runN and traceN}
+  \begin{itemize}
+    \item \lean{runN fuel st} executes up to \lean{fuel} successful \lean{step?} transitions.
+    \item If \lean{step?} returns \lean{none}, \lean{runN} stays at the current state.
+    \item \lean{runN?} fails if the requested number of steps cannot be taken.
+    \item \lean{traceN} records intermediate states for debugging and smoke tests.
+  \end{itemize}
+\end{frame}
+
+% 54
+\begin{frame}{Reachability}
+  \begin{itemize}
+    \item \lean{Reaches} is the reflexive-transitive closure of \lean{StepMachine}.
+    \item \lean{StepMachine.runN_reaches}: every executable run is a relational reachability trace.
+    \item \lean{StepMachine.runN?_sound}: successful exact-fuel execution is also relationally reachable.
+    \item This is the base connection between executable testing and proof-facing semantics.
+  \end{itemize}
+\end{frame}
+
+% 55
+\begin{frame}{Semantics Summary}
+  The semantics now has two synchronized views:
+  \begin{itemize}
+    \item a computable interpreter for concrete kernels;
+    \item an inductive step relation for theorem statements.
+  \end{itemize}
+
+  \vspace{0.5em}
+  The key engineering challenge is keeping these two views aligned without duplicating semantic definitions.
+\end{frame}
+
+\section{Proof Methodology}
+
+% 56
+\begin{frame}{Proof Files}
+  \begin{tabular}{>{\ttfamily}p{0.36\linewidth}p{0.54\linewidth}}
+    \toprule
+    Proof/Lemmas.lean & frame, memory, wf, executable-to-relational helpers \\
+    Proof/InstrCompute.lean & per-instruction computation over lane lists \\
+    Proof/Loops.lean & correctness definitions and counted-loop specs \\
+    Proof/Determinism.lean & single-warp determinism bridge \\
+    Proof/IsSingleWarpPres.lean & preservation of single-warp support \\
+    Proof/LaneDecomposition.lean & lane-local view and lifting architecture \\
+    Proof/Bridge.lean & parser/lowering soundness theorem surface \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+% 57
+\begin{frame}{Correctness Vocabulary}
+  \begin{itemize}
+    \item \lean{MachineFinal st}: no \lean{StepMachine} successor exists.
+    \item \lean{TerminatesAt init final}: \lean{Reaches init final} and \lean{MachineFinal final}.
+    \item \lean{PartialCorrect init post}: every terminal final state satisfies \lean{post}.
+    \item \lean{TotalCorrect init post}: some terminal final state exists and satisfies \lean{post}.
+  \end{itemize}
+\end{frame}
+
+% 58
+\begin{frame}[fragile]{Correctness Definitions}
+\begin{lstlisting}
+def MachineFinal (st : State) : Prop :=
+  forall st', not (StepMachine st st')
+
+def TerminatesAt (init final : State) : Prop :=
+  Reaches init final /\ MachineFinal final
+
+def PartialCorrect (init : State) (post : State -> Prop) : Prop :=
+  forall final, TerminatesAt init final -> post final
+\end{lstlisting}
+\end{frame}
+
+% 59
+\begin{frame}{Computation Lemma Pattern}
+  \begin{itemize}
+    \item First prove structural unfoldings of executable loops.
+    \item Then prove one-lane or list-of-lanes effects.
+    \item Then package these effects as instruction-specific computation lemmas.
+    \item This is especially important because \lean{stepInstr?} uses imperative-style \lean{for} loops inside \lean{Option}.
+  \end{itemize}
+\end{frame}
+
+% 60
+\begin{frame}{applyToLaneIds? Foundation}
+  \begin{itemize}
+    \item \lean{applyToLaneIds?_nil}: empty lane list returns the input state.
+    \item \lean{applyToLaneIds?_cons}: exposes one state update plus recursion.
+    \item \lean{applyToLaneIds?_singleton}: common one-lane simplification.
+    \item \lean{applyToLaneIds?_lane_in}: for nodup lists, participating lane gets the computed state.
+  \end{itemize}
+\end{frame}
+
+% 61
+\begin{frame}{Frame Lemma Pattern}
+  \begin{itemize}
+    \item Register writes preserve predicate files, local memory, PC, and status.
+    \item Predicate writes preserve register files, local memory, PC, and status.
+    \item Lane updates preserve other lanes.
+    \item CTA/warp/lane state updates preserve top-level global/const/param fields.
+  \end{itemize}
+\end{frame}
+
+% 62
+\begin{frame}{Memory Lemmas}
+  \begin{itemize}
+    \item \lean{natToBytesLE_length}: encoded byte list has requested width.
+    \item \lean{readBytes?_writeBytes_same}: writing bytes then reading same range returns those bytes.
+    \item \lean{decode_encode_*}: scalar roundtrip lemmas for supported types.
+    \item \lean{readMem_writeMem_same_global_*}: typed global write/read roundtrips.
+  \end{itemize}
+\end{frame}
+
+% 63
+\begin{frame}{State Preservation Lemmas}
+  \begin{itemize}
+    \item Many instructions should not mutate global/param/const memory.
+    \item Store should preserve lane register and predicate files.
+    \item Barriers should preserve data memory and register/predicate files, but mutate barrier and lane status/PC.
+    \item These facts become reusable frame facts for kernel proofs.
+  \end{itemize}
+\end{frame}
+
+% 64
+\begin{frame}{Current Lemma Status}
+  \begin{itemize}
+    \item \statusproved: basic register/predicate read-after-write and non-alias frame lemmas.
+    \item \statusproved: byte encoding, reading, and global memory read-after-write for key scalar types.
+    \item \statusproved: non-store instruction top-memory preservation for several cases.
+    \item \statusadmit: barrier frame lemmas, several reg/pred preservation lemmas, generic wf preservation, and kernelEnv preservation.
+  \end{itemize}
+\end{frame}
+
+% 65
+\begin{frame}{Executable-to-Relational Soundness}
+  \begin{itemize}
+    \item \lean{body_of_stepInstr?}: if helper instruction step succeeds under preconditions, produce \lean{StepMachine}.
+    \item \lean{term_of_stepTerminator?}: same for terminators.
+    \item \lean{body_of_currentInstrStep?_computed}: executable current instruction step is sound.
+    \item \lean{term_of_currentTermStep?_computed}: executable current terminator step is sound.
+  \end{itemize}
+\end{frame}
+
+% 66
+\begin{frame}{Automation Layer}
+  \begin{itemize}
+    \item \lean{cstep}: discharges concrete \lean{StepMachine} goals by using current-step soundness and \lean{native_decide}.
+    \item \lean{crun}: uses \lean{runN_reaches}.
+    \item \lean{cpost}: calls \lean{native_decide} on boolean postconditions.
+    \item \lean{cfinish}: tries one of the above.
+  \end{itemize}
+\end{frame}
+
+% 67
+\begin{frame}{Why Determinism Is Scoped}
+  \begin{itemize}
+    \item General GPU scheduling is intentionally not solved yet.
+    \item The current executable driver steps CTA 0, warp 0.
+    \item Many examples, including saxpy, use a single populated warp.
+    \item The project proves that, under \lean{IsSingleWarp}, any relational step is captured by \lean{step?}.
+  \end{itemize}
+\end{frame}
+
+% 68
+\begin{frame}[fragile]{IsSingleWarp}
+\begin{lstlisting}
+def IsSingleWarp (st : State) : Prop :=
+  forall cta warp ws,
+    st.getWarp? cta warp = some ws -> cta = 0 /\ warp = 0
+\end{lstlisting}
+
+  This predicate says the only warp that exists in the state is CTA 0, warp 0.
+\end{frame}
+
+% 69
+\begin{frame}{Single-Warp Determinism Theorem}
+  \begin{itemize}
+    \item \lean{step?_of_StepMachine}: under \lean{IsSingleWarp}, any \lean{StepMachine st st'} implies \lean{step? st = some st'}.
+    \item \lean{reaches_imp_runN_of_IsSingleWarp}: any reachable final state is some \lean{runN fuel init}.
+    \item \lean{terminal_eq_runN}: terminal states reduce to executable runs.
+    \item This is the core bridge used by saxpy partial correctness.
+  \end{itemize}
+\end{frame}
+
+% 70
+\begin{frame}{Stuck Stability}
+  \begin{itemize}
+    \item \lean{step?_eq_none_of_MachineFinal}: final relational state is stuck for the executable scheduler.
+    \item \lean{runN_eq_of_step?_none}: once stuck, extra fuel does nothing.
+    \item \lean{runN_add}: executable runs compose over fuel.
+    \item \lean{runN_eq_of_both_MachineFinal}: two final \lean{runN} endpoints from the same init are equal.
+  \end{itemize}
+\end{frame}
+
+% 71
+\begin{frame}{Single-Warp Preservation}
+  \begin{itemize}
+    \item \file{Proof/IsSingleWarpPres.lean} proves updates do not introduce new warp keys.
+    \item The main invariant is \lean{WarpSupportEq}: two states agree on which CTA/warp lookups succeed.
+    \item Primitive updates such as \lean{setLane}, \lean{writeMem?}, and \lean{advanceRunnablePcs?} preserve support.
+    \item \lean{step?_preserves_IsSingleWarp} is the headline preservation theorem.
+  \end{itemize}
+\end{frame}
+
+% 72
+\begin{frame}{Single-Warp Preservation Status}
+  \begin{itemize}
+    \item \statusproved: most primitive support-preservation lemmas.
+    \item \statusproved: instruction, terminator, and \lean{step?} preservation structure.
+    \item \statusadmit: \lean{stepBarrierCTA?_preserves_warp_support} is still a \lean{sorry}.
+    \item Consequence: the high-level preservation theorem currently depends on that admitted barrier lemma.
+  \end{itemize}
+\end{frame}
+
+% 73
+\begin{frame}{Loop Proof API}
+  \begin{itemize}
+    \item \lean{CountedLoopSpec} abstracts an invariant, guard, body relation, variant, and postcondition.
+    \item \lean{partial_correct}: invariant preservation plus exit rule implies postcondition.
+    \item \lean{total_correct}: decreasing natural variant gives termination and postcondition.
+    \item This is mostly for future loop-heavy kernels like matmul; saxpy is straight-line after the early-exit branch.
+  \end{itemize}
+\end{frame}
+
+% 74
+\begin{frame}{Lane Decomposition Goal}
+  \begin{itemize}
+    \item GPU warp semantics updates multiple lanes at once.
+    \item Saxpy correctness is naturally per element, hence per lane.
+    \item Need to show each lane's local view evolves as expected under full-warp execution.
+    \item Need to combine per-lane facts into a global memory postcondition.
+  \end{itemize}
+\end{frame}
+
+% 75
+\begin{frame}{Lane View}
+  \begin{itemize}
+    \item \lean{LaneView} projects one lane's registers, predicates, local memory, PC, and status.
+    \item \lean{LaneLocal st lane} extracts the view at CTA 0, warp 0.
+    \item \lean{instrWriteSet?} computes addresses written by a lane for store/atomic instructions.
+    \item \lean{DisjointLaneWrites} states pairwise write-set disjointness across active lanes.
+  \end{itemize}
+\end{frame}
+
+% 76
+\begin{frame}{Lane Decomposition Status}
+  \begin{itemize}
+    \item \statusproved: definitions for write sets, disjointness, lane view, and lift are implemented.
+    \item \statusproved: current commutation statements are weak/existence-shaped and do not yet prove saxpy.
+    \item \statusfuture: strengthen \lean{lanes_independent_runN} to a real per-lane run theorem.
+    \item \statusfuture: connect lane-disjoint stores to global vector postconditions.
+  \end{itemize}
+\end{frame}
+
+% 77
+\begin{frame}{Proof Methodology Summary}
+  \begin{itemize}
+    \item Keep executable semantics as the single semantic source.
+    \item Prove executable steps are sound relational steps.
+    \item Use frame lemmas to localize instruction effects.
+    \item Use determinism for single-warp kernels to reduce arbitrary terminal traces to \lean{runN}.
+    \item Use lane decomposition to lift per-lane symbolic execution to full-warp vector correctness.
+  \end{itemize}
+\end{frame}
+
+\section{PTX Front End}
+
+% 78
+\begin{frame}{PTX Files}
+  \begin{tabular}{>{\ttfamily}p{0.33\linewidth}p{0.57\linewidth}}
+    \toprule
+    PTX/Ast.lean & syntax AST independent of semantic IR \\
+    PTX/Parser.lean & parser combinators with source-position errors \\
+    PTX/Lowering.lean & checked lowering to CLean IR \\
+    PTX/Bridge.lean & parse-plus-lower API and error type \\
+    Proof/Bridge.lean & intended soundness theorem surface \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+% 79
+\begin{frame}{PTX AST Role}
+  \begin{itemize}
+    \item It preserves PTX syntactic distinctions before semantic decisions.
+    \item Operands include registers, predicates, symbols, addresses, immediates, and special registers.
+    \item Instructions include supported operations and an \lean{unsupported} fallback.
+    \item Kernels store declarations, params, shared declarations, and parsed blocks.
+  \end{itemize}
+\end{frame}
+
+% 80
+\begin{frame}[fragile]{PTX Instruction AST}
+\begin{lstlisting}
+inductive Instr where
+  | mov (ty : ScalarTy) (dst : RegName) (src : Operand)
+  | binop (op : ScalarBinaryOp) (ty : ScalarTy) (dst : RegName) (lhs rhs : Operand)
+  | setp (op : CmpOp) (ty : ScalarTy) (dst : PredName) (lhs rhs : Operand)
+  | ld (space : AddrSpace) (ty : ScalarTy) (dst : RegName) (addr : Operand)
+  | st (space : AddrSpace) (ty : ScalarTy) (addr value : Operand)
+  | cvta (space : AddrSpace) (dst : RegName) (src : Operand)
+  | barSync (barrierId : Nat)
+  | unsupported (opcode : String) (modifiers : Array String) (operands : Array Operand)
+\end{lstlisting}
+\end{frame}
+
+% 81
+\begin{frame}{Parser Design}
+  \begin{itemize}
+    \item Implemented with Lean's \lean{Std.Internal.Parsec.String}.
+    \item Tracks line and column on parse failure.
+    \item Handles whitespace, line comments, block comments, and pragmas.
+    \item Parses module directives, declarations, labels, instructions, and kernels.
+  \end{itemize}
+\end{frame}
+
+% 82
+\begin{frame}{Parser Instruction Coverage}
+  \begin{itemize}
+    \item Arithmetic: \lean{add}, \lean{sub}, \lean{mul.lo}, \lean{mul.wide.s32}, \lean{mad.lo}, \lean{fma.rn}.
+    \item Predicate ops: \lean{setp}, \lean{or.pred}, \lean{and.pred}, \lean{xor.pred}.
+    \item Memory: \lean{ld.<space>.<ty>}, \lean{st.<space>.<ty>}.
+    \item Address: \lean{cvta.to.<space>}, \lean{isspacep.<space>}.
+    \item Control: labels, \lean{bra}, guarded \lean{@p bra}, \lean{exit}/\lean{ret}.
+  \end{itemize}
+\end{frame}
+
+% 83
+\begin{frame}{Parser Block Construction}
+  \begin{itemize}
+    \item Statements are parsed as instructions, terminators, guarded branches, or no-ops.
+    \item Guarded branches split the current statement stream into a block ending in \lean{cbra}.
+    \item Fallthrough blocks receive generated labels.
+    \item Implicit fallthroughs are linked to the next parsed block or to exit.
+  \end{itemize}
+\end{frame}
+
+% 84
+\begin{frame}{Lowering Strategy}
+  \begin{itemize}
+    \item Unchecked lowering exists for direct syntax-to-IR mapping.
+    \item Checked lowering is the important path.
+    \item Checked lowering threads a \lean{Typing.TypeEnv}.
+    \item Each instruction checks operands, supported types, guards, labels, params, and shared symbols.
+  \end{itemize}
+\end{frame}
+
+% 85
+\begin{frame}{Lowering Error Model}
+  \begin{itemize}
+    \item \lean{unknownReg}, \lean{unknownPred}, \lean{unknownParam}, \lean{unknownShared}.
+    \item \lean{unknownSymbol}, \lean{unknownBlock}.
+    \item \lean{typeMismatch}, \lean{unsupportedType}, \lean{unsupportedOp}, \lean{unsupportedModifier}.
+    \item This is crucial for making unsupported PTX fail loudly at the boundary.
+  \end{itemize}
+\end{frame}
+
+% 86
+\begin{frame}{Checked Lowering Examples}
+  \begin{itemize}
+    \item \lean{mov.u32} lowers to \lean{assignReg}.
+    \item \lean{add.u32} lowers to \lean{assignReg} with \lean{RValue.binop add}.
+    \item \lean{setp.ge.s32} lowers to \lean{assignPred}.
+    \item \lean{ld.global.s32} lowers to \lean{load} with a typed global address.
+    \item \lean{st.global.s32} lowers to \lean{store}.
+  \end{itemize}
+\end{frame}
+
+% 87
+\begin{frame}[fragile]{Lowering Skeleton}
+\begin{lstlisting}
+def lowerInstrChecked? (env : Typing.TypeEnv) :
+    Instr -> LowerM (CLean.Instr x Typing.TypeEnv)
+  | .mov ty dst src => do
+      expectOperandType env ty src
+      let src <- lowerOperandCheckedAs? env ty src
+      pure (.assignReg dst src, { env with regs := env.regs.insert dst ty })
+  | .ld space ty dst addr => do
+      ensureCodecType ty
+      let addrTy <- addressOperandType? env space addr
+      ...
+\end{lstlisting}
+
+  Note: the actual file uses Lean product syntax; this slide uses \lean{x} visually for readability.
+\end{frame}
+
+% 88
+\begin{frame}{Kernel Environment Lowering}
+  \begin{itemize}
+    \item Parameters are laid out with \lean{lowerParamsChecked?}.
+    \item Shared declarations are laid out with \lean{lowerSharedsChecked?}.
+    \item Blocks are lowered into a \lean{HashMap BlockLabel Block}.
+    \item Entry label is checked against the block-label map.
+  \end{itemize}
+\end{frame}
+
+% 89
+\begin{frame}{Parser/Lowering Bridge}
+  \begin{itemize}
+    \item \lean{BridgeError} distinguishes parse errors from lowering errors.
+    \item \lean{parseAndLowerKernel?} parses one kernel and checked-lowers it.
+    \item \lean{parseAndLowerModule?} checks every kernel in a parsed module.
+    \item Boolean wrappers power examples: \lean{parseAndLowerKernelOk?}, \lean{parseAndLowerModuleOk?}.
+  \end{itemize}
+\end{frame}
+
+% 90
+\begin{frame}{Proof Bridge Status}
+  \begin{itemize}
+    \item \file{Proof/Bridge.lean} defines \lean{LoweredKernelWf} and \lean{LoweredModuleWf}.
+    \item \statusadmit: \lean{lowerKernelEnvChecked_wf}.
+    \item \statusadmit: \lean{parseAndLowerKernel?_sound}.
+    \item \statusadmit: \lean{parseAndLowerModule?_sound}.
+    \item These are clean theorem surfaces, but not yet fully proved.
+  \end{itemize}
+\end{frame}
+
+\section{Examples and Regression Tests}
+
+% 91
+\begin{frame}{Example Strategy}
+  \begin{itemize}
+    \item Start with tiny semantic IR kernels: assign, copy, barrier.
+    \item Then test manually built PTX AST lowering.
+    \item Then parse PTX text and lower it.
+    \item Finally execute parsed/lowered kernels with \lean{runN} and boolean postconditions.
+  \end{itemize}
+\end{frame}
+
+% 92
+\begin{frame}{Semantic Examples}
+  \begin{itemize}
+    \item Toy assign: one lane writes \lean{r1 = 7} and terminates.
+    \item Toy copy: load global \lean{u32}, store to another global offset, terminate.
+    \item Toy barrier: barrier releases under expected count 1, then assignment and termination.
+    \item These examples use \lean{cstep}, \lean{runN}, and \lean{native_decide}.
+  \end{itemize}
+\end{frame}
+
+% 93
+\begin{frame}{Lowering Examples}
+  \begin{itemize}
+    \item Direct PTX AST instructions are lowered and compared by reflexivity.
+    \item Checked lowering rejects use-before-declare.
+    \item Parsed/lowered PTX kernels run under the semantic driver.
+    \item Coverage includes assign, add, copy, param copy, barrier, and shared memory.
+  \end{itemize}
+\end{frame}
+
+% 94
+\begin{frame}{Executable Validation Philosophy}
+  \begin{itemize}
+    \item Concrete examples do not prove parametric correctness.
+    \item They are still valuable because they exercise the actual parser, lowering, and semantics.
+    \item \lean{native_decide} catches many integration bugs quickly.
+    \item The proof architecture then explains what remains beyond testing.
+  \end{itemize}
+\end{frame}
+
+\section{Saxpy Case Study}
+
+% 95
+\begin{frame}{Saxpy Target}
+  The saxpy-style integer kernel computes:
+  \[
+    r[i] = x[i] * \alpha + y[i]
+  \]
+  for active lanes whose thread index is below \lean{n}.
+
+  \vspace{0.5em}
+  In this repo, the data values are \lean{s32}; the postcondition uses 32-bit signed wrapping through \lean{s32Wrap}.
+\end{frame}
+
+% 96
+\begin{frame}{Saxpy PTX Shape}
+  \begin{itemize}
+    \item Parameters: \lean{n}, \lean{alpha}, \lean{x} pointer, \lean{y} pointer, \lean{r} pointer.
+    \item Loads parameter values from \lean{.param}.
+    \item Computes \lean{threadIdx = ctaid.x * ntid.x + tid.x}.
+    \item Branches to return if \lean{threadIdx >= n}.
+    \item Otherwise loads \lean{x[i]} and \lean{y[i]}, computes \lean{x[i] * alpha + y[i]}, stores \lean{r[i]}.
+  \end{itemize}
+\end{frame}
+
+% 97
+\begin{frame}[fragile]{Saxpy PTX Core}
+\begin{lstlisting}
+ld.param.u32 %r2, [saxpyKernel_param_0];
+ld.param.s32 %r6, [saxpyKernel_param_1];
+ld.param.u64 %rd1, [saxpyKernel_param_2];
+...
+mad.lo.s32 %r1, %r3, %r4, %r5;
+setp.ge.s32 %p1, %r1, %r2;
+@%p1 bra $L__BB0_2;
+...
+ld.global.s32 %r7, [%rd6];
+ld.global.s32 %r8, [%rd8];
+mad.lo.s32 %r9, %r7, %r6, %r8;
+st.global.s32 [%rd10], %r9;
+\end{lstlisting}
+\end{frame}
+
+% 98
+\begin{frame}{Saxpy Parsing and Lowering}
+  \begin{itemize}
+    \item \lean{saxpyKernelText} stores the PTX source.
+    \item \lean{PTX.parseAndLowerKernelOk? saxpyKernelText = true} is checked by \lean{native_decide}.
+    \item \lean{PTX.lowerKernelSupported? saxpyKernel = true} is also checked.
+    \item This validates that the current parser and checked-lowering subset covers this kernel.
+  \end{itemize}
+\end{frame}
+
+% 99
+\begin{frame}{Saxpy Initial State}
+  \begin{itemize}
+    \item \lean{saxpyXBase = 0}, \lean{saxpyYBase = 128}, \lean{saxpyRBase = 256}.
+    \item Parameter memory stores \lean{n}, \lean{alpha}, and three base pointers.
+    \item Global memory stores input vectors \lean{xs} and \lean{ys}.
+    \item One CTA and one warp are populated; active mask is \lean{activeMaskPrefix n}.
+  \end{itemize}
+\end{frame}
+
+% 100
+\begin{frame}[fragile]{saxpyStateFor}
+\begin{lstlisting}
+def saxpyStateFor (n : Nat) (alpha : Int) (xs ys : List Int) : State :=
+  { kernelEnv := PTX.lowerKernelEnvCheckedD saxpyKernel
+    global := { bytes := saxpyGlobalBytesFor xs ys }
+    param := { bytes := saxpyParamBytesFor n alpha }
+    ctas := ({} : Std.HashMap CTAId CTAState).insert 0
+      { warps := ({} : Std.HashMap WarpId WarpState).insert 0
+          (saxpyWarpFor n) } }
+\end{lstlisting}
+\end{frame}
+
+% 101
+\begin{frame}{Saxpy Postcondition}
+  \begin{itemize}
+    \item \lean{saxpyExpectedAt alpha xs ys i} computes wrapped \lean{xs[i] * alpha + ys[i]}.
+    \item \lean{saxpyPost base n alpha xs ys st} requires every index below \lean{n} to match expected global memory.
+    \item It is built from \lean{vectorS32Post}.
+    \item This is the parametric final property for saxpy.
+  \end{itemize}
+\end{frame}
+
+% 102
+\begin{frame}[fragile]{Saxpy Spec Helpers}
+\begin{lstlisting}
+def saxpyExpectedAt (alpha : Int) (xs ys : List Int) (i : Nat) : Int :=
+  s32Wrap (listIntGetD xs i * alpha + listIntGetD ys i)
+
+def saxpyPost (base n : Nat) (alpha : Int) (xs ys : List Int)
+    (st : State) : Prop :=
+  vectorS32Post base n (saxpyExpectedAt alpha xs ys) st
+\end{lstlisting}
+\end{frame}
+
+% 103
+\begin{frame}{Concrete Saxpy Status}
+  \begin{itemize}
+    \item File header documents an axiom-clean concrete run for \lean{n = 4}.
+    \item Expected output: \lean{[12, 24, 36, 48]} for \lean{alpha = 2}, \lean{xs = [1,2,3,4]}, \lean{ys = [10,20,30,40]}.
+    \item The current visible file focuses on the general theorem path and the admitted symbolic execution lemma.
+    \item Running \file{CLean/Examples/Saxpy.lean} currently succeeds with a warning that \lean{saxpy_runN_satisfies_post} uses \lean{sorry}.
+  \end{itemize}
+\end{frame}
+
+% 104
+\begin{frame}{Saxpy Single-Warp Lemma}
+  \begin{itemize}
+    \item \lean{saxpyStateFor_isSingleWarp} is proved.
+    \item It unfolds the state construction and proves any successful warp lookup must be CTA 0, warp 0.
+    \item This is the entry point into the single-warp determinism machinery.
+    \item It is specific to the state constructor, not an axiom about the kernel.
+  \end{itemize}
+\end{frame}
+
+% 105
+\begin{frame}{Saxpy Proof Reduction}
+  The general \lean{saxpy_partial_correct} proof has a meaningful skeleton:
+
+  \begin{enumerate}
+    \item Initial state is \lean{IsSingleWarp}.
+    \item \lean{step?} preserves \lean{IsSingleWarp}.
+    \item Any terminal relational final equals \lean{runN K init}.
+    \item A symbolic execution theorem supplies a terminal \lean{runN J init} satisfying the post.
+    \item Stuck-stability equates the two terminal \lean{runN} endpoints.
+  \end{enumerate}
+\end{frame}
+
+% 106
+\begin{frame}{Remaining Saxpy Bottleneck}
+  The key remaining theorem is:
+
+  \vspace{0.5em}
+  \lean{saxpy_runN_satisfies_post}
+
+  \vspace{0.5em}
+  It must show that for every supported launch shape \lean{n <= 32} with matching input lengths, there exists fuel \lean{K} such that \lean{runN K init} is final and satisfies \lean{saxpyPost}.
+\end{frame}
+
+% 107
+\begin{frame}{What the Saxpy RunN Theorem Requires}
+  \begin{itemize}
+    \item A straight-line symbolic execution of the saxpy body.
+    \item Per-lane reasoning for thread index, branch predicate, pointer offsets, loads, multiply-add, and store.
+    \item Read-after-write memory lemmas for each lane's output slot.
+    \item Lane-disjointness proof: lane \lean{i} writes only output address \lean{rBase + i * 4}.
+    \item Lift from per-lane stores to vector postcondition.
+  \end{itemize}
+\end{frame}
+
+% 108
+\begin{frame}{Saxpy Early-Exit Case}
+  \begin{itemize}
+    \item For lanes with \lean{i >= n}, \lean{setp.ge.s32} sets the branch predicate.
+    \item The guarded branch takes them to return.
+    \item These lanes should not write output.
+    \item The postcondition only quantifies \lean{i < n}, so inactive/out-of-range behavior is framed away.
+  \end{itemize}
+\end{frame}
+
+% 109
+\begin{frame}{Saxpy Active-Lane Case}
+  \begin{itemize}
+    \item For lanes with \lean{i < n}, the branch predicate is false.
+    \item The lane converts parameter pointers to global addresses.
+    \item It computes byte offset \lean{i * 4}.
+    \item It reads \lean{x[i]} and \lean{y[i]}.
+    \item It writes \lean{s32Wrap (x[i] * alpha + y[i])} to \lean{r[i]}.
+  \end{itemize}
+\end{frame}
+
+% 110
+\begin{frame}{Saxpy Memory Argument}
+  \begin{itemize}
+    \item Input and output regions are separated by base constants 0, 128, and 256.
+    \item For \lean{n <= 32}, each vector occupies at most 128 bytes.
+    \item Output slots \lean{rBase + i * 4} are pairwise distinct.
+    \item The write/read lemmas already cover global \lean{s32} stores, but the vector-wide frame/lift is still needed.
+  \end{itemize}
+\end{frame}
+
+% 111
+\begin{frame}{What Is Left Before saxpy Is Honest}
+  \begin{itemize}
+    \item Fill remaining \file{Proof/Lemmas.lean} frame and preservation holes.
+    \item Strengthen \file{Proof/LaneDecomposition.lean} from shape statements to pointwise lane execution.
+    \item Prove the active-lane symbolic execution sequence for saxpy.
+    \item Prove lane-disjoint store addresses.
+    \item Package the postcondition proof and remove \lean{saxpy_runN_satisfies_post}'s \lean{sorry}.
+  \end{itemize}
+\end{frame}
+
+% 112
+\begin{frame}{Saxpy Progress Report}
+  \begin{tabular}{p{0.50\linewidth}p{0.30\linewidth}}
+    \toprule
+    Component & Status \\
+    \midrule
+    PTX source parses & \statusexec \\
+    Checked lowering accepts kernel & \statusexec \\
+    State constructor and memory layout & implemented \\
+    Single-warp initial-state lemma & \statusproved \\
+    Determinism reduction for partial correctness & \statusproved, with dependencies \\
+    Symbolic run theorem & \statusadmit \\
+    Total correctness theorem & depends on admitted symbolic run \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+\section{Known Limitations}
+
+% 113
+\begin{frame}{Known Semantic Limitations}
+  \begin{itemize}
+    \item General warp scheduling and multi-CTA interleavings are not solved.
+    \item Non-uniform conditional branches currently fail rather than model divergence/reconvergence.
+    \item Warp ops, atomics, and MMA are represented but mostly not implemented in \lean{stepInstr?}.
+    \item Floating-point semantics use Lean \lean{Float}; this is not bit-exact PTX f32.
+  \end{itemize}
+\end{frame}
+
+% 114
+\begin{frame}{Known Proof Limitations}
+  \begin{itemize}
+    \item Several frame and preservation theorems are currently admitted.
+    \item Parser/lowering soundness is stated but not yet proved.
+    \item Lane decomposition is architected but not strong enough for saxpy yet.
+    \item Matmul general correctness is intentionally admitted pending loop-invariant proofs.
+  \end{itemize}
+\end{frame}
+
+% 115
+\begin{frame}{Why the Existing Sorries Are Manageable}
+  \begin{itemize}
+    \item They are named and localized rather than hidden behind broad trusted theorems.
+    \item Many have mechanical proof shapes: unfold executable function, split cases, apply update frame lemmas.
+    \item The saxpy remaining theorem is kernel-specific and can be decomposed by lane and instruction.
+    \item The proof surface makes it clear what \lean{\#print axioms} should report.
+  \end{itemize}
+\end{frame}
+
+% 116
+\begin{frame}{Recommended Next Milestone}
+  \begin{enumerate}
+    \item Finish \lean{stepInstr?_preserves_kernelEnv} and wf preservation.
+    \item Finish barrier frame/support lemmas or restrict saxpy path to no-barrier dependencies where possible.
+    \item Prove a strong \lean{applyToLaneIds?} lane-in/lane-not-in theorem sufficient for multi-lane register updates.
+    \item Prove saxpy active-lane straight-line computation.
+    \item Remove \lean{saxpy_runN_satisfies_post}'s \lean{sorry}.
+  \end{enumerate}
+\end{frame}
+
+% 117
+\begin{frame}{Longer-Term Path}
+  \begin{itemize}
+    \item Prove parser/lowering well-formedness.
+    \item Generalize from single-warp to scheduler-independent multi-CTA reasoning.
+    \item Model divergence/reconvergence if needed for real PTX kernels.
+    \item Replace float semantics with bit-precise f32/f64 if hardware equivalence is the goal.
+    \item Instantiate \lean{CountedLoopSpec} for matmul's unrolled and remainder loops.
+  \end{itemize}
+\end{frame}
+
+% 118
+\begin{frame}{What This Deck Claims}
+  \begin{itemize}
+    \item CLean already has a functioning semantic pipeline from parsed PTX to executable IR.
+    \item Concrete examples are running through the actual semantics.
+    \item The theorem architecture for saxpy is in place.
+    \item The current blocking work is well-scoped proof engineering, not redesign.
+    \item Scaling beyond saxpy will require stronger lane and loop infrastructure.
+  \end{itemize}
+\end{frame}
+
+% 119
+\begin{frame}{Files to Discuss Live}
+  \begin{itemize}
+    \item \file{CLean/Core/IR.lean}: semantic instruction vocabulary.
+    \item \file{CLean/Semantics/Helpers.lean}: executable behavior.
+    \item \file{CLean/Proof/Determinism.lean}: single-warp determinism bridge.
+    \item \file{CLean/PTX/Parser.lean}: PTX ingestion.
+    \item \file{CLean/PTX/Lowering.lean}: checked lowering.
+    \item \file{CLean/Examples/Saxpy.lean}: case study and current proof boundary.
+  \end{itemize}
+\end{frame}
+
+% 120
+\begin{frame}{Discussion}
+  The central advisor question is now strategic:
+
+  \vspace{0.8em}
+  \begin{block}{Next proof target}
+    Should the immediate milestone be a fully honest saxpy proof under the current single-warp model, or should the project first strengthen the semantic model for divergence and scheduling before investing in kernel-specific proof?
+  \end{block}
+\end{frame}
+
+\end{document}
