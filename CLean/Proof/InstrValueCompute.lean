@@ -1,4 +1,5 @@
 import CLean.Proof.InstrCompute
+import CLean.Proof.Determinism
 
 /-! # Per-instruction value-tracking lemmas
 
@@ -1812,5 +1813,196 @@ theorem stepInstr?_store_lane_memory
       -- Apply writeBytes_fold_target_value.
       exact writeBytes_fold_target_value participants hNoDup laneAddrOff laneBytes
         wByte hLen hDisj st.global.bytes j hjIn
+
+/-! ## Terminator step lemmas
+
+Saxpy uses `.cbr` (conditional branch) and `.terminate` (return). The
+`stepTerminator?` follows the same `lockstep + applyToLaneIds?` pattern as
+`stepInstr?`, but the inner function may change a lane's `status` (for
+terminate) or `pc` (for cbr). -/
+
+/-- The "lanes" list used by `stepTerminator?` — runnable lanes at the
+current pc. -/
+private def termParticipants (warpState : WarpState) (pc : PC) : List LaneId :=
+  (runnableLaneIds warpState).filter fun lane =>
+    match warpState.getLane? lane with
+    | some laneState => laneState.pc == pc
+    | none => false
+
+private theorem termParticipants_nodup (warpState : WarpState) (pc : PC) :
+    (termParticipants warpState pc).Nodup := by
+  have hLaneIdsNoDup : (laneIds : List LaneId).Nodup := by
+    unfold laneIds; exact List.nodup_finRange 32
+  have hRunNoDup : (runnableLaneIds warpState).Nodup :=
+    List.Nodup.filter _ hLaneIdsNoDup
+  unfold termParticipants
+  exact List.Nodup.filter _ hRunNoDup
+
+/-- For a runnable lane whose pc matches `currentRunnablePc?`, it appears in
+the `stepTerminator?` participants list. -/
+private theorem mem_termParticipants
+    {warpState : WarpState} {pc : PC} {lane : LaneId} {laneState : LaneState}
+    (hWarpLane : warpState.getLane? lane = some laneState)
+    (hLanePc : laneState.pc = pc)
+    (hRun : lane ∈ runnableLaneIds warpState) :
+    lane ∈ termParticipants warpState pc := by
+  unfold termParticipants
+  apply List.mem_filter.mpr
+  refine ⟨hRun, ?_⟩
+  rw [hWarpLane]; simp [hLanePc]
+
+/-- **`stepTerminator?` on `.terminate`**: every runnable lane at the
+current pc has its status set to `.terminated`; other fields are
+preserved. -/
+theorem stepTerminator?_terminate_lane_full
+    {st st' : State} {cta : CTAId} {warp : WarpId}
+    {warpState : WarpState} {pc : PC}
+    {lane : LaneId} {laneState : LaneState}
+    (hWf : State.wf st)
+    (hWarp : st.getWarp? cta warp = some warpState)
+    (hLock : lockstepRunnable warpState)
+    (hPc : currentRunnablePc? warpState = some pc)
+    (hLane : st.getLane? cta warp lane = some laneState)
+    (hLanePc : laneState.pc = pc)
+    (hRun : lane ∈ runnableLaneIds warpState)
+    (hStep : stepTerminator? st cta warp .terminate = some st') :
+    ∃ laneState' : LaneState,
+      st'.getLane? cta warp lane = some laneState' ∧
+      laneState'.regs = laneState.regs ∧
+      laneState'.preds = laneState.preds ∧
+      laneState'.localMem = laneState.localMem ∧
+      laneState'.pc = laneState.pc ∧
+      laneState'.status = .terminated := by
+  unfold stepTerminator? at hStep
+  rw [hWarp] at hStep; simp at hStep
+  have hLockB := (lockstepRunnable_iff_bool warpState).1 hLock
+  rw [hLockB] at hStep; simp at hStep
+  rw [hPc] at hStep; simp at hStep
+  -- hStep : applyToLaneIds? st cta warp termParticipants (... terminated ...) = some st'
+  have hWarpLane : warpState.getLane? lane = some laneState := by
+    unfold State.getLane? at hLane
+    rw [hWarp] at hLane; simpa using hLane
+  have hMem : lane ∈ termParticipants warpState pc :=
+    mem_termParticipants hWarpLane hLanePc hRun
+  -- Apply applyToLaneIds?_lane_in.
+  have hMid := applyToLaneIds?_lane_in cta warp
+    (fun _ ls => some { ls with status := .terminated })
+    (termParticipants warpState pc)
+    (termParticipants_nodup warpState pc)
+    st st' hWf hStep lane hMem laneState hLane
+  obtain ⟨ls', hF, hGet⟩ := hMid
+  simp at hF
+  subst hF
+  exact ⟨{ laneState with status := .terminated }, hGet, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- **`stepTerminator?` on `.cbr` with uniform direction**: when all
+participants evaluate the condition to a uniform boolean `b`, every lane's
+pc is set to the corresponding label. -/
+theorem stepTerminator?_cbr_lane_full
+    {st st' : State} {cta : CTAId} {warp : WarpId}
+    {cond : RValue} {tLabel fLabel : BlockLabel}
+    {warpState : WarpState} {pc : PC} {dest : PC}
+    {lane : LaneId} {laneState : LaneState}
+    (hWf : State.wf st)
+    (hWarp : st.getWarp? cta warp = some warpState)
+    (hLock : lockstepRunnable warpState)
+    (hPc : currentRunnablePc? warpState = some pc)
+    (hLane : st.getLane? cta warp lane = some laneState)
+    (hLanePc : laneState.pc = pc)
+    (hRun : lane ∈ runnableLaneIds warpState)
+    (hDest : uniformBranchDestination? st cta warp
+              (termParticipants warpState pc) cond tLabel fLabel = some dest)
+    (hStep : stepTerminator? st cta warp (.cbr cond tLabel fLabel) = some st') :
+    ∃ laneState' : LaneState,
+      st'.getLane? cta warp lane = some laneState' ∧
+      laneState'.regs = laneState.regs ∧
+      laneState'.preds = laneState.preds ∧
+      laneState'.localMem = laneState.localMem ∧
+      laneState'.status = laneState.status ∧
+      laneState'.pc = dest := by
+  unfold stepTerminator? at hStep
+  rw [hWarp] at hStep; simp at hStep
+  have hLockB := (lockstepRunnable_iff_bool warpState).1 hLock
+  rw [hLockB] at hStep; simp at hStep
+  rw [hPc] at hStep; simp at hStep
+  -- hStep has the uniformBranchDestination?.bind over the filter form.
+  -- Rewrite using `termParticipants` so we can apply hDest.
+  change ((uniformBranchDestination? st cta warp (termParticipants warpState pc) cond tLabel fLabel).bind
+    fun dest =>
+    applyToLaneIds? st cta warp (termParticipants warpState pc) fun _ ls =>
+      some { ls with pc := dest }) = some st' at hStep
+  rw [hDest] at hStep; simp at hStep
+  have hWarpLane : warpState.getLane? lane = some laneState := by
+    unfold State.getLane? at hLane
+    rw [hWarp] at hLane; simpa using hLane
+  have hMem : lane ∈ termParticipants warpState pc :=
+    mem_termParticipants hWarpLane hLanePc hRun
+  have hMid := applyToLaneIds?_lane_in cta warp
+    (fun _ ls => some { ls with pc := dest })
+    (termParticipants warpState pc)
+    (termParticipants_nodup warpState pc)
+    st st' hWf hStep lane hMem laneState hLane
+  obtain ⟨ls', hF, hGet⟩ := hMid
+  simp at hF
+  subst hF
+  exact ⟨{ laneState with pc := dest }, hGet, rfl, rfl, rfl, rfl, rfl⟩
+
+/-! ## `runN` chain machinery -/
+
+@[simp] theorem runN_zero (st : State) :
+    StepMachine.runN 0 st = st := rfl
+
+theorem runN_succ_some {st st' : State} {n : Nat}
+    (h : StepMachine.step? st = some st') :
+    StepMachine.runN (n + 1) st = StepMachine.runN n st' := by
+  show (match StepMachine.step? st with
+        | some s => StepMachine.runN n s
+        | none => st) = StepMachine.runN n st'
+  rw [h]
+
+theorem runN_succ_none {st : State} {n : Nat}
+    (h : StepMachine.step? st = none) :
+    StepMachine.runN (n + 1) st = st := by
+  show (match StepMachine.step? st with
+        | some s => StepMachine.runN n s
+        | none => st) = st
+  rw [h]
+
+/-- Reduce `step?` to `stepInstr?` when at a body position and `stepInstr?` succeeds. -/
+theorem step?_body_some
+    {st st' : State} {warpState : WarpState} {pc : PC} {block : Block} {gi : GInstr}
+    {participants : List LaneId}
+    (hwf : State.wf st)
+    (hgetWarp : st.getWarp? 0 0 = some warpState)
+    (hwfWS : WarpState.wf warpState)
+    (hlock : lockstepRunnable warpState)
+    (hPc : currentRunnablePc? warpState = some pc)
+    (hblock : st.kernelEnv.blocks[pc.1]? = some block)
+    (hgi : block.body[pc.2]? = some gi)
+    (hpart : participatingRunnableLaneIds? warpState gi.guard? = some participants)
+    (hInstr : stepInstr? st 0 0 gi = some st') :
+    StepMachine.step? st = some st' := by
+  unfold StepMachine.step? StepMachine.stepAt?
+  rw [StepMachine.currentInstrStep?_of_body
+      hwf hgetWarp hwfWS hlock hPc hblock hgi hpart]
+  rw [hInstr]
+
+/-- Reduce `step?` to `stepTerminator?` when past the end of a block's body. -/
+theorem step?_term
+    {st : State} {warpState : WarpState} {pc : PC} {block : Block}
+    (hwf : State.wf st)
+    (hgetWarp : st.getWarp? 0 0 = some warpState)
+    (hwfWS : WarpState.wf warpState)
+    (hlock : lockstepRunnable warpState)
+    (hPc : currentRunnablePc? warpState = some pc)
+    (hblock : st.kernelEnv.blocks[pc.1]? = some block)
+    (hbody : block.body[pc.2]? = none) :
+    StepMachine.step? st = stepTerminator? st 0 0 block.term := by
+  unfold StepMachine.step? StepMachine.stepAt?
+  rw [StepMachine.currentInstrStep?_none_at_term
+      hwf hgetWarp hwfWS hlock hPc hblock hbody]
+  simp
+  rw [StepMachine.currentTermStep?_of_term
+      hwf hgetWarp hwfWS hlock hPc hblock hbody]
 
 end CLean
