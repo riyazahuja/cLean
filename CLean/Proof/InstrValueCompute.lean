@@ -1987,6 +1987,26 @@ theorem step?_body_some
       hwf hgetWarp hwfWS hlock hPc hblock hgi hpart]
   rw [hInstr]
 
+/-! ## `globalS32At?` ↔ `readBytes?` bridge
+
+For saxpy's terminal value-check, we need to connect the byte-level
+postcondition produced by `stepInstr?_store_lane_memory` to the
+`globalS32At?` form expected by `saxpyPost`. -/
+
+theorem globalS32At?_of_readBytes
+    {st : State} {base index : Nat} {bs : List Byte} {v : Int}
+    (hAlign : (base + index * 4) % 4 = 0)
+    (hRead : readBytes? st.global.bytes (base + index * 4) 4 = some bs)
+    (hDecode : decodeScalar? .s32 bs = some (.s32 v)) :
+    globalS32At? st base index = some v := by
+  unfold globalS32At? readMem?
+  have hPre : Typing.typedAccessPreconditions? .global .s32
+      (.global (base + index * 4)) = true := by
+    unfold Typing.typedAccessPreconditions?
+    simp [Typing.scalarCodecSupported?, Typing.byteWidth?, Typing.aligned?,
+          Typing.alignment?, Typing.addrSpaceMatches?, Addr.offset, Addr.space, hAlign]
+  simp [hPre, Typing.byteWidth?, getSpaceBaseMem?, Addr.offset, hRead, hDecode]
+
 /-- Reduce `step?` to `stepTerminator?` when past the end of a block's body. -/
 theorem step?_term
     {st : State} {warpState : WarpState} {pc : PC} {block : Block}
