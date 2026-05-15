@@ -136,4 +136,42 @@ lemma participatingRunnable_saxpyWarp_none (n : Nat) (hn : n ≤ 32) (hnpos : 0 
   simp
   interval_cases n <;> rfl
 
+/-! ## Initial-state well-formedness
+
+`State.wf` only inspects the kernel-env structure and the lane count of each
+warp; it doesn't depend on the data values `α, xs, ys` (which only live in
+byte memories) or on the active-mask value `n`. So the initial saxpy state
+is well-formed for every supported launch shape. -/
+
+/-- `State.wf` for the initial saxpy state, for any supported launch shape. -/
+lemma saxpyStateFor_wf (n : Nat) (alpha : Int) (xs ys : List Int) :
+    State.wf (saxpyStateFor n alpha xs ys) := by
+  show State.wf? _ = true
+  unfold State.wf? saxpyStateFor
+  rw [Bool.and_eq_true]
+  refine ⟨?_, ?_⟩
+  · show KernelEnv.wf? (PTX.lowerKernelEnvCheckedD saxpyKernel) = true
+    native_decide
+  · simp only [List.all_eq_true]
+    rintro ⟨cta, cs⟩ hmem
+    rw [Std.HashMap.mem_toList_iff_getElem?_eq_some] at hmem
+    rw [Std.HashMap.getElem?_insert] at hmem
+    split at hmem
+    · simp at hmem
+      subst hmem
+      show CTAState.wf? _ = true
+      unfold CTAState.wf?
+      simp only [List.all_eq_true]
+      rintro ⟨warp, ws⟩ hwmem
+      rw [Std.HashMap.mem_toList_iff_getElem?_eq_some] at hwmem
+      rw [Std.HashMap.getElem?_insert] at hwmem
+      split at hwmem
+      · simp at hwmem
+        subst hwmem
+        show WarpState.wf? (saxpyWarpFor n) = true
+        unfold WarpState.wf? saxpyWarpFor
+        simp [Array.size_replicate]
+      · simp at hwmem
+    · simp at hmem
+
 end CLean
