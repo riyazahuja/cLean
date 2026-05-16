@@ -306,5 +306,108 @@ def Terminator.isTerminate : Terminator → Bool
   | .terminate => true
   | _ => false
 
+/-! ### Per-instruction operand projections
+
+For load/cvta/assignReg/etc., we project to the *operands* via small
+functions that return `Option <small-DecidableEq-type>`. These pair with
+`native_decide` to characterize each operand. -/
+
+/-- Project a load's destination register. -/
+def Instr.loadDst? : Instr → Option RegName
+  | .load dst _ => some dst
+  | _ => none
+
+/-- Project a load's source `TypedAddr.space`. -/
+def Instr.loadSrcSpace? : Instr → Option AddrSpace
+  | .load _ src => some src.space
+  | _ => none
+
+/-- Project a load's source `TypedAddr.ty`. -/
+def Instr.loadSrcTy? : Instr → Option ScalarTy
+  | .load _ src => some src.ty
+  | _ => none
+
+/-- Project a load's source-address `.imm (.u64 v)` to `v`. -/
+def Instr.loadSrcImmU64? : Instr → Option UInt64
+  | .load _ { addr := .imm (.u64 v), .. } => some v
+  | _ => none
+
+/-! ### Body-slot 0: `ld.param.u32 %r2, [param_0]`
+
+The first instruction of saxpy's entry block. -/
+
+/-- `saxpyBB0.body[0]?` exists. -/
+theorem saxpyBB0_body0_isSome : (saxpyBB0.body[0]?).isSome = true := by
+  unfold saxpyBB0; native_decide
+
+/-- Concrete extraction of `saxpyBB0.body[0]?` as a `GInstr`. -/
+def saxpyBB0_gi0 : GInstr := saxpyBB0.body[0]?.get saxpyBB0_body0_isSome
+
+theorem saxpyBB0_body0 : saxpyBB0.body[0]? = some saxpyBB0_gi0 :=
+  Option.eq_some_iff_get_eq.mpr ⟨saxpyBB0_body0_isSome, rfl⟩
+
+theorem saxpyBB0_gi0_isLoad : saxpyBB0_gi0.instr.isLoad = true := by
+  unfold saxpyBB0_gi0 saxpyBB0; native_decide
+
+theorem saxpyBB0_gi0_guard_none : saxpyBB0_gi0.guard? = none := by
+  rw [← Option.isNone_iff_eq_none]
+  show saxpyBB0_gi0.guard?.isNone = true
+  unfold saxpyBB0_gi0 saxpyBB0; native_decide
+
+theorem saxpyBB0_gi0_loadDst : saxpyBB0_gi0.instr.loadDst? = some "r2" := by
+  unfold saxpyBB0_gi0 saxpyBB0; native_decide
+
+theorem saxpyBB0_gi0_loadSrcSpace : saxpyBB0_gi0.instr.loadSrcSpace? = some .param := by
+  unfold saxpyBB0_gi0 saxpyBB0; native_decide
+
+theorem saxpyBB0_gi0_loadSrcTy : saxpyBB0_gi0.instr.loadSrcTy? = some .u32 := by
+  unfold saxpyBB0_gi0 saxpyBB0; native_decide
+
+theorem saxpyBB0_gi0_loadSrcImm : saxpyBB0_gi0.instr.loadSrcImmU64? = some 0 := by
+  unfold saxpyBB0_gi0 saxpyBB0; native_decide
+
+/-- **Full equality on `saxpyBB0_gi0.instr`.** Combines the per-operand
+projections via a discriminator-driven `cases` chain to recover the
+complete `.load "r2" { … }` shape. -/
+theorem saxpyBB0_gi0_instr_eq :
+    saxpyBB0_gi0.instr = .load "r2"
+      { space := .param, ty := .u32, addr := .imm (.u64 0) } := by
+  have hLoad := saxpyBB0_gi0_isLoad
+  have hDst := saxpyBB0_gi0_loadDst
+  have hSp := saxpyBB0_gi0_loadSrcSpace
+  have hTy := saxpyBB0_gi0_loadSrcTy
+  have hImm := saxpyBB0_gi0_loadSrcImm
+  generalize saxpyBB0_gi0.instr = i at hLoad hDst hSp hTy hImm ⊢
+  cases i
+  case load dst src =>
+    simp [Instr.loadDst?] at hDst
+    obtain ⟨space, ty, addr⟩ := src
+    simp [Instr.loadSrcSpace?] at hSp
+    simp [Instr.loadSrcTy?] at hTy
+    subst hDst; subst hSp; subst hTy
+    cases addr
+    case imm v =>
+      cases v
+      case u64 w =>
+        simp [Instr.loadSrcImmU64?] at hImm
+        subst hImm; rfl
+      all_goals (exfalso; exact absurd hImm (by simp [Instr.loadSrcImmU64?]))
+    all_goals (exfalso; exact absurd hImm (by simp [Instr.loadSrcImmU64?]))
+  all_goals (exfalso; exact absurd hLoad (by simp [Instr.isLoad]))
+
+/-- **Full equality on `saxpyBB0_gi0`.** -/
+theorem saxpyBB0_gi0_eq :
+    saxpyBB0_gi0 =
+      { guard? := none
+        instr := .load "r2"
+          { space := .param, ty := .u32, addr := .imm (.u64 0) } } := by
+  have hg := saxpyBB0_gi0_guard_none
+  have hi := saxpyBB0_gi0_instr_eq
+  rcases hh : saxpyBB0_gi0 with ⟨g, i⟩
+  rw [hh] at hg hi
+  simp at hg hi
+  subst hg; subst hi; rfl
+
 end CLean
+
 
