@@ -408,6 +408,94 @@ theorem saxpyBB0_gi0_eq :
   simp at hg hi
   subst hg; subst hi; rfl
 
+/-! ## Per-lane initial-state characterization
+
+For each lane `j` in `saxpyActiveLanes n hn`, the lane's initial state in
+`saxpyStateFor n α xs ys` is the canonical `{ pc := ("saxpyKernel", 0) }`
+(with all other fields default). -/
+
+/-- The lane at any `j : LaneId` in `saxpyStateFor n α xs ys` is the canonical
+initial lane state. -/
+theorem saxpyStateFor_getLane (n : Nat) (alpha : Int) (xs ys : List Int)
+    (j : LaneId) :
+    (saxpyStateFor n alpha xs ys).getLane? 0 0 j =
+      some { pc := ("saxpyKernel", 0) } := by
+  unfold saxpyStateFor State.getLane? State.getWarp? State.getCTA?
+  simp [saxpyWarpFor, WarpState.getLane?, Array.getElem?_eq_some_iff, j.isLt]
+
+/-- Resolves the address of `ld.param.u32 [param_0]`: returns `.param 0`,
+uniform across lanes. -/
+theorem resolveAddr_saxpyStateFor_param0 (n : Nat) (alpha : Int) (xs ys : List Int)
+    (j : LaneId) :
+    resolveAddr? (saxpyStateFor n alpha xs ys) 0 0 j
+        { space := .param, ty := .u32, addr := .imm (.u64 0) }
+      = some (.param 0) := by
+  unfold resolveAddr? evalRValue?
+  rfl
+
+/-! ## Step 1 of the chain: `ld.param.u32 %r2, [param_0]`
+
+The first executable step from `saxpyStateFor n α xs ys` (with `n > 0`)
+loads `(UInt32.ofNat n)` into `%r2` on every active lane and advances PC
+to `("saxpyKernel", 1)`. -/
+
+theorem saxpy_step1_load_param0
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    ∃ st1 : State,
+      StepMachine.step? (saxpyStateFor n alpha xs ys) = some st1 ∧
+      ∀ j ∈ saxpyActiveLanes n hn,
+        ∃ ls1 : LaneState,
+          st1.getLane? 0 0 j = some ls1 ∧
+          ls1.regs["r2"]? = some (.u32 (UInt32.ofNat n)) ∧
+          ls1.pc = ("saxpyKernel", 1) ∧
+          ls1.status = .running := by
+  have hWf := saxpyStateFor_wf n alpha xs ys
+  have hWarp := saxpyStateFor_getWarp n alpha xs ys
+  have hWsWf := saxpyWarp_wf n
+  have hLock := saxpyWarp_lockstepRunnable n
+  have hPc := currentRunnablePc_saxpyWarp_pos n hn hnpos
+  have hBlock := saxpyStateFor_blocks_lookup n alpha xs ys
+  have hPart : participatingRunnableLaneIds? (saxpyWarpFor n) saxpyBB0_gi0.guard?
+                = some (saxpyActiveLanes n hn) := by
+    rw [saxpyBB0_gi0_guard_none]
+    exact participatingRunnable_saxpyWarp_none n hn hnpos
+  cases hstep : stepInstr? (saxpyStateFor n alpha xs ys) 0 0 saxpyBB0_gi0 with
+  | none =>
+    -- The load CAN'T fail (resolveAddr? + readMem? both succeed uniformly on
+    -- every active lane, and advanceRunnablePcs? succeeds because the load
+    -- preserves lane PCs). Discharging this honestly requires a
+    -- `stepInstr?_load_succeeds_uniform` auxiliary lemma in InstrValueCompute.lean
+    -- (which would need `applyToLaneIds?_isSome_of_each_some` +
+    -- `advanceRunnablePcs?_isSome_of_currentRunnablePc?_preserved`,
+    -- ~150 lines of new infrastructure). Not built yet; this is the one
+    -- remaining gap in step 1.
+    exfalso
+    rw [saxpyBB0_gi0_eq] at hstep
+    unfold stepInstr? at hstep
+    rw [hWarp] at hstep
+    have hLockB := (lockstepRunnable_iff_bool (saxpyWarpFor n)).1 hLock
+    simp [hLockB, hPart, saxpyBB0_gi0_guard_none] at hstep
+    sorry
+  | some st1 =>
+    refine ⟨st1, ?_, ?_⟩
+    · exact step?_body_some hWf hWarp hWsWf hLock hPc hBlock saxpyBB0_body0 hPart hstep
+    · intro j hj
+      have hLane := saxpyStateFor_getLane n alpha xs ys j
+      have hLanePc : ({ pc := ("saxpyKernel", 0) } : LaneState).pc = ("saxpyKernel", 0) := rfl
+      have hAddr := resolveAddr_saxpyStateFor_param0 n alpha xs ys j
+      have hRead := readMem_saxpyStateFor_param0 n alpha xs ys
+      rw [saxpyBB0_gi0_eq] at hstep
+      have hPart' : participatingRunnableLaneIds? (saxpyWarpFor n) (none : Option Guard)
+                    = some (saxpyActiveLanes n hn) :=
+        participatingRunnable_saxpyWarp_none n hn hnpos
+      obtain ⟨ls1, hGet1, hRegs, _hPreds, _hLocal, hStatus, hPc1⟩ :=
+        stepInstr?_load_lane_full hWf hWarp hLock hPc hPart' hj hLane hLanePc hAddr hRead hstep
+      refine ⟨ls1, hGet1, ?_, ?_, ?_⟩
+      · rw [hRegs]; simp [Std.HashMap.getElem?_insert]
+      · exact hPc1
+      · rw [hStatus]
+
 end CLean
 
 
