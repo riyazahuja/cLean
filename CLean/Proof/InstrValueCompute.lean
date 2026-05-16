@@ -715,7 +715,7 @@ registers preserved AND its pc advanced. -/
 /-- Membership in `participants` implies the lane is runnable and its pc
 equals the current runnable pc. Extracted from the body of
 `participatingRunnableLaneIds?`. -/
-private theorem participant_runnable_pc
+theorem participant_runnable_pc
     {ws : WarpState} {g : Option Guard} {parts : List LaneId} {pc : PC}
     (hPc : currentRunnablePc? ws = some pc)
     (hPart : participatingRunnableLaneIds? ws g = some parts) :
@@ -2024,5 +2024,157 @@ theorem step?_term
   simp
   rw [StepMachine.currentTermStep?_of_term
       hwf hgetWarp hwfWS hlock hPc hblock hbody]
+
+/-! ## Existence-style "succeeds" lemmas
+
+These give *existence* of a successor state under preconditions, rather
+than characterizing a successor that's already known to exist. They're
+needed to bridge from "all the per-lane operations succeed" to the
+existential form `∃ st', stepInstr? ... = some st'` required to apply
+the `_lane_full` lemmas. -/
+
+/-- `applyToLaneIds?` succeeds when the lane list is `Nodup`, each lane
+exists in the warp at the start, and the per-lane function returns `some`
+on each `(lane, ls)` pair. Inducts on `lanes`, using
+`setLane_preserves_other_lane` (so later lanes still have a `getLane?`
+result after one setLane) and `State.wf_of_setLane`. -/
+theorem applyToLaneIds?_isSome_of_each_some
+    {cta : CTAId} {warp : WarpId}
+    {f : LaneId → LaneState → Option LaneState}
+    {lanes : List LaneId}
+    (hNoDup : lanes.Nodup) :
+    ∀ (st : State), State.wf st →
+      (∀ lane ∈ lanes,
+         ∃ ls, st.getLane? cta warp lane = some ls ∧ (f lane ls).isSome = true) →
+      (applyToLaneIds? st cta warp lanes f).isSome = true := by
+  induction lanes with
+  | nil => intro st _ _; rw [applyToLaneIds?_nil]; rfl
+  | cons head tail ih =>
+    intro st hWf hLaneSome
+    have hNoDupTail : tail.Nodup := (List.nodup_cons.mp hNoDup).2
+    have hHeadNotInTail : head ∉ tail := (List.nodup_cons.mp hNoDup).1
+    rw [applyToLaneIds?_cons]
+    obtain ⟨ls, hLs, hFSome⟩ := hLaneSome head List.mem_cons_self
+    rw [hLs, Option.some_bind]
+    obtain ⟨ls', hLs'⟩ := Option.isSome_iff_exists.mp hFSome
+    rw [hLs', Option.some_bind]
+    have hWarp : ∃ ws, st.getWarp? cta warp = some ws := by
+      unfold State.getLane? at hLs
+      cases hW : st.getWarp? cta warp with
+      | none => simp [hW] at hLs
+      | some ws => exact ⟨ws, rfl⟩
+    obtain ⟨ws, hWs⟩ := hWarp
+    have hSetSome : (st.setLane cta warp head ls').isSome = true := by
+      simp [State.setLane, hWs, State.setWarp, State.setCTA]
+      unfold State.getCTA?
+      have : ∃ cs, st.ctas[cta]? = some cs := by
+        unfold State.getWarp? State.getCTA? at hWs
+        cases hCs : st.ctas[cta]? with
+        | none => simp [hCs] at hWs
+        | some cs => exact ⟨cs, rfl⟩
+      obtain ⟨cs, hCs⟩ := this; rw [hCs]; rfl
+    obtain ⟨stMid, hStMid⟩ := Option.isSome_iff_exists.mp hSetSome
+    rw [hStMid, Option.some_bind]
+    apply ih hNoDupTail stMid (State.wf_of_setLane hWf hStMid)
+    intro lane hLane
+    have hLaneNeHead : lane ≠ head := fun h => hHeadNotInTail (h ▸ hLane)
+    have hLaneInOrig : lane ∈ head :: tail := List.mem_cons_of_mem _ hLane
+    obtain ⟨lsLane, hLsLane, hFLane⟩ := hLaneSome lane hLaneInOrig
+    refine ⟨lsLane, ?_, hFLane⟩
+    rw [setLane_preserves_other_lane hStMid lane hLaneNeHead]
+    exact hLsLane
+
+/-- `advanceRunnablePcs?` succeeds whenever the warp has a current runnable
+pc. Applies `applyToLaneIds?_isSome_of_each_some` with the
+`fun _ ls => some (advancePcForLane ls)` function (which always returns
+`some`). -/
+theorem advanceRunnablePcs?_isSome_of_currentRunnablePc
+    {st : State} {cta : CTAId} {warp : WarpId} {ws : WarpState} {pc : PC}
+    (hWf : State.wf st)
+    (hWarp : st.getWarp? cta warp = some ws)
+    (hPc : currentRunnablePc? ws = some pc) :
+    (advanceRunnablePcs? st cta warp).isSome = true := by
+  unfold advanceRunnablePcs?
+  rw [hWarp]
+  show ((some ws).bind _).isSome = true
+  rw [Option.some_bind, hPc]
+  show ((some pc).bind _).isSome = true
+  rw [Option.some_bind]
+  apply applyToLaneIds?_isSome_of_each_some (hNoDup := ?_) st hWf ?_
+  · apply List.Nodup.filter
+    apply List.Nodup.filter
+    unfold laneIds; exact List.nodup_finRange 32
+  · intro lane hLane
+    rw [List.mem_filter] at hLane
+    obtain ⟨_, hPcEq⟩ := hLane
+    cases hWsLane : ws.getLane? lane with
+    | none => rw [hWsLane] at hPcEq; simp at hPcEq
+    | some lsX =>
+      refine ⟨lsX, ?_, ?_⟩
+      · unfold State.getLane?; rw [hWarp]; simp [hWsLane]
+      · simp
+
+/-- **Existence-style** version of `stepInstr?_load_lane_full`. Given that
+`resolveAddr?` and `readMem?` succeed uniformly across all participants,
+`stepInstr?` on the load returns some `st'`. -/
+theorem stepInstr?_load_succeeds_uniform
+    {st : State} {cta : CTAId} {warp : WarpId}
+    {warpState : WarpState} {pc : PC} {participants : List LaneId}
+    {dst : RegName} {src : TypedAddr} {guard? : Option Guard}
+    (hWf : State.wf st)
+    (hWarp : st.getWarp? cta warp = some warpState)
+    (hLock : lockstepRunnable warpState)
+    (hPc : currentRunnablePc? warpState = some pc)
+    (hPart : participatingRunnableLaneIds? warpState guard? = some participants)
+    (hPartNodup : participants.Nodup)
+    (hAddrRead : ∀ lane ∈ participants,
+      ∃ addr, resolveAddr? st cta warp lane src = some addr ∧
+        ∃ val, readMem? st src.space src.ty addr = some val) :
+    ∃ st', stepInstr? st cta warp { guard? := guard?, instr := .load dst src }
+            = some st' := by
+  set fLoad : LaneId → LaneState → Option LaneState := fun lane laneState =>
+    (resolveAddr? st cta warp lane src).bind fun addr =>
+      (readMem? st src.space src.ty addr).bind fun value =>
+        some (writeReg laneState dst value) with hfLoad
+  have hWsWf := WarpState.wf_of_getWarp? hWf hWarp
+  -- 1. applyToLaneIds? succeeds.
+  have hPartLaneSome : ∀ lane ∈ participants,
+      ∃ ls, st.getLane? cta warp lane = some ls ∧ (fLoad lane ls).isSome = true := by
+    intro lane hLane
+    obtain ⟨_, ls, hLsWs, _⟩ := participant_runnable_pc hPc hPart lane hLane
+    refine ⟨ls, ?_, ?_⟩
+    · unfold State.getLane?; rw [hWarp]; simp [hLsWs]
+    · obtain ⟨addr, hAddr, val, hRead⟩ := hAddrRead lane hLane
+      simp [hfLoad, hAddr, hRead]
+  have hApplyIsSome :
+      (applyToLaneIds? st cta warp participants fLoad).isSome = true :=
+    applyToLaneIds?_isSome_of_each_some hPartNodup st hWf hPartLaneSome
+  obtain ⟨stMid, hApply⟩ := Option.isSome_iff_exists.mp hApplyIsSome
+  -- 2. fLoad preserves status/pc (writeReg only touches regs).
+  have hPresF : PreservesStatusPc fLoad := by
+    intro l ls ls' hF
+    simp [hfLoad, Option.bind_eq_some_iff] at hF
+    obtain ⟨_, _, _, _, hWrite⟩ := hF
+    rw [← hWrite]; unfold writeReg; exact ⟨rfl, rfl⟩
+  -- 3. Get the post-apply warp state.
+  obtain ⟨wsMid, hWsMid, _⟩ := applyToLaneIds?_preserves_activeMask hApply warpState hWarp
+  -- 4. currentRunnablePc? wsMid = some pc.
+  have hWfMid : State.wf stMid := applyToLaneIds?_preserves_wf hWf hApply
+  have hPcMid : currentRunnablePc? wsMid = some pc := by
+    rw [applyToLaneIds?_preserves_currentRunnablePc?
+        hPresF hWf hWarp hWsMid hWsWf hApply]
+    exact hPc
+  -- 5. advanceRunnablePcs? on stMid succeeds.
+  have hAdvIsSome : (advanceRunnablePcs? stMid cta warp).isSome = true :=
+    advanceRunnablePcs?_isSome_of_currentRunnablePc hWfMid hWsMid hPcMid
+  obtain ⟨st', hAdv⟩ := Option.isSome_iff_exists.mp hAdvIsSome
+  refine ⟨st', ?_⟩
+  -- 6. Assemble: unfold stepInstr? and discharge the bind chain.
+  unfold stepInstr?
+  rw [hWarp]
+  show ((some warpState).bind _) = some st'
+  rw [Option.some_bind]
+  have hLockB := (lockstepRunnable_iff_bool warpState).1 hLock
+  simp [hLockB, hPart, hApply, hAdv, ← hfLoad]
 
 end CLean

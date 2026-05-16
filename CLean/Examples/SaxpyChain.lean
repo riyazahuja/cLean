@@ -456,45 +456,36 @@ theorem saxpy_step1_load_param0
   have hLock := saxpyWarp_lockstepRunnable n
   have hPc := currentRunnablePc_saxpyWarp_pos n hn hnpos
   have hBlock := saxpyStateFor_blocks_lookup n alpha xs ys
-  have hPart : participatingRunnableLaneIds? (saxpyWarpFor n) saxpyBB0_gi0.guard?
-                = some (saxpyActiveLanes n hn) := by
-    rw [saxpyBB0_gi0_guard_none]
-    exact participatingRunnable_saxpyWarp_none n hn hnpos
-  cases hstep : stepInstr? (saxpyStateFor n alpha xs ys) 0 0 saxpyBB0_gi0 with
-  | none =>
-    -- The load CAN'T fail (resolveAddr? + readMem? both succeed uniformly on
-    -- every active lane, and advanceRunnablePcs? succeeds because the load
-    -- preserves lane PCs). Discharging this honestly requires a
-    -- `stepInstr?_load_succeeds_uniform` auxiliary lemma in InstrValueCompute.lean
-    -- (which would need `applyToLaneIds?_isSome_of_each_some` +
-    -- `advanceRunnablePcs?_isSome_of_currentRunnablePc?_preserved`,
-    -- ~150 lines of new infrastructure). Not built yet; this is the one
-    -- remaining gap in step 1.
-    exfalso
-    rw [saxpyBB0_gi0_eq] at hstep
-    unfold stepInstr? at hstep
-    rw [hWarp] at hstep
-    have hLockB := (lockstepRunnable_iff_bool (saxpyWarpFor n)).1 hLock
-    simp [hLockB, hPart, saxpyBB0_gi0_guard_none] at hstep
-    sorry
-  | some st1 =>
-    refine ⟨st1, ?_, ?_⟩
-    · exact step?_body_some hWf hWarp hWsWf hLock hPc hBlock saxpyBB0_body0 hPart hstep
-    · intro j hj
-      have hLane := saxpyStateFor_getLane n alpha xs ys j
-      have hLanePc : ({ pc := ("saxpyKernel", 0) } : LaneState).pc = ("saxpyKernel", 0) := rfl
-      have hAddr := resolveAddr_saxpyStateFor_param0 n alpha xs ys j
-      have hRead := readMem_saxpyStateFor_param0 n alpha xs ys
-      rw [saxpyBB0_gi0_eq] at hstep
-      have hPart' : participatingRunnableLaneIds? (saxpyWarpFor n) (none : Option Guard)
-                    = some (saxpyActiveLanes n hn) :=
-        participatingRunnable_saxpyWarp_none n hn hnpos
-      obtain ⟨ls1, hGet1, hRegs, _hPreds, _hLocal, hStatus, hPc1⟩ :=
-        stepInstr?_load_lane_full hWf hWarp hLock hPc hPart' hj hLane hLanePc hAddr hRead hstep
-      refine ⟨ls1, hGet1, ?_, ?_, ?_⟩
-      · rw [hRegs]; simp [Std.HashMap.getElem?_insert]
-      · exact hPc1
-      · rw [hStatus]
+  have hPart' : participatingRunnableLaneIds? (saxpyWarpFor n) (none : Option Guard)
+                = some (saxpyActiveLanes n hn) :=
+    participatingRunnable_saxpyWarp_none n hn hnpos
+  have hPartNodup : (saxpyActiveLanes n hn).Nodup :=
+    participatingRunnableLaneIds?_nodup hPart'
+  -- Existence of st1 via the new succeeds lemma.
+  obtain ⟨st1, hInstr⟩ :=
+    stepInstr?_load_succeeds_uniform hWf hWarp hLock hPc hPart' hPartNodup
+      (fun j _hj =>
+        ⟨.param 0, resolveAddr_saxpyStateFor_param0 n alpha xs ys j,
+         .u32 (UInt32.ofNat n), readMem_saxpyStateFor_param0 n alpha xs ys⟩)
+  -- Tie back to `saxpyBB0_gi0` to apply step?_body_some.
+  have hInstrGi : stepInstr? (saxpyStateFor n alpha xs ys) 0 0 saxpyBB0_gi0 = some st1 := by
+    rw [saxpyBB0_gi0_eq]; exact hInstr
+  have hPartGi : participatingRunnableLaneIds? (saxpyWarpFor n) saxpyBB0_gi0.guard?
+                  = some (saxpyActiveLanes n hn) := by
+    rw [saxpyBB0_gi0_guard_none]; exact hPart'
+  refine ⟨st1, ?_, ?_⟩
+  · exact step?_body_some hWf hWarp hWsWf hLock hPc hBlock saxpyBB0_body0 hPartGi hInstrGi
+  · intro j hj
+    have hLane := saxpyStateFor_getLane n alpha xs ys j
+    have hLanePc : ({ pc := ("saxpyKernel", 0) } : LaneState).pc = ("saxpyKernel", 0) := rfl
+    have hAddr := resolveAddr_saxpyStateFor_param0 n alpha xs ys j
+    have hRead := readMem_saxpyStateFor_param0 n alpha xs ys
+    obtain ⟨ls1, hGet1, hRegs, _hPreds, _hLocal, hStatus, hPc1⟩ :=
+      stepInstr?_load_lane_full hWf hWarp hLock hPc hPart' hj hLane hLanePc hAddr hRead hInstr
+    refine ⟨ls1, hGet1, ?_, ?_, ?_⟩
+    · rw [hRegs]; simp [Std.HashMap.getElem?_insert]
+    · exact hPc1
+    · rw [hStatus]
 
 end CLean
 
