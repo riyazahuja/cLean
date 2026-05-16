@@ -169,6 +169,23 @@ lemma readBytes?_saxpyParamBytesFor_param0 (n : Nat) (alpha : Int) :
   rw [hlen] at h
   exact h
 
+/-- **`readMem?` for the saxpy `ld.param.u32 [param_0]`.** Lifts the byte-level
+`readBytes?_saxpyParamBytesFor_param0` through the typed-access layer to
+produce a `Value.u32` result. -/
+lemma readMem_saxpyStateFor_param0 (n : Nat) (alpha : Int) (xs ys : List Int) :
+    readMem? (saxpyStateFor n alpha xs ys) .param .u32 (.param 0) =
+      some (.u32 (UInt32.ofNat n)) := by
+  unfold readMem? saxpyStateFor
+  simp [Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?,
+        Typing.byteWidth?, Typing.aligned?, Typing.alignment?,
+        Typing.addrSpaceMatches?, Addr.offset, Addr.space,
+        getSpaceBaseMem?]
+  rw [readBytes?_saxpyParamBytesFor_param0]
+  unfold decodeScalar?
+  simp [natToBytesLE_length, bytesToNatLE_natToBytesLE_4]
+  apply UInt32.toNat_inj.mp
+  simp [UInt32.toNat_ofNat]
+
 /-! ## Initial-state well-formedness
 
 `State.wf` only inspects the kernel-env structure and the lane count of each
