@@ -136,6 +136,39 @@ lemma participatingRunnable_saxpyWarp_none (n : Nat) (hn : n ≤ 32) (hnpos : 0 
   simp
   interval_cases n <;> rfl
 
+/-! ## Memory frame & param-byte read characterization -/
+
+/-- **Frame for `readBytes?` over a disjoint `writeBytes`.** Reading at `[k, k+width)`
+is unchanged by a `writeBytes` at `[offset, offset+bs.length)` when the ranges
+are disjoint. -/
+lemma readBytes?_writeBytes_outside_range
+    (mem : ByteMem) (offset width : Nat) (bs : List Byte) (k : Nat)
+    (hk : k + width ≤ offset ∨ k ≥ offset + bs.length) :
+    readBytes? (writeBytes mem offset bs) k width = readBytes? mem k width := by
+  apply readBytes?_congr
+  intro i hi
+  apply writeBytes_outside_range
+  rcases hk with h1 | h2
+  · left; omega
+  · right; omega
+
+/-- The first 4 bytes of `saxpyParamBytesFor n α` encode `(UInt32.ofNat n)`.
+The subsequent writes (`α`, three u64 base addresses) are at offsets ≥ 4, so
+they don't affect the first 4 bytes. -/
+lemma readBytes?_saxpyParamBytesFor_param0 (n : Nat) (alpha : Int) :
+    readBytes? (saxpyParamBytesFor n alpha) 0 4
+      = some (natToBytesLE (UInt32.ofNat n).toNat 4) := by
+  unfold saxpyParamBytesFor
+  unfold writeU64Bytes writeS32Bytes writeU32Bytes
+  rw [readBytes?_writeBytes_outside_range _ 24 _ _ 0 (by left; simp [natToBytesLE_length])]
+  rw [readBytes?_writeBytes_outside_range _ 16 _ _ 0 (by left; simp [natToBytesLE_length])]
+  rw [readBytes?_writeBytes_outside_range _ 8 _ _ 0 (by left; simp [natToBytesLE_length])]
+  rw [readBytes?_writeBytes_outside_range _ 4 _ _ 0 (by left; simp [natToBytesLE_length])]
+  have hlen : (natToBytesLE (UInt32.ofNat n).toNat 4).length = 4 := natToBytesLE_length _ _
+  have h := readBytes?_writeBytes_same ({} : ByteMem) 0 (natToBytesLE (UInt32.ofNat n).toNat 4)
+  rw [hlen] at h
+  exact h
+
 /-! ## Initial-state well-formedness
 
 `State.wf` only inspects the kernel-env structure and the lane count of each

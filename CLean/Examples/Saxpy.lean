@@ -466,6 +466,7 @@ theorem saxpy_partial_correct
   rw [StepMachine.runN_eq_of_both_MachineFinal hKFinal _hJFinal]
   exact hJPost
 
+
 /-- **Total correctness of saxpy for any supported launch.** Same as
 `saxpy_partial_correct` plus existence of a terminating execution. -/
 theorem saxpy_total_correct
