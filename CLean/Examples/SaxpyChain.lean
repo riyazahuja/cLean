@@ -346,6 +346,12 @@ def saxpyBB0_gi0 : GInstr := saxpyBB0.body[0]?.get saxpyBB0_body0_isSome
 theorem saxpyBB0_body0 : saxpyBB0.body[0]? = some saxpyBB0_gi0 :=
   Option.eq_some_iff_get_eq.mpr ⟨saxpyBB0_body0_isSome, rfl⟩
 
+/-- Concrete first instruction of BB0: `ld.param.u32 %r2, [param_0]`. -/
+def saxpyBB0_load_param0 : GInstr :=
+  { guard? := none
+    instr := .load "r2"
+      { space := .param, ty := .u32, addr := .imm (.u64 0) } }
+
 theorem saxpyBB0_gi0_isLoad : saxpyBB0_gi0.instr.isLoad = true := by
   unfold saxpyBB0_gi0 saxpyBB0; native_decide
 
@@ -408,6 +414,186 @@ theorem saxpyBB0_gi0_eq :
   simp at hg hi
   subst hg; subst hi; rfl
 
+theorem saxpyBB0_body0_load_param0 :
+    saxpyBB0.body[0]? = some saxpyBB0_load_param0 := by
+  unfold saxpyBB0_load_param0
+  rw [saxpyBB0_body0, saxpyBB0_gi0_eq]
+
+/-! ## Reusable step records
+
+The chain proofs should expose a small, uniform step artifact instead of
+repeating the `step?`/`stepInstr?` plumbing at every body slot. The context
+packages the structural hypotheses for the current body instruction; the
+record packages the successor state, the instruction-step equality, the
+top-level `step?` equality, and the per-step postcondition. -/
+
+/-- A top-level machine step plus a postcondition on its successor. -/
+structure StepRecord (pre : State) (Post : State → Prop) where
+  post : State
+  step : StepMachine.step? pre = some post
+  post_holds : Post post
+
+namespace StepRecord
+
+theorem to_exists {pre : State} {Post : State → Prop} (r : StepRecord pre Post) :
+    ∃ post, StepMachine.step? pre = some post ∧ Post post :=
+  ⟨r.post, r.step, r.post_holds⟩
+
+theorem runN_succ {pre : State} {Post : State → Prop} (r : StepRecord pre Post)
+    (fuel : Nat) :
+    StepMachine.runN (fuel + 1) pre = StepMachine.runN fuel r.post :=
+  runN_succ_some r.step
+
+end StepRecord
+
+/-- Structural context for one body instruction at the current runnable PC. -/
+structure BodyStepContext (st : State) (pc : PC) (block : Block) (gi : GInstr)
+    (participants : List LaneId) where
+  warpState : WarpState
+  wf : State.wf st
+  getWarp : st.getWarp? 0 0 = some warpState
+  warp_wf : WarpState.wf warpState
+  lockstep : lockstepRunnable warpState
+  currentPc : currentRunnablePc? warpState = some pc
+  block_lookup : st.kernelEnv.blocks[pc.1]? = some block
+  body_slot : block.body[pc.2]? = some gi
+  participants_eq : participatingRunnableLaneIds? warpState gi.guard? = some participants
+
+namespace BodyStepContext
+
+theorem participants_nodup
+    {st : State} {pc : PC} {block : Block} {gi : GInstr} {participants : List LaneId}
+    (ctx : BodyStepContext st pc block gi participants) :
+    participants.Nodup :=
+  participatingRunnableLaneIds?_nodup ctx.participants_eq
+
+theorem step_of_instr
+    {st : State} {pc : PC} {block : Block} {gi : GInstr} {participants : List LaneId}
+    (ctx : BodyStepContext st pc block gi participants)
+    {post : State}
+    (hInstr : stepInstr? st 0 0 gi = some post) :
+    StepMachine.step? st = some post :=
+  step?_body_some ctx.wf ctx.getWarp ctx.warp_wf ctx.lockstep ctx.currentPc
+    ctx.block_lookup ctx.body_slot ctx.participants_eq hInstr
+
+theorem lane_pre
+    {st : State} {pc : PC} {block : Block} {gi : GInstr} {participants : List LaneId}
+    (ctx : BodyStepContext st pc block gi participants)
+    {lane : LaneId}
+    (hLane : lane ∈ participants) :
+    ∃ laneState : LaneState,
+      st.getLane? 0 0 lane = some laneState ∧ laneState.pc = pc := by
+  obtain ⟨_, hLaneState⟩ :=
+    participant_runnable_pc ctx.currentPc ctx.participants_eq lane hLane
+  obtain ⟨laneState, hWarpLane, hLanePc⟩ := hLaneState
+  refine ⟨laneState, ?_, hLanePc⟩
+  unfold State.getLane?
+  rw [ctx.getWarp]
+  simp [hWarpLane]
+
+theorem lane_status_running
+    {st : State} {pc : PC} {block : Block} {gi : GInstr} {participants : List LaneId}
+    (ctx : BodyStepContext st pc block gi participants)
+    {lane : LaneId} {laneState : LaneState}
+    (hLane : lane ∈ participants)
+    (hGet : st.getLane? 0 0 lane = some laneState) :
+    laneState.status = .running := by
+  have hRun := (participant_runnable_pc ctx.currentPc ctx.participants_eq lane hLane).1
+  unfold runnableLaneIds at hRun
+  rw [List.mem_filter] at hRun
+  have hRunnable := hRun.2
+  have hWarpLane : ctx.warpState.getLane? lane = some laneState := by
+    unfold State.getLane? at hGet
+    rw [ctx.getWarp] at hGet
+    simpa using hGet
+  unfold laneIsRunnable at hRunnable
+  rw [hWarpLane] at hRunnable
+  rw [Bool.and_eq_true] at hRunnable
+  simpa using hRunnable.1
+
+end BodyStepContext
+
+/-- A body instruction step plus a postcondition on its successor. -/
+structure BodyStepRecord
+    {st : State} {pc : PC} {block : Block} {gi : GInstr}
+    {participants : List LaneId}
+    (ctx : BodyStepContext st pc block gi participants) (Post : State → Prop) where
+  post : State
+  instrStep : stepInstr? st 0 0 gi = some post
+  step : StepMachine.step? st = some post
+  post_holds : Post post
+
+namespace BodyStepRecord
+
+theorem to_exists
+    {st : State} {pc : PC} {block : Block} {gi : GInstr} {participants : List LaneId}
+    {ctx : BodyStepContext st pc block gi participants} {Post : State → Prop}
+    (r : BodyStepRecord ctx Post) :
+    ∃ post, StepMachine.step? st = some post ∧ Post post :=
+  ⟨r.post, r.step, r.post_holds⟩
+
+def toStepRecord
+    {st : State} {pc : PC} {block : Block} {gi : GInstr} {participants : List LaneId}
+    {ctx : BodyStepContext st pc block gi participants} {Post : State → Prop}
+    (r : BodyStepRecord ctx Post) :
+    StepRecord st Post :=
+  ⟨r.post, r.step, r.post_holds⟩
+
+end BodyStepRecord
+
+/-- Standard postcondition for a load body step: every participating lane has
+the loaded value in `dst`, advances by one slot, and remains runnable. -/
+def LoadStepPost (participants : List LaneId) (dst : RegName)
+    (valueAt : LaneId → Value) (pc : PC) (post : State) : Prop :=
+  ∀ lane ∈ participants,
+    ∃ laneState : LaneState,
+      post.getLane? 0 0 lane = some laneState ∧
+      laneState.regs[dst]? = some (valueAt lane) ∧
+      laneState.pc = (pc.1, pc.2 + 1) ∧
+      laneState.status = .running
+
+namespace BodyStepContext
+
+/-- Construct the standard load-step record from uniform address/read facts. -/
+noncomputable def loadStep
+    {st : State} {pc : PC} {block : Block} {participants : List LaneId}
+    {dst : RegName} {src : TypedAddr} {guard? : Option Guard}
+    (ctx : BodyStepContext st pc block
+      { guard? := guard?, instr := .load dst src } participants)
+    (valueAt : LaneId → Value)
+    (hAddrRead : ∀ lane ∈ participants,
+      ∃ addr, resolveAddr? st 0 0 lane src = some addr ∧
+        readMem? st src.space src.ty addr = some (valueAt lane)) :
+    BodyStepRecord ctx (LoadStepPost participants dst valueAt pc) := by
+  classical
+  have hExists :
+      ∃ post, stepInstr? st 0 0 { guard? := guard?, instr := .load dst src } = some post :=
+    stepInstr?_load_succeeds_uniform
+      (dst := dst) (src := src) (guard? := guard?) ctx.wf ctx.getWarp ctx.lockstep ctx.currentPc
+      ctx.participants_eq (participants_nodup ctx)
+      (fun lane hLane => by
+        obtain ⟨addr, hAddr, hRead⟩ := hAddrRead lane hLane
+        exact ⟨addr, hAddr, valueAt lane, hRead⟩)
+  let post := Classical.choose hExists
+  have hInstr :
+      stepInstr? st 0 0 { guard? := guard?, instr := .load dst src } = some post :=
+    Classical.choose_spec hExists
+  refine ⟨post, hInstr, step_of_instr ctx hInstr, ?_⟩
+  intro lane hLane
+  obtain ⟨laneState, hGet, hLanePc⟩ := lane_pre ctx hLane
+  have hStatus : laneState.status = .running := lane_status_running ctx hLane hGet
+  obtain ⟨addr, hAddr, hRead⟩ := hAddrRead lane hLane
+  obtain ⟨laneState', hGet', hRegs, _hPreds, _hLocal, hStatus', hPc'⟩ :=
+    stepInstr?_load_lane_full
+      (dst := dst) (src := src) (guard? := guard?) ctx.wf ctx.getWarp ctx.lockstep ctx.currentPc
+      ctx.participants_eq hLane hGet hLanePc hAddr hRead hInstr
+  refine ⟨laneState', hGet', ?_, hPc', ?_⟩
+  · rw [hRegs]
+    simp [Std.HashMap.getElem?_insert]
+  · rw [hStatus', hStatus]
+
+end BodyStepContext
+
 /-! ## Per-lane initial-state characterization
 
 For each lane `j` in `saxpyActiveLanes n hn`, the lane's initial state in
@@ -433,6 +619,40 @@ theorem resolveAddr_saxpyStateFor_param0 (n : Nat) (alpha : Int) (xs ys : List I
   unfold resolveAddr? evalRValue?
   rfl
 
+/-- Structural context for saxpy step 1, the first BB0 body instruction. -/
+def saxpy_step1_ctx
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    BodyStepContext (saxpyStateFor n alpha xs ys) ("saxpyKernel", 0)
+      saxpyBB0 saxpyBB0_load_param0 (saxpyActiveLanes n hn) :=
+  { warpState := saxpyWarpFor n
+    wf := saxpyStateFor_wf n alpha xs ys
+    getWarp := saxpyStateFor_getWarp n alpha xs ys
+    warp_wf := saxpyWarp_wf n
+    lockstep := saxpyWarp_lockstepRunnable n
+    currentPc := currentRunnablePc_saxpyWarp_pos n hn hnpos
+    block_lookup := saxpyStateFor_blocks_lookup n alpha xs ys
+    body_slot := saxpyBB0_body0_load_param0
+    participants_eq := participatingRunnable_saxpyWarp_none n hn hnpos }
+
+/-- Step-record form of the first saxpy load. Future chained steps should
+consume and produce records of this shape instead of rebuilding the
+`step?` plumbing locally. -/
+noncomputable def saxpy_step1_load_param0_record
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    BodyStepRecord (saxpy_step1_ctx n hn hnpos alpha xs ys)
+      (LoadStepPost (saxpyActiveLanes n hn) "r2"
+        (fun _ => .u32 (UInt32.ofNat n)) ("saxpyKernel", 0)) :=
+  BodyStepContext.loadStep (saxpy_step1_ctx n hn hnpos alpha xs ys)
+    (dst := "r2")
+    (src := { space := .param, ty := .u32, addr := .imm (.u64 0) })
+    (guard? := none)
+    (fun _ => .u32 (UInt32.ofNat n))
+    (fun lane _hLane =>
+      ⟨.param 0, resolveAddr_saxpyStateFor_param0 n alpha xs ys lane,
+       readMem_saxpyStateFor_param0 n alpha xs ys⟩)
+
 /-! ## Step 1 of the chain: `ld.param.u32 %r2, [param_0]`
 
 The first executable step from `saxpyStateFor n α xs ys` (with `n > 0`)
@@ -450,43 +670,10 @@ theorem saxpy_step1_load_param0
           ls1.regs["r2"]? = some (.u32 (UInt32.ofNat n)) ∧
           ls1.pc = ("saxpyKernel", 1) ∧
           ls1.status = .running := by
-  have hWf := saxpyStateFor_wf n alpha xs ys
-  have hWarp := saxpyStateFor_getWarp n alpha xs ys
-  have hWsWf := saxpyWarp_wf n
-  have hLock := saxpyWarp_lockstepRunnable n
-  have hPc := currentRunnablePc_saxpyWarp_pos n hn hnpos
-  have hBlock := saxpyStateFor_blocks_lookup n alpha xs ys
-  have hPart' : participatingRunnableLaneIds? (saxpyWarpFor n) (none : Option Guard)
-                = some (saxpyActiveLanes n hn) :=
-    participatingRunnable_saxpyWarp_none n hn hnpos
-  have hPartNodup : (saxpyActiveLanes n hn).Nodup :=
-    participatingRunnableLaneIds?_nodup hPart'
-  -- Existence of st1 via the new succeeds lemma.
-  obtain ⟨st1, hInstr⟩ :=
-    stepInstr?_load_succeeds_uniform hWf hWarp hLock hPc hPart' hPartNodup
-      (fun j _hj =>
-        ⟨.param 0, resolveAddr_saxpyStateFor_param0 n alpha xs ys j,
-         .u32 (UInt32.ofNat n), readMem_saxpyStateFor_param0 n alpha xs ys⟩)
-  -- Tie back to `saxpyBB0_gi0` to apply step?_body_some.
-  have hInstrGi : stepInstr? (saxpyStateFor n alpha xs ys) 0 0 saxpyBB0_gi0 = some st1 := by
-    rw [saxpyBB0_gi0_eq]; exact hInstr
-  have hPartGi : participatingRunnableLaneIds? (saxpyWarpFor n) saxpyBB0_gi0.guard?
-                  = some (saxpyActiveLanes n hn) := by
-    rw [saxpyBB0_gi0_guard_none]; exact hPart'
-  refine ⟨st1, ?_, ?_⟩
-  · exact step?_body_some hWf hWarp hWsWf hLock hPc hBlock saxpyBB0_body0 hPartGi hInstrGi
-  · intro j hj
-    have hLane := saxpyStateFor_getLane n alpha xs ys j
-    have hLanePc : ({ pc := ("saxpyKernel", 0) } : LaneState).pc = ("saxpyKernel", 0) := rfl
-    have hAddr := resolveAddr_saxpyStateFor_param0 n alpha xs ys j
-    have hRead := readMem_saxpyStateFor_param0 n alpha xs ys
-    obtain ⟨ls1, hGet1, hRegs, _hPreds, _hLocal, hStatus, hPc1⟩ :=
-      stepInstr?_load_lane_full hWf hWarp hLock hPc hPart' hj hLane hLanePc hAddr hRead hInstr
-    refine ⟨ls1, hGet1, ?_, ?_, ?_⟩
-    · rw [hRegs]; simp [Std.HashMap.getElem?_insert]
-    · exact hPc1
-    · rw [hStatus]
+  obtain ⟨st1, hStep, hPost⟩ :=
+    BodyStepRecord.to_exists (saxpy_step1_load_param0_record n hn hnpos alpha xs ys)
+  refine ⟨st1, hStep, ?_⟩
+  intro j hj
+  simpa [LoadStepPost] using hPost j hj
 
 end CLean
-
-
