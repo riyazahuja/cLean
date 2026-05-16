@@ -224,4 +224,87 @@ lemma saxpyStateFor_wf (n : Nat) (alpha : Int) (xs ys : List Int) :
       · simp at hwmem
     · simp at hmem
 
+/-! ## Block-content extraction
+
+The saxpy `kernelEnv.blocks["saxpyKernel"]?` lookup is a closed expression
+that doesn't reduce in the kernel (it goes through `lowerKernelEnvCheckedD`
+which is `def`-style, not `reducible`). `Block` also lacks `DecidableEq`
+(because `Instr` references `Value` which contains `Float`/`Array`).
+
+The pattern below sidesteps both: we name the looked-up block via
+`Option.get` on a `native_decide`-proved `isSome`, then characterize its
+content using only `Option.isNone`/`isSome` (always decidable) and small
+discriminator booleans (decidable because they only inspect constructor
+heads). The looked-up equality is recovered via `Option.eq_some_iff_get_eq`,
+which doesn't need `DecidableEq` at all. -/
+
+/-- The lowered BB0 of saxpy, extracted as a concrete `Block` via
+`Option.get` on a `native_decide`-proved `isSome`. -/
+def saxpyBB0 : Block :=
+  ((PTX.lowerKernelEnvCheckedD saxpyKernel).blocks["saxpyKernel"]?).get
+    (by native_decide)
+
+/-- The lookup `kernelEnv.blocks["saxpyKernel"]?` equals `some saxpyBB0`.
+Proved via `Option.eq_some_iff_get_eq` — no `DecidableEq` on `Block`. -/
+theorem saxpyBB0_lookup :
+    (PTX.lowerKernelEnvCheckedD saxpyKernel).blocks["saxpyKernel"]?
+      = some saxpyBB0 :=
+  Option.eq_some_iff_get_eq.mpr ⟨by native_decide, rfl⟩
+
+/-- The state's lookup equals `some saxpyBB0` at any saxpy launch shape. -/
+theorem saxpyStateFor_blocks_lookup (n : Nat) (alpha : Int) (xs ys : List Int) :
+    (saxpyStateFor n alpha xs ys).kernelEnv.blocks["saxpyKernel"]?
+      = some saxpyBB0 := by
+  show (PTX.lowerKernelEnvCheckedD saxpyKernel).blocks["saxpyKernel"]?
+        = some saxpyBB0
+  exact saxpyBB0_lookup
+
+/-! ### Per-instruction discriminators
+
+Rather than equating `Instr`s (which needs `DecidableEq`), we expose small
+boolean discriminators that inspect only the constructor head. `native_decide`
+on these is enough to characterize each body slot in `saxpyBB0`, and a
+`cases` on the actual `Instr` then yields the operand names. -/
+
+/-- Boolean discriminator for `Instr.load`. -/
+def Instr.isLoad : Instr → Bool
+  | .load _ _ => true
+  | _ => false
+
+/-- Boolean discriminator for `Instr.cvta`. -/
+def Instr.isCvta : Instr → Bool
+  | .cvta _ _ _ => true
+  | _ => false
+
+/-- Boolean discriminator for `Instr.assignReg`. -/
+def Instr.isAssignReg : Instr → Bool
+  | .assignReg _ _ => true
+  | _ => false
+
+/-- Boolean discriminator for `Instr.assignPred`. -/
+def Instr.isAssignPred : Instr → Bool
+  | .assignPred _ _ => true
+  | _ => false
+
+/-- Boolean discriminator for `Instr.store`. -/
+def Instr.isStore : Instr → Bool
+  | .store _ _ => true
+  | _ => false
+
+/-- Boolean discriminator for `Terminator.cbr`. -/
+def Terminator.isCbr : Terminator → Bool
+  | .cbr _ _ _ => true
+  | _ => false
+
+/-- Boolean discriminator for `Terminator.br`. -/
+def Terminator.isBr : Terminator → Bool
+  | .br _ => true
+  | _ => false
+
+/-- Boolean discriminator for `Terminator.terminate`. -/
+def Terminator.isTerminate : Terminator → Bool
+  | .terminate => true
+  | _ => false
+
 end CLean
+
