@@ -235,6 +235,101 @@ theorem readMem?_param_s32_congr
         Typing.addrSpaceMatches?, Addr.offset, Addr.space,
         getSpaceBaseMem?, hParam]
 
+/-- The third parameter slot encodes the base address of `xs` as a u64 value. -/
+lemma readBytes?_saxpyParamBytesFor_param2 (n : Nat) (alpha : Int) :
+    readBytes? (saxpyParamBytesFor n alpha) 8 8 =
+      some (natToBytesLE (UInt64.ofNat saxpyXBase).toNat 8) := by
+  unfold saxpyParamBytesFor
+  unfold writeU64Bytes writeS32Bytes writeU32Bytes
+  rw [readBytes?_writeBytes_outside_range _ 24 _ _ 8 (by left; simp [natToBytesLE_length])]
+  rw [readBytes?_writeBytes_outside_range _ 16 _ _ 8 (by left; simp [natToBytesLE_length])]
+  have hlen : (natToBytesLE (UInt64.ofNat saxpyXBase).toNat 8).length = 8 :=
+    natToBytesLE_length _ _
+  have h := readBytes?_writeBytes_same
+    (writeS32Bytes (writeU32Bytes ({} : ByteMem) 0 (UInt32.ofNat n)) 4 alpha) 8
+    (natToBytesLE (UInt64.ofNat saxpyXBase).toNat 8)
+  rw [hlen] at h
+  exact h
+
+/-- The fourth parameter slot encodes the base address of `ys` as a u64 value. -/
+lemma readBytes?_saxpyParamBytesFor_param3 (n : Nat) (alpha : Int) :
+    readBytes? (saxpyParamBytesFor n alpha) 16 8 =
+      some (natToBytesLE (UInt64.ofNat saxpyYBase).toNat 8) := by
+  unfold saxpyParamBytesFor
+  unfold writeU64Bytes writeS32Bytes writeU32Bytes
+  rw [readBytes?_writeBytes_outside_range _ 24 _ _ 16 (by left; simp [natToBytesLE_length])]
+  have hlen : (natToBytesLE (UInt64.ofNat saxpyYBase).toNat 8).length = 8 :=
+    natToBytesLE_length _ _
+  have h := readBytes?_writeBytes_same
+    (writeU64Bytes
+      (writeS32Bytes (writeU32Bytes ({} : ByteMem) 0 (UInt32.ofNat n)) 4 alpha)
+      8 (UInt64.ofNat saxpyXBase)) 16
+    (natToBytesLE (UInt64.ofNat saxpyYBase).toNat 8)
+  rw [hlen] at h
+  exact h
+
+/-- The fifth parameter slot encodes the base address of `r` as a u64 value. -/
+lemma readBytes?_saxpyParamBytesFor_param4 (n : Nat) (alpha : Int) :
+    readBytes? (saxpyParamBytesFor n alpha) 24 8 =
+      some (natToBytesLE (UInt64.ofNat saxpyRBase).toNat 8) := by
+  unfold saxpyParamBytesFor
+  unfold writeU64Bytes writeS32Bytes writeU32Bytes
+  have hlen : (natToBytesLE (UInt64.ofNat saxpyRBase).toNat 8).length = 8 :=
+    natToBytesLE_length _ _
+  have h := readBytes?_writeBytes_same
+    (writeU64Bytes
+      (writeU64Bytes
+        (writeS32Bytes (writeU32Bytes ({} : ByteMem) 0 (UInt32.ofNat n)) 4 alpha)
+        8 (UInt64.ofNat saxpyXBase))
+      16 (UInt64.ofNat saxpyYBase)) 24
+    (natToBytesLE (UInt64.ofNat saxpyRBase).toNat 8)
+  rw [hlen] at h
+  exact h
+
+lemma readMem_saxpyStateFor_param2 (n : Nat) (alpha : Int) (xs ys : List Int) :
+    readMem? (saxpyStateFor n alpha xs ys) .param .u64 (.param 8) =
+      some (.u64 (UInt64.ofNat saxpyXBase)) := by
+  unfold readMem? saxpyStateFor
+  simp [Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?,
+        Typing.byteWidth?, Typing.aligned?, Typing.alignment?,
+        Typing.addrSpaceMatches?, Addr.offset, Addr.space,
+        getSpaceBaseMem?]
+  rw [readBytes?_saxpyParamBytesFor_param2]
+  simpa [encodeScalar?] using decode_encode_u64 (UInt64.ofNat saxpyXBase)
+
+lemma readMem_saxpyStateFor_param3 (n : Nat) (alpha : Int) (xs ys : List Int) :
+    readMem? (saxpyStateFor n alpha xs ys) .param .u64 (.param 16) =
+      some (.u64 (UInt64.ofNat saxpyYBase)) := by
+  unfold readMem? saxpyStateFor
+  simp [Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?,
+        Typing.byteWidth?, Typing.aligned?, Typing.alignment?,
+        Typing.addrSpaceMatches?, Addr.offset, Addr.space,
+        getSpaceBaseMem?]
+  rw [readBytes?_saxpyParamBytesFor_param3]
+  simpa [encodeScalar?] using decode_encode_u64 (UInt64.ofNat saxpyYBase)
+
+lemma readMem_saxpyStateFor_param4 (n : Nat) (alpha : Int) (xs ys : List Int) :
+    readMem? (saxpyStateFor n alpha xs ys) .param .u64 (.param 24) =
+      some (.u64 (UInt64.ofNat saxpyRBase)) := by
+  unfold readMem? saxpyStateFor
+  simp [Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?,
+        Typing.byteWidth?, Typing.aligned?, Typing.alignment?,
+        Typing.addrSpaceMatches?, Addr.offset, Addr.space,
+        getSpaceBaseMem?]
+  rw [readBytes?_saxpyParamBytesFor_param4]
+  simpa [encodeScalar?] using decode_encode_u64 (UInt64.ofNat saxpyRBase)
+
+theorem readMem?_param_u64_congr
+    {st st' : State} {offset : Nat}
+    (hParam : st.param = st'.param) :
+    readMem? st .param .u64 (.param offset) =
+      readMem? st' .param .u64 (.param offset) := by
+  unfold readMem?
+  simp [Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?,
+        Typing.byteWidth?, Typing.aligned?, Typing.alignment?,
+        Typing.addrSpaceMatches?, Addr.offset, Addr.space,
+        getSpaceBaseMem?, hParam]
+
 /-! ## Initial-state well-formedness
 
 `State.wf` only inspects the kernel-env structure and the lane count of each
@@ -563,6 +658,96 @@ theorem saxpyBB0_gi1_eq : saxpyBB0_gi1 = saxpyBB0_load_param1 := by
 theorem saxpyBB0_body1_load_param1 :
     saxpyBB0.body[1]? = some saxpyBB0_load_param1 := by
   rw [saxpyBB0_body1, saxpyBB0_gi1_eq]
+
+/-- Concrete third instruction of BB0: `ld.param.u64 %rd1, [param_2]`. -/
+def saxpyBB0_load_param2 : GInstr :=
+  { guard? := none
+    instr := .load "rd1"
+      { space := .param, ty := .u64, addr := .imm (.u64 8) } }
+
+theorem saxpyBB0_body2_isSome : (saxpyBB0.body[2]?).isSome = true := by
+  unfold saxpyBB0; native_decide
+
+def saxpyBB0_gi2 : GInstr := saxpyBB0.body[2]?.get saxpyBB0_body2_isSome
+
+theorem saxpyBB0_body2 : saxpyBB0.body[2]? = some saxpyBB0_gi2 :=
+  Option.eq_some_iff_get_eq.mpr ⟨saxpyBB0_body2_isSome, rfl⟩
+
+theorem saxpyBB0_gi2_eq : saxpyBB0_gi2 = saxpyBB0_load_param2 := by
+  unfold saxpyBB0_load_param2
+  apply GInstr.eq_unguarded_load_of_projections
+  · rw [← Option.isNone_iff_eq_none]
+    show saxpyBB0_gi2.guard?.isNone = true
+    unfold saxpyBB0_gi2 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi2 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi2 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi2 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi2 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi2 saxpyBB0; native_decide
+
+theorem saxpyBB0_body2_load_param2 :
+    saxpyBB0.body[2]? = some saxpyBB0_load_param2 := by
+  rw [saxpyBB0_body2, saxpyBB0_gi2_eq]
+
+/-- Concrete fourth instruction of BB0: `ld.param.u64 %rd2, [param_3]`. -/
+def saxpyBB0_load_param3 : GInstr :=
+  { guard? := none
+    instr := .load "rd2"
+      { space := .param, ty := .u64, addr := .imm (.u64 16) } }
+
+theorem saxpyBB0_body3_isSome : (saxpyBB0.body[3]?).isSome = true := by
+  unfold saxpyBB0; native_decide
+
+def saxpyBB0_gi3 : GInstr := saxpyBB0.body[3]?.get saxpyBB0_body3_isSome
+
+theorem saxpyBB0_body3 : saxpyBB0.body[3]? = some saxpyBB0_gi3 :=
+  Option.eq_some_iff_get_eq.mpr ⟨saxpyBB0_body3_isSome, rfl⟩
+
+theorem saxpyBB0_gi3_eq : saxpyBB0_gi3 = saxpyBB0_load_param3 := by
+  unfold saxpyBB0_load_param3
+  apply GInstr.eq_unguarded_load_of_projections
+  · rw [← Option.isNone_iff_eq_none]
+    show saxpyBB0_gi3.guard?.isNone = true
+    unfold saxpyBB0_gi3 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi3 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi3 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi3 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi3 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi3 saxpyBB0; native_decide
+
+theorem saxpyBB0_body3_load_param3 :
+    saxpyBB0.body[3]? = some saxpyBB0_load_param3 := by
+  rw [saxpyBB0_body3, saxpyBB0_gi3_eq]
+
+/-- Concrete fifth instruction of BB0: `ld.param.u64 %rd3, [param_4]`. -/
+def saxpyBB0_load_param4 : GInstr :=
+  { guard? := none
+    instr := .load "rd3"
+      { space := .param, ty := .u64, addr := .imm (.u64 24) } }
+
+theorem saxpyBB0_body4_isSome : (saxpyBB0.body[4]?).isSome = true := by
+  unfold saxpyBB0; native_decide
+
+def saxpyBB0_gi4 : GInstr := saxpyBB0.body[4]?.get saxpyBB0_body4_isSome
+
+theorem saxpyBB0_body4 : saxpyBB0.body[4]? = some saxpyBB0_gi4 :=
+  Option.eq_some_iff_get_eq.mpr ⟨saxpyBB0_body4_isSome, rfl⟩
+
+theorem saxpyBB0_gi4_eq : saxpyBB0_gi4 = saxpyBB0_load_param4 := by
+  unfold saxpyBB0_load_param4
+  apply GInstr.eq_unguarded_load_of_projections
+  · rw [← Option.isNone_iff_eq_none]
+    show saxpyBB0_gi4.guard?.isNone = true
+    unfold saxpyBB0_gi4 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi4 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi4 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi4 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi4 saxpyBB0; native_decide
+  · unfold saxpyBB0_gi4 saxpyBB0; native_decide
+
+theorem saxpyBB0_body4_load_param4 :
+    saxpyBB0.body[4]? = some saxpyBB0_load_param4 := by
+  rw [saxpyBB0_body4, saxpyBB0_gi4_eq]
 
 /-! ## Reusable step records
 
@@ -981,6 +1166,14 @@ theorem resolveAddr_param1
   unfold resolveAddr? evalRValue?
   rfl
 
+theorem resolveAddr_param_u64_imm
+    (st : State) (j : LaneId) (offset : UInt64) :
+    resolveAddr? st 0 0 j
+        { space := .param, ty := .u64, addr := .imm (.u64 offset) }
+      = some (.param offset.toNat) := by
+  unfold resolveAddr? evalRValue?
+  rfl
+
 /-- Structural context for saxpy step 1, the first BB0 body instruction. -/
 def saxpy_step1_ctx
     (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
@@ -1053,6 +1246,135 @@ noncomputable def saxpy_step2_load_param1_record
          (saxpy_step1_load_param0_record n hn hnpos alpha xs ys).post lane,
        readMem_saxpy_step1_post_param1 n hn hnpos alpha xs ys⟩)
 
+/-- The body-step context after step 2, at BB0 slot 2. -/
+noncomputable def saxpy_step3_ctx
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    BodyStepContext (saxpy_step2_load_param1_record n hn hnpos alpha xs ys).post
+      ("saxpyKernel", 2) saxpyBB0 saxpyBB0_load_param2 (saxpyActiveLanes n hn) :=
+  BodyStepRecord.nextContextNone
+    (saxpy_step2_load_param1_record n hn hnpos alpha xs ys)
+    rfl rfl saxpyBB0_body2_load_param2
+
+lemma readMem_saxpy_step2_post_param2
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    readMem? (saxpy_step2_load_param1_record n hn hnpos alpha xs ys).post
+        .param .u64 (.param 8) =
+      some (.u64 (UInt64.ofNat saxpyXBase)) := by
+  have hParam :
+      (saxpy_step2_load_param1_record n hn hnpos alpha xs ys).post.param =
+        (saxpyStateFor n alpha xs ys).param :=
+    (saxpy_step2_load_param1_record n hn hnpos alpha xs ys).post_param.trans
+      (saxpy_step1_load_param0_record n hn hnpos alpha xs ys).post_param
+  rw [readMem?_param_u64_congr hParam]
+  exact readMem_saxpyStateFor_param2 n alpha xs ys
+
+/-- Step-record form of the third saxpy load. -/
+noncomputable def saxpy_step3_load_param2_record
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    BodyStepRecord (saxpy_step3_ctx n hn hnpos alpha xs ys)
+      (LoadStepPost (saxpyActiveLanes n hn) "rd1"
+        (fun _ => .u64 (UInt64.ofNat saxpyXBase)) ("saxpyKernel", 2)) :=
+  BodyStepContext.loadStep (saxpy_step3_ctx n hn hnpos alpha xs ys)
+    (dst := "rd1")
+    (src := { space := .param, ty := .u64, addr := .imm (.u64 8) })
+    (guard? := none)
+    (fun _ => .u64 (UInt64.ofNat saxpyXBase))
+    (fun lane _hLane =>
+      ⟨.param 8,
+       resolveAddr_param_u64_imm
+         (saxpy_step2_load_param1_record n hn hnpos alpha xs ys).post lane 8,
+       readMem_saxpy_step2_post_param2 n hn hnpos alpha xs ys⟩)
+
+/-- The body-step context after step 3, at BB0 slot 3. -/
+noncomputable def saxpy_step4_ctx
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    BodyStepContext (saxpy_step3_load_param2_record n hn hnpos alpha xs ys).post
+      ("saxpyKernel", 3) saxpyBB0 saxpyBB0_load_param3 (saxpyActiveLanes n hn) :=
+  BodyStepRecord.nextContextNone
+    (saxpy_step3_load_param2_record n hn hnpos alpha xs ys)
+    rfl rfl saxpyBB0_body3_load_param3
+
+lemma readMem_saxpy_step3_post_param3
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    readMem? (saxpy_step3_load_param2_record n hn hnpos alpha xs ys).post
+        .param .u64 (.param 16) =
+      some (.u64 (UInt64.ofNat saxpyYBase)) := by
+  have hParam :
+      (saxpy_step3_load_param2_record n hn hnpos alpha xs ys).post.param =
+        (saxpyStateFor n alpha xs ys).param :=
+    (saxpy_step3_load_param2_record n hn hnpos alpha xs ys).post_param.trans
+      ((saxpy_step2_load_param1_record n hn hnpos alpha xs ys).post_param.trans
+        (saxpy_step1_load_param0_record n hn hnpos alpha xs ys).post_param)
+  rw [readMem?_param_u64_congr hParam]
+  exact readMem_saxpyStateFor_param3 n alpha xs ys
+
+/-- Step-record form of the fourth saxpy load. -/
+noncomputable def saxpy_step4_load_param3_record
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    BodyStepRecord (saxpy_step4_ctx n hn hnpos alpha xs ys)
+      (LoadStepPost (saxpyActiveLanes n hn) "rd2"
+        (fun _ => .u64 (UInt64.ofNat saxpyYBase)) ("saxpyKernel", 3)) :=
+  BodyStepContext.loadStep (saxpy_step4_ctx n hn hnpos alpha xs ys)
+    (dst := "rd2")
+    (src := { space := .param, ty := .u64, addr := .imm (.u64 16) })
+    (guard? := none)
+    (fun _ => .u64 (UInt64.ofNat saxpyYBase))
+    (fun lane _hLane =>
+      ⟨.param 16,
+       resolveAddr_param_u64_imm
+         (saxpy_step3_load_param2_record n hn hnpos alpha xs ys).post lane 16,
+       readMem_saxpy_step3_post_param3 n hn hnpos alpha xs ys⟩)
+
+/-- The body-step context after step 4, at BB0 slot 4. -/
+noncomputable def saxpy_step5_ctx
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    BodyStepContext (saxpy_step4_load_param3_record n hn hnpos alpha xs ys).post
+      ("saxpyKernel", 4) saxpyBB0 saxpyBB0_load_param4 (saxpyActiveLanes n hn) :=
+  BodyStepRecord.nextContextNone
+    (saxpy_step4_load_param3_record n hn hnpos alpha xs ys)
+    rfl rfl saxpyBB0_body4_load_param4
+
+lemma readMem_saxpy_step4_post_param4
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    readMem? (saxpy_step4_load_param3_record n hn hnpos alpha xs ys).post
+        .param .u64 (.param 24) =
+      some (.u64 (UInt64.ofNat saxpyRBase)) := by
+  have hParam :
+      (saxpy_step4_load_param3_record n hn hnpos alpha xs ys).post.param =
+        (saxpyStateFor n alpha xs ys).param :=
+    (saxpy_step4_load_param3_record n hn hnpos alpha xs ys).post_param.trans
+      ((saxpy_step3_load_param2_record n hn hnpos alpha xs ys).post_param.trans
+        ((saxpy_step2_load_param1_record n hn hnpos alpha xs ys).post_param.trans
+          (saxpy_step1_load_param0_record n hn hnpos alpha xs ys).post_param))
+  rw [readMem?_param_u64_congr hParam]
+  exact readMem_saxpyStateFor_param4 n alpha xs ys
+
+/-- Step-record form of the fifth saxpy load. -/
+noncomputable def saxpy_step5_load_param4_record
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    BodyStepRecord (saxpy_step5_ctx n hn hnpos alpha xs ys)
+      (LoadStepPost (saxpyActiveLanes n hn) "rd3"
+        (fun _ => .u64 (UInt64.ofNat saxpyRBase)) ("saxpyKernel", 4)) :=
+  BodyStepContext.loadStep (saxpy_step5_ctx n hn hnpos alpha xs ys)
+    (dst := "rd3")
+    (src := { space := .param, ty := .u64, addr := .imm (.u64 24) })
+    (guard? := none)
+    (fun _ => .u64 (UInt64.ofNat saxpyRBase))
+    (fun lane _hLane =>
+      ⟨.param 24,
+       resolveAddr_param_u64_imm
+         (saxpy_step4_load_param3_record n hn hnpos alpha xs ys).post lane 24,
+       readMem_saxpy_step4_post_param4 n hn hnpos alpha xs ys⟩)
+
 /-! ## Step 1 of the chain: `ld.param.u32 %r2, [param_0]`
 
 The first executable step from `saxpyStateFor n α xs ys` (with `n > 0`)
@@ -1099,5 +1421,84 @@ theorem saxpy_step2_load_param1
   refine ⟨step1.post, step2.post, step1.step, step2.step, ?_⟩
   intro j hj
   simpa [LoadStepPost, step2] using step2.post_holds j hj
+
+/-! ## Step 3 of the chain: `ld.param.u64 %rd1, [param_2]`
+
+The third load reads the preserved parameter memory after step 2 and loads the
+`xs` base pointer into `%rd1`, advancing to BB0 slot 3. -/
+
+theorem saxpy_step3_load_param2
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    ∃ st1 st2 st3 : State,
+      StepMachine.step? (saxpyStateFor n alpha xs ys) = some st1 ∧
+      StepMachine.step? st1 = some st2 ∧
+      StepMachine.step? st2 = some st3 ∧
+      ∀ j ∈ saxpyActiveLanes n hn,
+        ∃ ls3 : LaneState,
+          st3.getLane? 0 0 j = some ls3 ∧
+          ls3.regs["rd1"]? = some (.u64 (UInt64.ofNat saxpyXBase)) ∧
+          ls3.pc = ("saxpyKernel", 3) ∧
+          ls3.status = .running := by
+  let step1 := saxpy_step1_load_param0_record n hn hnpos alpha xs ys
+  let step2 := saxpy_step2_load_param1_record n hn hnpos alpha xs ys
+  let step3 := saxpy_step3_load_param2_record n hn hnpos alpha xs ys
+  refine ⟨step1.post, step2.post, step3.post, step1.step, step2.step, step3.step, ?_⟩
+  intro j hj
+  simpa [LoadStepPost, step3] using step3.post_holds j hj
+
+/-! ## Step 4 of the chain: `ld.param.u64 %rd2, [param_3]` -/
+
+theorem saxpy_step4_load_param3
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    ∃ st1 st2 st3 st4 : State,
+      StepMachine.step? (saxpyStateFor n alpha xs ys) = some st1 ∧
+      StepMachine.step? st1 = some st2 ∧
+      StepMachine.step? st2 = some st3 ∧
+      StepMachine.step? st3 = some st4 ∧
+      ∀ j ∈ saxpyActiveLanes n hn,
+        ∃ ls4 : LaneState,
+          st4.getLane? 0 0 j = some ls4 ∧
+          ls4.regs["rd2"]? = some (.u64 (UInt64.ofNat saxpyYBase)) ∧
+          ls4.pc = ("saxpyKernel", 4) ∧
+          ls4.status = .running := by
+  let step1 := saxpy_step1_load_param0_record n hn hnpos alpha xs ys
+  let step2 := saxpy_step2_load_param1_record n hn hnpos alpha xs ys
+  let step3 := saxpy_step3_load_param2_record n hn hnpos alpha xs ys
+  let step4 := saxpy_step4_load_param3_record n hn hnpos alpha xs ys
+  refine
+    ⟨step1.post, step2.post, step3.post, step4.post,
+      step1.step, step2.step, step3.step, step4.step, ?_⟩
+  intro j hj
+  simpa [LoadStepPost, step4] using step4.post_holds j hj
+
+/-! ## Step 5 of the chain: `ld.param.u64 %rd3, [param_4]` -/
+
+theorem saxpy_step5_load_param4
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    ∃ st1 st2 st3 st4 st5 : State,
+      StepMachine.step? (saxpyStateFor n alpha xs ys) = some st1 ∧
+      StepMachine.step? st1 = some st2 ∧
+      StepMachine.step? st2 = some st3 ∧
+      StepMachine.step? st3 = some st4 ∧
+      StepMachine.step? st4 = some st5 ∧
+      ∀ j ∈ saxpyActiveLanes n hn,
+        ∃ ls5 : LaneState,
+          st5.getLane? 0 0 j = some ls5 ∧
+          ls5.regs["rd3"]? = some (.u64 (UInt64.ofNat saxpyRBase)) ∧
+          ls5.pc = ("saxpyKernel", 5) ∧
+          ls5.status = .running := by
+  let step1 := saxpy_step1_load_param0_record n hn hnpos alpha xs ys
+  let step2 := saxpy_step2_load_param1_record n hn hnpos alpha xs ys
+  let step3 := saxpy_step3_load_param2_record n hn hnpos alpha xs ys
+  let step4 := saxpy_step4_load_param3_record n hn hnpos alpha xs ys
+  let step5 := saxpy_step5_load_param4_record n hn hnpos alpha xs ys
+  refine
+    ⟨step1.post, step2.post, step3.post, step4.post, step5.post,
+      step1.step, step2.step, step3.step, step4.step, step5.step, ?_⟩
+  intro j hj
+  simpa [LoadStepPost, step5] using step5.post_holds j hj
 
 end CLean
