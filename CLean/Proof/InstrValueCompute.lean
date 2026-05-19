@@ -951,6 +951,200 @@ theorem applyToLaneIds?_preserves_currentRunnablePc?
         applyToLaneIds?_preserves_status_pc_warp_lane hf hWf hWs hWs' h head ls hLs
       rw [hLs, hLs']; simp [hPc]
 
+/-- `applyToLaneIds?` with a status/pc-preserving function preserves
+`lockstepRunnable`. -/
+theorem applyToLaneIds?_preserves_lockstepRunnable
+    {st st' : State} {cta : CTAId} {warp : WarpId}
+    {f : LaneId → LaneState → Option LaneState} {lanes : List LaneId}
+    {ws ws' : WarpState}
+    (hf : PreservesStatusPc f)
+    (hWf : State.wf st)
+    (hWs : st.getWarp? cta warp = some ws)
+    (hWs' : st'.getWarp? cta warp = some ws')
+    (hWsWf : WarpState.wf ws)
+    (h : applyToLaneIds? st cta warp lanes f = some st')
+    (hLock : lockstepRunnable ws) :
+    lockstepRunnable ws' := by
+  cases hPc : currentRunnablePc? ws with
+  | none =>
+      have hPc' := applyToLaneIds?_preserves_currentRunnablePc?
+        hf hWf hWs hWs' hWsWf h
+      rw [hPc] at hPc'
+      unfold lockstepRunnable lockstepRunnable?
+      rw [hPc']
+  | some pc =>
+      have hPc' := applyToLaneIds?_preserves_currentRunnablePc?
+        hf hWf hWs hWs' hWsWf h
+      rw [hPc] at hPc'
+      unfold lockstepRunnable lockstepRunnable?
+      rw [hPc']
+      have hRunEq :=
+        applyToLaneIds?_preserves_runnableLaneIds hf hWf hWs hWs' hWsWf h
+      rw [hRunEq]
+      unfold lockstepRunnable lockstepRunnable? at hLock
+      rw [hPc] at hLock
+      simp [List.all_eq_true] at hLock ⊢
+      intro lane hLane
+      obtain ⟨ls, hLs⟩ := WarpState.getLane?_isSome_of_wf hWsWf lane
+      obtain ⟨ls', hLs', hPcEq, _⟩ :=
+        applyToLaneIds?_preserves_status_pc_warp_lane hf hWf hWs hWs' h lane ls hLs
+      have hLanePc := hLock lane hLane
+      rw [hLs] at hLanePc
+      rw [hLs']
+      simpa [hPcEq] using hLanePc
+
+/-- `advanceRunnablePcs?` preserves well-formedness when it succeeds. -/
+theorem advanceRunnablePcs?_preserves_wf
+    {st st' : State} {cta : CTAId} {warp : WarpId}
+    (hWf : State.wf st)
+    (h : advanceRunnablePcs? st cta warp = some st') :
+    State.wf st' := by
+  unfold advanceRunnablePcs? at h
+  cases hWarp : st.getWarp? cta warp with
+  | none => simp [hWarp] at h
+  | some ws =>
+      simp [hWarp] at h
+      cases hPc : currentRunnablePc? ws with
+      | none => simp [hPc] at h
+      | some pc =>
+          simp [hPc] at h
+          exact applyToLaneIds?_preserves_wf hWf h
+
+/-- A successful `advanceRunnablePcs?` from a lockstep warp keeps the same
+runnable lane list, advances the current runnable PC by one body slot, and
+preserves lockstep. -/
+theorem advanceRunnablePcs?_post_warp
+    {st st' : State} {cta : CTAId} {warp : WarpId}
+    {ws : WarpState} {pc : PC}
+    (hWf : State.wf st)
+    (hWarp : st.getWarp? cta warp = some ws)
+    (hLock : lockstepRunnable ws)
+    (hPc : currentRunnablePc? ws = some pc)
+    (h : advanceRunnablePcs? st cta warp = some st') :
+    ∃ ws' : WarpState,
+      State.wf st' ∧
+      st'.getWarp? cta warp = some ws' ∧
+      WarpState.wf ws' ∧
+      runnableLaneIds ws' = runnableLaneIds ws ∧
+      currentRunnablePc? ws' = some (pc.1, pc.2 + 1) ∧
+      lockstepRunnable ws' := by
+  have hAdvOriginal : advanceRunnablePcs? st cta warp = some st' := h
+  unfold advanceRunnablePcs? at h
+  rw [hWarp] at h
+  simp at h
+  rw [hPc] at h
+  simp at h
+  set lanes :=
+    (runnableLaneIds ws).filter fun lane =>
+      match ws.getLane? lane with
+      | some laneState => laneState.pc == pc
+      | none => false
+  have hWsWf : WarpState.wf ws := WarpState.wf_of_getWarp? hWf hWarp
+  have hLockB := (lockstepRunnable_iff_bool ws).1 hLock
+  unfold lockstepRunnable? at hLockB
+  rw [hPc] at hLockB
+  simp [List.all_eq_true] at hLockB
+  have hFilter : lanes = runnableLaneIds ws := by
+    unfold lanes
+    apply List.filter_eq_self.mpr
+    intro lane hLane
+    have hLanePc := hLockB lane hLane
+    cases hWsLane : ws.getLane? lane with
+    | none => rw [hWsLane] at hLanePc; simp at hLanePc
+    | some ls =>
+        rw [hWsLane] at hLanePc
+        simpa using hLanePc
+  have hApply : applyToLaneIds? st cta warp (runnableLaneIds ws)
+      (fun _ laneState => some (advancePcForLane laneState)) = some st' := by
+    change applyToLaneIds? st cta warp lanes
+      (fun _ laneState => some (advancePcForLane laneState)) = some st' at h
+    rw [hFilter] at h
+    exact h
+  have hWf' : State.wf st' := applyToLaneIds?_preserves_wf hWf hApply
+  obtain ⟨ws', hWs', hMask⟩ := applyToLaneIds?_preserves_activeMask hApply ws hWarp
+  have hWsWf' : WarpState.wf ws' := WarpState.wf_of_getWarp? hWf' hWs'
+  have hRunEq : runnableLaneIds ws' = runnableLaneIds ws := by
+    have hLaneEq : ∀ lane : LaneId, laneIsRunnable ws' lane = laneIsRunnable ws lane := by
+      intro lane
+      obtain ⟨ls, hLs⟩ := WarpState.getLane?_isSome_of_wf hWsWf lane
+      have hStLane : st.getLane? cta warp lane = some ls := by
+        unfold State.getLane?
+        rw [hWarp]
+        simpa using hLs
+      have hAdv :=
+        advanceRunnablePcs?_preserves_lane_regs_preds (st := st) (st' := st')
+          (cta := cta) (warp := warp) (lane := lane) hWf hAdvOriginal hStLane
+      obtain ⟨ls', hSt'Lane, _hRegs, _hPreds, _hLocal, hStatusEq⟩ := hAdv
+      have hWsLane' : ws'.getLane? lane = some ls' := by
+        unfold State.getLane? at hSt'Lane
+        rw [hWs'] at hSt'Lane
+        simpa using hSt'Lane
+      unfold laneIsRunnable
+      rw [hLs, hWsLane']
+      simp [hStatusEq, hMask]
+    unfold runnableLaneIds
+    exact List.filter_congr (fun lane _ => by rw [hLaneEq])
+  have hPc' : currentRunnablePc? ws' = some (pc.1, pc.2 + 1) := by
+    unfold currentRunnablePc?
+    rw [hRunEq]
+    cases hRun : runnableLaneIds ws with
+    | nil =>
+        unfold currentRunnablePc? at hPc
+        rw [hRun] at hPc
+        simp at hPc
+    | cons head tail =>
+        simp
+        have hHeadRun : head ∈ runnableLaneIds ws := by rw [hRun]; exact List.mem_cons_self
+        obtain ⟨ls, hLs⟩ := WarpState.getLane?_isSome_of_wf hWsWf head
+        have hStLane : st.getLane? cta warp head = some ls := by
+          unfold State.getLane?
+          rw [hWarp]
+          simpa using hLs
+        have hHeadPc : ls.pc = pc := by
+          have hHeadPcBool := hLockB head hHeadRun
+          rw [hLs] at hHeadPcBool
+          simpa using hHeadPcBool
+        obtain ⟨ls', hGet', hPcAdv⟩ :=
+          advanceRunnablePcs?_advances_lane_pc (st := st) (st' := st')
+            (cta := cta) (warp := warp) (lane := head)
+            (warpState := ws) (pc := pc) (laneState := ls)
+            hWf hWarp hPc hStLane hHeadPc hHeadRun hAdvOriginal
+        have hWsGet' : ws'.getLane? head = some ls' := by
+          unfold State.getLane? at hGet'
+          rw [hWs'] at hGet'
+          simpa using hGet'
+        rw [hWsGet']
+        simpa using hPcAdv
+  have hLock' : lockstepRunnable ws' := by
+    unfold lockstepRunnable lockstepRunnable?
+    rw [hPc']
+    simp [List.all_eq_true]
+    intro lane hLane'
+    have hLane : lane ∈ runnableLaneIds ws := by
+      rw [hRunEq] at hLane'
+      exact hLane'
+    obtain ⟨ls, hLs⟩ := WarpState.getLane?_isSome_of_wf hWsWf lane
+    have hStLane : st.getLane? cta warp lane = some ls := by
+      unfold State.getLane?
+      rw [hWarp]
+      simpa using hLs
+    have hLanePc : ls.pc = pc := by
+      have hLanePcBool := hLockB lane hLane
+      rw [hLs] at hLanePcBool
+      simpa using hLanePcBool
+    obtain ⟨ls', hGet', hPcAdv⟩ :=
+      advanceRunnablePcs?_advances_lane_pc (st := st) (st' := st')
+        (cta := cta) (warp := warp) (lane := lane)
+        (warpState := ws) (pc := pc) (laneState := ls)
+        hWf hWarp hPc hStLane hLanePc hLane hAdvOriginal
+    have hWsGet' : ws'.getLane? lane = some ls' := by
+      unfold State.getLane? at hGet'
+      rw [hWs'] at hGet'
+      simpa using hGet'
+    rw [hWsGet']
+    simpa using hPcAdv
+  exact ⟨ws', hWf', hWs', hWsWf', hRunEq, hPc', hLock'⟩
+
 /-! ## Strengthened "lane-full" lemmas
 
 These are the chainable forms needed for the saxpy lane chain: full
