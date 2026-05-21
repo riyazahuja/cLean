@@ -1394,6 +1394,95 @@ theorem saxpyFallthrough0_body2_add_x_addr :
     saxpyFallthrough0.body[2]? = some saxpyFallthrough0_add_x_addr := by
   rw [saxpyFallthrough0_body2, saxpyFallthrough0_gi2_eq]
 
+/-- Concrete fourth fallthrough instruction: `cvta.to.global.u64 %rd7, %rd2`. -/
+def saxpyFallthrough0_cvta_rd7 : GInstr :=
+  { guard? := none, instr := .cvta "rd7" .global (.reg "rd2") }
+
+theorem saxpyFallthrough0_body3_isSome : (saxpyFallthrough0.body[3]?).isSome = true := by
+  unfold saxpyFallthrough0
+  native_decide
+
+def saxpyFallthrough0_gi3 : GInstr :=
+  saxpyFallthrough0.body[3]?.get saxpyFallthrough0_body3_isSome
+
+theorem saxpyFallthrough0_body3 : saxpyFallthrough0.body[3]? = some saxpyFallthrough0_gi3 :=
+  Option.eq_some_iff_get_eq.mpr ⟨saxpyFallthrough0_body3_isSome, rfl⟩
+
+theorem saxpyFallthrough0_gi3_eq :
+    saxpyFallthrough0_gi3 = saxpyFallthrough0_cvta_rd7 := by
+  unfold saxpyFallthrough0_cvta_rd7
+  apply GInstr.eq_unguarded_cvta_reg_of_projections
+  · rw [← Option.isNone_iff_eq_none]
+    show saxpyFallthrough0_gi3.guard?.isNone = true
+    unfold saxpyFallthrough0_gi3 saxpyFallthrough0
+    native_decide
+  · unfold saxpyFallthrough0_gi3 saxpyFallthrough0
+    native_decide
+  · unfold saxpyFallthrough0_gi3 saxpyFallthrough0
+    native_decide
+  · unfold saxpyFallthrough0_gi3 saxpyFallthrough0
+    native_decide
+  · unfold saxpyFallthrough0_gi3 saxpyFallthrough0
+    native_decide
+
+theorem saxpyFallthrough0_body3_cvta_rd7 :
+    saxpyFallthrough0.body[3]? = some saxpyFallthrough0_cvta_rd7 := by
+  rw [saxpyFallthrough0_body3, saxpyFallthrough0_gi3_eq]
+
+/-- Lowered RHS of `add.s64 %rd8, %rd7, %rd5`. -/
+def saxpyYElementAddrRhs : RValue :=
+  .binop .add (.reg "rd7") (.reg "rd5")
+
+/-- Y-array element address value for lane `j`. -/
+def saxpyYElementAddrValue (j : LaneId) : Value :=
+  (evalBinary? .add (.gaddr .global saxpyYBase) (saxpyLaneByteOffsetValue j)).getD
+    (.gaddr .global saxpyYBase)
+
+theorem saxpyYElementAddrValue_eq_evalBinary (j : LaneId) :
+    evalBinary? .add (.gaddr .global saxpyYBase) (saxpyLaneByteOffsetValue j) =
+      some (saxpyYElementAddrValue j) := by
+  unfold saxpyYElementAddrValue saxpyLaneByteOffsetValue
+  rfl
+
+theorem evalRValue_saxpyYElementAddrRhs_of_regs
+    {st : State} {j : LaneId} {ls : LaneState}
+    (hGet : st.getLane? 0 0 j = some ls)
+    (hRd7 : ls.regs["rd7"]? = some (.gaddr .global saxpyYBase))
+    (hRd5 : ls.regs["rd5"]? = some (saxpyLaneByteOffsetValue j)) :
+    evalRValue? st 0 0 j saxpyYElementAddrRhs =
+      some (saxpyYElementAddrValue j) := by
+  simpa [saxpyYElementAddrRhs, readReg, evalRValue?, hGet, hRd7, hRd5]
+    using saxpyYElementAddrValue_eq_evalBinary j
+
+/-- Concrete fifth fallthrough instruction: `add.s64 %rd8, %rd7, %rd5`. -/
+def saxpyFallthrough0_add_y_addr : GInstr :=
+  { guard? := none, instr := .assignReg "rd8" saxpyYElementAddrRhs }
+
+theorem saxpyFallthrough0_body4_isSome : (saxpyFallthrough0.body[4]?).isSome = true := by
+  unfold saxpyFallthrough0
+  native_decide
+
+def saxpyFallthrough0_gi4 : GInstr :=
+  saxpyFallthrough0.body[4]?.get saxpyFallthrough0_body4_isSome
+
+theorem saxpyFallthrough0_body4 : saxpyFallthrough0.body[4]? = some saxpyFallthrough0_gi4 :=
+  Option.eq_some_iff_get_eq.mpr ⟨saxpyFallthrough0_body4_isSome, rfl⟩
+
+theorem saxpyFallthrough0_gi4_eq :
+    saxpyFallthrough0_gi4 = saxpyFallthrough0_add_y_addr := by
+  unfold saxpyFallthrough0_add_y_addr saxpyYElementAddrRhs
+  apply GInstr.eq_unguarded_assignReg_binop_regs_of_projection
+  · rw [← Option.isNone_iff_eq_none]
+    show saxpyFallthrough0_gi4.guard?.isNone = true
+    unfold saxpyFallthrough0_gi4 saxpyFallthrough0
+    native_decide
+  · unfold saxpyFallthrough0_gi4 saxpyFallthrough0
+    native_decide
+
+theorem saxpyFallthrough0_body4_add_y_addr :
+    saxpyFallthrough0.body[4]? = some saxpyFallthrough0_add_y_addr := by
+  rw [saxpyFallthrough0_body4, saxpyFallthrough0_gi4_eq]
+
 /-! ## Reusable step records
 
 The chain proofs should expose a small, uniform step artifact instead of
@@ -3842,6 +3931,53 @@ def SaxpyAfterXAddrPost (n : Nat) (hn : n ≤ 32) (alpha : Int) (post : State) :
       ls.pc = ("saxpyKernel$fallthrough0", 3) ∧
       ls.status = .running
 
+/-- Interface after `cvta.to.global.u64 %rd7, %rd2`. -/
+def SaxpyAfterCvtaRd7Post (n : Nat) (hn : n ≤ 32) (alpha : Int) (post : State) :
+    Prop :=
+  ∀ j ∈ saxpyActiveLanes n hn,
+    ∃ ls : LaneState,
+      post.getLane? 0 0 j = some ls ∧
+      ls.regs["r2"]? = some (.u32 (UInt32.ofNat n)) ∧
+      ls.regs["r6"]? = some (.s32 (saxpyAlphaS32 alpha)) ∧
+      ls.regs["rd1"]? = some (.u64 (UInt64.ofNat saxpyXBase)) ∧
+      ls.regs["rd2"]? = some (.u64 (UInt64.ofNat saxpyYBase)) ∧
+      ls.regs["rd3"]? = some (.u64 (UInt64.ofNat saxpyRBase)) ∧
+      ls.regs["r3"]? = some (.u32 0) ∧
+      ls.regs["r4"]? = some (.u32 32) ∧
+      ls.regs["r5"]? = some (.u32 (UInt32.ofNat j.val)) ∧
+      ls.regs["r1"]? = some (.s32 (Int.ofNat j.val)) ∧
+      ls.preds["p1"]? = some false ∧
+      ls.regs["rd4"]? = some (.gaddr .global saxpyXBase) ∧
+      ls.regs["rd5"]? = some (saxpyLaneByteOffsetValue j) ∧
+      ls.regs["rd6"]? = some (saxpyXElementAddrValue j) ∧
+      ls.regs["rd7"]? = some (.gaddr .global saxpyYBase) ∧
+      ls.pc = ("saxpyKernel$fallthrough0", 4) ∧
+      ls.status = .running
+
+/-- Interface after `add.s64 %rd8, %rd7, %rd5`. -/
+def SaxpyAfterYAddrPost (n : Nat) (hn : n ≤ 32) (alpha : Int) (post : State) :
+    Prop :=
+  ∀ j ∈ saxpyActiveLanes n hn,
+    ∃ ls : LaneState,
+      post.getLane? 0 0 j = some ls ∧
+      ls.regs["r2"]? = some (.u32 (UInt32.ofNat n)) ∧
+      ls.regs["r6"]? = some (.s32 (saxpyAlphaS32 alpha)) ∧
+      ls.regs["rd1"]? = some (.u64 (UInt64.ofNat saxpyXBase)) ∧
+      ls.regs["rd2"]? = some (.u64 (UInt64.ofNat saxpyYBase)) ∧
+      ls.regs["rd3"]? = some (.u64 (UInt64.ofNat saxpyRBase)) ∧
+      ls.regs["r3"]? = some (.u32 0) ∧
+      ls.regs["r4"]? = some (.u32 32) ∧
+      ls.regs["r5"]? = some (.u32 (UInt32.ofNat j.val)) ∧
+      ls.regs["r1"]? = some (.s32 (Int.ofNat j.val)) ∧
+      ls.preds["p1"]? = some false ∧
+      ls.regs["rd4"]? = some (.gaddr .global saxpyXBase) ∧
+      ls.regs["rd5"]? = some (saxpyLaneByteOffsetValue j) ∧
+      ls.regs["rd6"]? = some (saxpyXElementAddrValue j) ∧
+      ls.regs["rd7"]? = some (.gaddr .global saxpyYBase) ∧
+      ls.regs["rd8"]? = some (saxpyYElementAddrValue j) ∧
+      ls.pc = ("saxpyKernel$fallthrough0", 5) ∧
+      ls.status = .running
+
 /-! ## Step 1 of the chain: `ld.param.u32 %r2, [param_0]`
 
 The first executable step from `saxpyStateFor n α xs ys` (with `n > 0`)
@@ -4799,6 +4935,181 @@ theorem saxpy_step14_add_x_addr_record_post
     ⟨ls14, hGet14, hR2_14, hR6_14, hRd1_14, hRd2_14, hRd3_14, hR3_14, hR4_14,
       hR5_14, hR1_14, hP1_14, hRd4_14, hRd5_14, hRd6, hPc14, hStatus14⟩
 
+/-- Body-step context for `cvta.to.global.u64 %rd7, %rd2`. -/
+noncomputable def saxpy_step15_ctx
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    BodyStepContext (saxpy_step14_add_x_addr_record n hn hnpos alpha xs ys).post
+      ("saxpyKernel$fallthrough0", 3) saxpyFallthrough0 saxpyFallthrough0_cvta_rd7
+      (saxpyActiveLanes n hn) :=
+  BodyStepRecord.nextContextNone
+    (saxpy_step14_add_x_addr_record n hn hnpos alpha xs ys)
+    rfl rfl saxpyFallthrough0_body3_cvta_rd7
+
+/-- Step-record form of `cvta.to.global.u64 %rd7, %rd2`. -/
+noncomputable def saxpy_step15_cvta_rd7_record
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    BodyStepRecord (saxpy_step15_ctx n hn hnpos alpha xs ys)
+      (CvtaFullPost (saxpy_step14_add_x_addr_record n hn hnpos alpha xs ys).post
+        (saxpyActiveLanes n hn) "rd7" (fun _ => .gaddr .global saxpyYBase)
+        ("saxpyKernel$fallthrough0", 3)) :=
+  BodyStepContext.cvtaStep (saxpy_step15_ctx n hn hnpos alpha xs ys)
+    (dst := "rd7")
+    (space := .global)
+    (src := .reg "rd2")
+    (guard? := none)
+    (fun _ => .gaddr .global saxpyYBase)
+    (fun lane hLane => by
+      have hPost := saxpy_step14_add_x_addr_record_post n hn hnpos alpha xs ys
+      obtain ⟨ls, hGet, _hR2, _hR6, _hRd1, hRd2, _hRd3, _hR3, _hR4, _hR5,
+        _hR1, _hP1, _hRd4, _hRd5, _hRd6, _hPc, _hStatus⟩ := hPost lane hLane
+      refine ⟨.u64 (UInt64.ofNat saxpyYBase), ?_, ?_⟩
+      · simp [evalRValue?, readReg, hGet, hRd2]
+      · simp [saxpyYBase])
+
+theorem saxpy_step15_cvta_rd7_record_post
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    SaxpyAfterCvtaRd7Post n hn alpha
+      (saxpy_step15_cvta_rd7_record n hn hnpos alpha xs ys).post := by
+  let step15 := saxpy_step15_cvta_rd7_record n hn hnpos alpha xs ys
+  have hStep14 := saxpy_step14_add_x_addr_record_post n hn hnpos alpha xs ys
+  intro j hj
+  obtain ⟨ls14, hGet14, hR2, hR6, hRd1, hRd2, hRd3, hR3, hR4, hR5, hR1,
+    hP1, hRd4, hRd5, hRd6, _hPc14, _hStatus14⟩ := hStep14 j hj
+  obtain ⟨ls15, hGet15, hRd7, hPc15, hStatus15⟩ :=
+    CvtaFullPost.converted_dst step15.post_holds hj
+  have hR2_15 : ls15.regs["r2"]? = some (.u32 (UInt32.ofNat n)) :=
+    CvtaFullPost.preserves_reg_value step15.post_holds hj hGet14 hGet15 hR2
+      (by decide)
+  have hR6_15 : ls15.regs["r6"]? = some (.s32 (saxpyAlphaS32 alpha)) :=
+    CvtaFullPost.preserves_reg_value step15.post_holds hj hGet14 hGet15 hR6
+      (by decide)
+  have hRd1_15 : ls15.regs["rd1"]? = some (.u64 (UInt64.ofNat saxpyXBase)) :=
+    CvtaFullPost.preserves_reg_value step15.post_holds hj hGet14 hGet15 hRd1
+      (by decide)
+  have hRd2_15 : ls15.regs["rd2"]? = some (.u64 (UInt64.ofNat saxpyYBase)) :=
+    CvtaFullPost.preserves_reg_value step15.post_holds hj hGet14 hGet15 hRd2
+      (by decide)
+  have hRd3_15 : ls15.regs["rd3"]? = some (.u64 (UInt64.ofNat saxpyRBase)) :=
+    CvtaFullPost.preserves_reg_value step15.post_holds hj hGet14 hGet15 hRd3
+      (by decide)
+  have hR3_15 : ls15.regs["r3"]? = some (.u32 0) :=
+    CvtaFullPost.preserves_reg_value step15.post_holds hj hGet14 hGet15 hR3
+      (by decide)
+  have hR4_15 : ls15.regs["r4"]? = some (.u32 32) :=
+    CvtaFullPost.preserves_reg_value step15.post_holds hj hGet14 hGet15 hR4
+      (by decide)
+  have hR5_15 : ls15.regs["r5"]? = some (.u32 (UInt32.ofNat j.val)) :=
+    CvtaFullPost.preserves_reg_value step15.post_holds hj hGet14 hGet15 hR5
+      (by decide)
+  have hR1_15 : ls15.regs["r1"]? = some (.s32 (Int.ofNat j.val)) :=
+    CvtaFullPost.preserves_reg_value step15.post_holds hj hGet14 hGet15 hR1
+      (by decide)
+  have hP1_15 : ls15.preds["p1"]? = some false :=
+    CvtaFullPost.preserves_pred_value step15.post_holds hj hGet14 hGet15 hP1
+  have hRd4_15 : ls15.regs["rd4"]? = some (.gaddr .global saxpyXBase) :=
+    CvtaFullPost.preserves_reg_value step15.post_holds hj hGet14 hGet15 hRd4
+      (by decide)
+  have hRd5_15 : ls15.regs["rd5"]? = some (saxpyLaneByteOffsetValue j) :=
+    CvtaFullPost.preserves_reg_value step15.post_holds hj hGet14 hGet15 hRd5
+      (by decide)
+  have hRd6_15 : ls15.regs["rd6"]? = some (saxpyXElementAddrValue j) :=
+    CvtaFullPost.preserves_reg_value step15.post_holds hj hGet14 hGet15 hRd6
+      (by decide)
+  refine
+    ⟨ls15, hGet15, hR2_15, hR6_15, hRd1_15, hRd2_15, hRd3_15, hR3_15, hR4_15,
+      hR5_15, hR1_15, hP1_15, hRd4_15, hRd5_15, hRd6_15, hRd7, hPc15,
+      hStatus15⟩
+
+/-- Body-step context for `add.s64 %rd8, %rd7, %rd5`. -/
+noncomputable def saxpy_step16_ctx
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    BodyStepContext (saxpy_step15_cvta_rd7_record n hn hnpos alpha xs ys).post
+      ("saxpyKernel$fallthrough0", 4) saxpyFallthrough0 saxpyFallthrough0_add_y_addr
+      (saxpyActiveLanes n hn) :=
+  BodyStepRecord.nextContextNone
+    (saxpy_step15_cvta_rd7_record n hn hnpos alpha xs ys)
+    rfl rfl saxpyFallthrough0_body4_add_y_addr
+
+/-- Step-record form of `add.s64 %rd8, %rd7, %rd5`. -/
+noncomputable def saxpy_step16_add_y_addr_record
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    BodyStepRecord (saxpy_step16_ctx n hn hnpos alpha xs ys) (fun _ => True) :=
+  BodyStepContext.assignRegStepSome (saxpy_step16_ctx n hn hnpos alpha xs ys)
+    (fun lane hLane => by
+      have hPost := saxpy_step15_cvta_rd7_record_post n hn hnpos alpha xs ys
+      obtain ⟨ls, hGet, _hR2, _hR6, _hRd1, _hRd2, _hRd3, _hR3, _hR4, _hR5,
+        _hR1, _hP1, _hRd4, hRd5, _hRd6, hRd7, _hPc, _hStatus⟩ := hPost lane hLane
+      refine ⟨saxpyYElementAddrValue lane, ?_⟩
+      exact evalRValue_saxpyYElementAddrRhs_of_regs hGet hRd7 hRd5)
+
+theorem saxpy_step16_add_y_addr_record_post
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    SaxpyAfterYAddrPost n hn alpha
+      (saxpy_step16_add_y_addr_record n hn hnpos alpha xs ys).post := by
+  let step16 := saxpy_step16_add_y_addr_record n hn hnpos alpha xs ys
+  have hStep15 := saxpy_step15_cvta_rd7_record_post n hn hnpos alpha xs ys
+  intro j hj
+  obtain ⟨ls15, hGet15, hR2, hR6, hRd1, hRd2, hRd3, hR3, hR4, hR5, hR1,
+    hP1, hRd4, hRd5, hRd6, hRd7, hPc15, hStatus15⟩ := hStep15 j hj
+  have hEval :
+      evalRValue? (saxpy_step15_cvta_rd7_record n hn hnpos alpha xs ys).post
+          0 0 j saxpyYElementAddrRhs =
+        some (saxpyYElementAddrValue j) := by
+    exact evalRValue_saxpyYElementAddrRhs_of_regs hGet15 hRd7 hRd5
+  obtain ⟨ls16, hGet16, hRegs16, hPreds16, _hLocal16, hStatusFrame, hPc16Raw⟩ :=
+    BodyStepRecord.assignReg_lane_full step16 hj hGet15 hPc15 hEval
+  have hRegFrame :
+      ∀ {r : RegName} {v : Value}, ls15.regs[r]? = some v → r ≠ "rd8" →
+        ls16.regs[r]? = some v := by
+    intro r v hReg hNe
+    rw [hRegs16]
+    exact reg_insert_getElem?_ne hReg hNe
+  have hR2_16 : ls16.regs["r2"]? = some (.u32 (UInt32.ofNat n)) :=
+    hRegFrame hR2 (by decide)
+  have hR6_16 : ls16.regs["r6"]? = some (.s32 (saxpyAlphaS32 alpha)) :=
+    hRegFrame hR6 (by decide)
+  have hRd1_16 : ls16.regs["rd1"]? = some (.u64 (UInt64.ofNat saxpyXBase)) :=
+    hRegFrame hRd1 (by decide)
+  have hRd2_16 : ls16.regs["rd2"]? = some (.u64 (UInt64.ofNat saxpyYBase)) :=
+    hRegFrame hRd2 (by decide)
+  have hRd3_16 : ls16.regs["rd3"]? = some (.u64 (UInt64.ofNat saxpyRBase)) :=
+    hRegFrame hRd3 (by decide)
+  have hR3_16 : ls16.regs["r3"]? = some (.u32 0) :=
+    hRegFrame hR3 (by decide)
+  have hR4_16 : ls16.regs["r4"]? = some (.u32 32) :=
+    hRegFrame hR4 (by decide)
+  have hR5_16 : ls16.regs["r5"]? = some (.u32 (UInt32.ofNat j.val)) :=
+    hRegFrame hR5 (by decide)
+  have hR1_16 : ls16.regs["r1"]? = some (.s32 (Int.ofNat j.val)) :=
+    hRegFrame hR1 (by decide)
+  have hP1_16 : ls16.preds["p1"]? = some false := by
+    rw [hPreds16, hP1]
+  have hRd4_16 : ls16.regs["rd4"]? = some (.gaddr .global saxpyXBase) :=
+    hRegFrame hRd4 (by decide)
+  have hRd5_16 : ls16.regs["rd5"]? = some (saxpyLaneByteOffsetValue j) :=
+    hRegFrame hRd5 (by decide)
+  have hRd6_16 : ls16.regs["rd6"]? = some (saxpyXElementAddrValue j) :=
+    hRegFrame hRd6 (by decide)
+  have hRd7_16 : ls16.regs["rd7"]? = some (.gaddr .global saxpyYBase) :=
+    hRegFrame hRd7 (by decide)
+  have hRd8 : ls16.regs["rd8"]? = some (saxpyYElementAddrValue j) := by
+    rw [hRegs16]
+    simp [Std.HashMap.getElem?_insert]
+  have hPc16 : ls16.pc = ("saxpyKernel$fallthrough0", 5) := by
+    simpa using hPc16Raw
+  have hStatus16 : ls16.status = .running := by
+    rw [hStatusFrame, hStatus15]
+  refine
+    ⟨ls16, hGet16, hR2_16, hR6_16, hRd1_16, hRd2_16, hRd3_16, hR3_16, hR4_16,
+      hR5_16, hR1_16, hP1_16, hRd4_16, hRd5_16, hRd6_16, hRd7_16, hRd8, hPc16,
+      hStatus16⟩
+
 theorem saxpy_step11_branch_target_accumulated
     (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
     (alpha : Int) (xs ys : List Int) :
@@ -4947,5 +5258,94 @@ theorem saxpy_step14_add_x_addr_accumulated
       step7.step, step8.step, step9.step, step10.step, step11.step, step12.step,
       step13.step, step14.step, ?_⟩
   exact saxpy_step14_add_x_addr_record_post n hn hnpos alpha xs ys
+
+theorem saxpy_step15_cvta_rd7_accumulated
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    ∃ st1 st2 st3 st4 st5 st6 st7 st8 st9 st10 st11 st12 st13 st14 st15 : State,
+      StepMachine.step? (saxpyStateFor n alpha xs ys) = some st1 ∧
+      StepMachine.step? st1 = some st2 ∧
+      StepMachine.step? st2 = some st3 ∧
+      StepMachine.step? st3 = some st4 ∧
+      StepMachine.step? st4 = some st5 ∧
+      StepMachine.step? st5 = some st6 ∧
+      StepMachine.step? st6 = some st7 ∧
+      StepMachine.step? st7 = some st8 ∧
+      StepMachine.step? st8 = some st9 ∧
+      StepMachine.step? st9 = some st10 ∧
+      StepMachine.step? st10 = some st11 ∧
+      StepMachine.step? st11 = some st12 ∧
+      StepMachine.step? st12 = some st13 ∧
+      StepMachine.step? st13 = some st14 ∧
+      StepMachine.step? st14 = some st15 ∧
+      SaxpyAfterCvtaRd7Post n hn alpha st15 := by
+  let step1 := saxpy_step1_load_param0_record n hn hnpos alpha xs ys
+  let step2 := saxpy_step2_load_param1_record n hn hnpos alpha xs ys
+  let step3 := saxpy_step3_load_param2_record n hn hnpos alpha xs ys
+  let step4 := saxpy_step4_load_param3_record n hn hnpos alpha xs ys
+  let step5 := saxpy_step5_load_param4_record n hn hnpos alpha xs ys
+  let step6 := saxpy_step6_mov_ctaidX_record n hn hnpos alpha xs ys
+  let step7 := saxpy_step7_mov_ntidX_record n hn hnpos alpha xs ys
+  let step8 := saxpy_step8_mov_tidX_record n hn hnpos alpha xs ys
+  let step9 := saxpy_step9_mad_index_record n hn hnpos alpha xs ys
+  let step10 := saxpy_step10_setp_ge_record n hn hnpos alpha xs ys
+  let step11 := saxpy_step11_branch_fallthrough_record n hn hnpos alpha xs ys
+  let step12 := saxpy_step12_cvta_rd4_record n hn hnpos alpha xs ys
+  let step13 := saxpy_step13_mul_wide_record n hn hnpos alpha xs ys
+  let step14 := saxpy_step14_add_x_addr_record n hn hnpos alpha xs ys
+  let step15 := saxpy_step15_cvta_rd7_record n hn hnpos alpha xs ys
+  refine
+    ⟨step1.post, step2.post, step3.post, step4.post, step5.post, step6.post, step7.post,
+      step8.post, step9.post, step10.post, step11.post, step12.post, step13.post,
+      step14.post, step15.post, step1.step, step2.step, step3.step, step4.step,
+      step5.step, step6.step, step7.step, step8.step, step9.step, step10.step,
+      step11.step, step12.step, step13.step, step14.step, step15.step, ?_⟩
+  exact saxpy_step15_cvta_rd7_record_post n hn hnpos alpha xs ys
+
+theorem saxpy_step16_add_y_addr_accumulated
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    ∃ st1 st2 st3 st4 st5 st6 st7 st8 st9 st10 st11 st12 st13 st14 st15
+        st16 : State,
+      StepMachine.step? (saxpyStateFor n alpha xs ys) = some st1 ∧
+      StepMachine.step? st1 = some st2 ∧
+      StepMachine.step? st2 = some st3 ∧
+      StepMachine.step? st3 = some st4 ∧
+      StepMachine.step? st4 = some st5 ∧
+      StepMachine.step? st5 = some st6 ∧
+      StepMachine.step? st6 = some st7 ∧
+      StepMachine.step? st7 = some st8 ∧
+      StepMachine.step? st8 = some st9 ∧
+      StepMachine.step? st9 = some st10 ∧
+      StepMachine.step? st10 = some st11 ∧
+      StepMachine.step? st11 = some st12 ∧
+      StepMachine.step? st12 = some st13 ∧
+      StepMachine.step? st13 = some st14 ∧
+      StepMachine.step? st14 = some st15 ∧
+      StepMachine.step? st15 = some st16 ∧
+      SaxpyAfterYAddrPost n hn alpha st16 := by
+  let step1 := saxpy_step1_load_param0_record n hn hnpos alpha xs ys
+  let step2 := saxpy_step2_load_param1_record n hn hnpos alpha xs ys
+  let step3 := saxpy_step3_load_param2_record n hn hnpos alpha xs ys
+  let step4 := saxpy_step4_load_param3_record n hn hnpos alpha xs ys
+  let step5 := saxpy_step5_load_param4_record n hn hnpos alpha xs ys
+  let step6 := saxpy_step6_mov_ctaidX_record n hn hnpos alpha xs ys
+  let step7 := saxpy_step7_mov_ntidX_record n hn hnpos alpha xs ys
+  let step8 := saxpy_step8_mov_tidX_record n hn hnpos alpha xs ys
+  let step9 := saxpy_step9_mad_index_record n hn hnpos alpha xs ys
+  let step10 := saxpy_step10_setp_ge_record n hn hnpos alpha xs ys
+  let step11 := saxpy_step11_branch_fallthrough_record n hn hnpos alpha xs ys
+  let step12 := saxpy_step12_cvta_rd4_record n hn hnpos alpha xs ys
+  let step13 := saxpy_step13_mul_wide_record n hn hnpos alpha xs ys
+  let step14 := saxpy_step14_add_x_addr_record n hn hnpos alpha xs ys
+  let step15 := saxpy_step15_cvta_rd7_record n hn hnpos alpha xs ys
+  let step16 := saxpy_step16_add_y_addr_record n hn hnpos alpha xs ys
+  refine
+    ⟨step1.post, step2.post, step3.post, step4.post, step5.post, step6.post, step7.post,
+      step8.post, step9.post, step10.post, step11.post, step12.post, step13.post,
+      step14.post, step15.post, step16.post, step1.step, step2.step, step3.step,
+      step4.step, step5.step, step6.step, step7.step, step8.step, step9.step, step10.step,
+      step11.step, step12.step, step13.step, step14.step, step15.step, step16.step, ?_⟩
+  exact saxpy_step16_add_y_addr_record_post n hn hnpos alpha xs ys
 
 end CLean
