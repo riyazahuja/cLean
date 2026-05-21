@@ -528,6 +528,14 @@ def Instr.assignRegMadS32Regs? : Instr → Option (RegName × RegName × RegName
         (.unop (.cvt .s32) (.reg c))) => some (dst, a, b, c)
   | _ => none
 
+/-- Project an `assignReg` of the lowered `mul.wide.s32 reg, imm` shape. -/
+def Instr.assignRegMulWideS32RegImm? : Instr → Option (RegName × RegName × Int)
+  | .assignReg dst
+      (.binop .mulWideS32
+        (.unop (.cvt .s32) (.reg lhs))
+        (.imm (.s32 rhs))) => some (dst, lhs, rhs)
+  | _ => none
+
 /-- Project an `assignPred` of the lowered `setp.ge.s32` register shape. -/
 def Instr.assignPredGeS32Regs? : Instr → Option (PredName × RegName × RegName)
   | .assignPred dst
@@ -703,6 +711,47 @@ theorem GInstr.eq_unguarded_assignReg_madS32_of_projection
                (.unop (.cvt .s32) (.reg b))
                (.unop (.cvt .s32) (.reg c))) } := by
   have hInstr := Instr.assignReg_madS32_eq_of_projection hProj
+  rcases hgi : gi with ⟨g, i⟩
+  rw [hgi] at hGuard hInstr
+  simp at hGuard hInstr
+  subst hGuard
+  subst hInstr
+  rfl
+
+/-- Recover a concrete lowered `mul.wide.s32` `assignReg` from its projection. -/
+theorem Instr.assignReg_mulWideS32_reg_imm_eq_of_projection
+    {i : Instr} {dst lhs : RegName} {rhs : Int}
+    (hProj : i.assignRegMulWideS32RegImm? = some (dst, lhs, rhs)) :
+    i = .assignReg dst
+      (.binop .mulWideS32
+        (.unop (.cvt .s32) (.reg lhs))
+        (.imm (.s32 rhs))) := by
+  cases i <;> simp_all [Instr.assignRegMulWideS32RegImm?]
+  rename_i _ rv
+  cases rv <;> simp_all [Instr.assignRegMulWideS32RegImm?]
+  rename_i op a b
+  cases op <;> simp_all [Instr.assignRegMulWideS32RegImm?]
+  cases a <;> simp_all [Instr.assignRegMulWideS32RegImm?]
+  rename_i opA aa
+  cases opA <;> simp_all [Instr.assignRegMulWideS32RegImm?]
+  rename_i tyA
+  cases tyA <;> simp_all [Instr.assignRegMulWideS32RegImm?]
+  cases aa <;> simp_all [Instr.assignRegMulWideS32RegImm?]
+  cases b <;> simp_all [Instr.assignRegMulWideS32RegImm?]
+  rename_i v
+  cases v <;> simp_all [Instr.assignRegMulWideS32RegImm?]
+
+/-- Recover a concrete unguarded lowered `mul.wide.s32` `GInstr`. -/
+theorem GInstr.eq_unguarded_assignReg_mulWideS32_reg_imm_of_projection
+    {gi : GInstr} {dst lhs : RegName} {rhs : Int}
+    (hGuard : gi.guard? = none)
+    (hProj : gi.instr.assignRegMulWideS32RegImm? = some (dst, lhs, rhs)) :
+    gi = { guard? := none
+           instr := .assignReg dst
+             (.binop .mulWideS32
+               (.unop (.cvt .s32) (.reg lhs))
+               (.imm (.s32 rhs))) } := by
+  have hInstr := Instr.assignReg_mulWideS32_reg_imm_eq_of_projection hProj
   rcases hgi : gi with ⟨g, i⟩
   rw [hgi] at hGuard hInstr
   simp at hGuard hInstr
@@ -1205,6 +1254,60 @@ theorem saxpyFallthrough0_gi0_eq :
 theorem saxpyFallthrough0_body0_cvta_rd4 :
     saxpyFallthrough0.body[0]? = some saxpyFallthrough0_cvta_rd4 := by
   rw [saxpyFallthrough0_body0, saxpyFallthrough0_gi0_eq]
+
+/-- Lowered RHS of `mul.wide.s32 %rd5, %r1, 4`. -/
+def saxpyIndexByteOffsetRhs : RValue :=
+  .binop .mulWideS32
+    (.unop (.cvt .s32) (.reg "r1"))
+    (.imm (.s32 4))
+
+/-- Byte offset of lane `j` as the signed 64-bit value produced by `mul.wide.s32`. -/
+def saxpyLaneByteOffsetValue (j : LaneId) : Value :=
+  (evalBinary? .mulWideS32 (.s32 (Int.ofNat j.val)) (.s32 4)).getD (.s64 0)
+
+theorem saxpyLaneByteOffsetValue_eq_evalBinary (j : LaneId) :
+    evalBinary? .mulWideS32 (.s32 (Int.ofNat j.val)) (.s32 4) =
+      some (saxpyLaneByteOffsetValue j) := by
+  unfold saxpyLaneByteOffsetValue
+  rfl
+
+theorem evalRValue_saxpyIndexByteOffsetRhs_of_r1
+    {st : State} {j : LaneId} {ls : LaneState}
+    (hGet : st.getLane? 0 0 j = some ls)
+    (hR1 : ls.regs["r1"]? = some (.s32 (Int.ofNat j.val))) :
+    evalRValue? st 0 0 j saxpyIndexByteOffsetRhs =
+      some (saxpyLaneByteOffsetValue j) := by
+  simpa [saxpyIndexByteOffsetRhs, readReg, evalRValue?, evalUnary?, hGet, hR1,
+    Typing.valueType?] using saxpyLaneByteOffsetValue_eq_evalBinary j
+
+/-- Concrete second fallthrough instruction: `mul.wide.s32 %rd5, %r1, 4`. -/
+def saxpyFallthrough0_mul_wide_index : GInstr :=
+  { guard? := none, instr := .assignReg "rd5" saxpyIndexByteOffsetRhs }
+
+theorem saxpyFallthrough0_body1_isSome : (saxpyFallthrough0.body[1]?).isSome = true := by
+  unfold saxpyFallthrough0
+  native_decide
+
+def saxpyFallthrough0_gi1 : GInstr :=
+  saxpyFallthrough0.body[1]?.get saxpyFallthrough0_body1_isSome
+
+theorem saxpyFallthrough0_body1 : saxpyFallthrough0.body[1]? = some saxpyFallthrough0_gi1 :=
+  Option.eq_some_iff_get_eq.mpr ⟨saxpyFallthrough0_body1_isSome, rfl⟩
+
+theorem saxpyFallthrough0_gi1_eq :
+    saxpyFallthrough0_gi1 = saxpyFallthrough0_mul_wide_index := by
+  unfold saxpyFallthrough0_mul_wide_index saxpyIndexByteOffsetRhs
+  apply GInstr.eq_unguarded_assignReg_mulWideS32_reg_imm_of_projection
+  · rw [← Option.isNone_iff_eq_none]
+    show saxpyFallthrough0_gi1.guard?.isNone = true
+    unfold saxpyFallthrough0_gi1 saxpyFallthrough0
+    native_decide
+  · unfold saxpyFallthrough0_gi1 saxpyFallthrough0
+    native_decide
+
+theorem saxpyFallthrough0_body1_mul_wide_index :
+    saxpyFallthrough0.body[1]? = some saxpyFallthrough0_mul_wide_index := by
+  rw [saxpyFallthrough0_body1, saxpyFallthrough0_gi1_eq]
 
 /-! ## Reusable step records
 
@@ -2124,6 +2227,8 @@ def AssignRegFullPost (pre : State) (participants : List LaneId) (dst : RegName)
       pre.getLane? 0 0 lane = some preLane ∧
       post.getLane? 0 0 lane = some postLane ∧
       postLane.regs = preLane.regs.insert dst (valueAt lane) ∧
+      postLane.preds = preLane.preds ∧
+      postLane.localMem = preLane.localMem ∧
       postLane.pc = (pc.1, pc.2 + 1) ∧
       postLane.status = .running
 
@@ -2139,7 +2244,7 @@ theorem assigned_dst
       postLane.regs[dst]? = some (valueAt lane) ∧
       postLane.pc = (pc.1, pc.2 + 1) ∧
       postLane.status = .running := by
-  obtain ⟨_, postLane, _, hPost, hRegs, hPc, hStatus⟩ := h lane hLane
+  obtain ⟨_, postLane, _, hPost, hRegs, _, _, hPc, hStatus⟩ := h lane hLane
   refine ⟨postLane, hPost, ?_, hPc, hStatus⟩
   rw [hRegs]
   simp [Std.HashMap.getElem?_insert]
@@ -2160,7 +2265,7 @@ theorem assigned_dst_of_post_get
     {postLane : LaneState}
     (hPostLane : post.getLane? 0 0 lane = some postLane) :
     postLane.regs[dst]? = some (valueAt lane) := by
-  obtain ⟨_, postLane', _, hPostLane', hRegs, _, _⟩ := h lane hLane
+  obtain ⟨_, postLane', _, hPostLane', hRegs, _, _, _, _⟩ := h lane hLane
   have hEq : postLane' = postLane := by
     rw [hPostLane] at hPostLane'
     exact (Option.some.inj hPostLane').symm
@@ -2179,7 +2284,7 @@ theorem reg_ne_of_post_get
     ∃ preLane : LaneState,
       pre.getLane? 0 0 lane = some preLane ∧
       postLane.regs[r]? = preLane.regs[r]? := by
-  obtain ⟨preLane, postLane', hPreLane, hPostLane', hRegs, _, _⟩ := h lane hLane
+  obtain ⟨preLane, postLane', hPreLane, hPostLane', hRegs, _, _, _, _⟩ := h lane hLane
   have hEq : postLane' = postLane := by
     rw [hPostLane] at hPostLane'
     exact (Option.some.inj hPostLane').symm
@@ -2208,6 +2313,27 @@ theorem preserves_reg_value
     exact (Option.some.inj hPreLane').symm
   subst preLane'
   rw [hFrame, hReg]
+
+theorem preserves_pred_value
+    {pre post : State} {participants : List LaneId} {dst : RegName} {p : PredName}
+    {valueAt : LaneId → Value} {pc : PC}
+    (h : AssignRegFullPost pre participants dst valueAt pc post)
+    {lane : LaneId} (hLane : lane ∈ participants)
+    {preLane postLane : LaneState} {b : Bool}
+    (hPreLane : pre.getLane? 0 0 lane = some preLane)
+    (hPostLane : post.getLane? 0 0 lane = some postLane)
+    (hPred : preLane.preds[p]? = some b) :
+    postLane.preds[p]? = some b := by
+  obtain ⟨preLane', postLane', hPreLane', hPostLane', _, hPreds, _, _, _⟩ := h lane hLane
+  have hPreEq : preLane' = preLane := by
+    rw [hPreLane] at hPreLane'
+    exact (Option.some.inj hPreLane').symm
+  have hPostEq : postLane' = postLane := by
+    rw [hPostLane] at hPostLane'
+    exact (Option.some.inj hPostLane').symm
+  subst preLane'
+  subst postLane'
+  rw [hPreds, hPred]
 
 end AssignRegFullPost
 
@@ -2673,8 +2799,47 @@ noncomputable def assignRegStep
     stepInstr?_assignReg_lane_full
       (dst := dst) (rhs := rhs) (guard? := guard?) ctx.wf ctx.getWarp ctx.lockstep
       ctx.currentPc ctx.participants_eq hLane hGet hLanePc hEvalLane hInstr
-  refine ⟨laneState, laneState', hGet, hGet', hRegs, hPc', ?_⟩
+  refine ⟨laneState, laneState', hGet, hGet', hRegs, _hPreds, _hLocal, hPc', ?_⟩
   rw [hStatus', hStatus]
+
+/-- Construct an `assignReg` step record when only existence of the RHS value is
+needed for chaining. Per-lane value facts can then be recovered from `instrStep`
+with `stepInstr?_assignReg_lane_full`, avoiding expensive dependent
+postcondition types for lane-indexed expressions. -/
+noncomputable def assignRegStepSome
+    {st : State} {pc : PC} {block : Block} {participants : List LaneId}
+    {dst : RegName} {rhs : RValue} {guard? : Option Guard}
+    (ctx : BodyStepContext st pc block
+      { guard? := guard?, instr := .assignReg dst rhs } participants)
+    (hEval : ∀ lane ∈ participants, ∃ value, evalRValue? st 0 0 lane rhs = some value) :
+    BodyStepRecord ctx (fun _ => True) := by
+  classical
+  let valueAt : LaneId → Value := fun lane =>
+    if h : lane ∈ participants then Classical.choose (hEval lane h) else default
+  have hEvalValue : ∀ lane ∈ participants,
+      evalRValue? st 0 0 lane rhs = some (valueAt lane) := by
+    intro lane hLane
+    dsimp [valueAt]
+    rw [dif_pos hLane]
+    exact Classical.choose_spec (hEval lane hLane)
+  let r := assignRegStep ctx valueAt hEvalValue
+  exact
+    { post := r.post
+      instrStep := r.instrStep
+      step := r.step
+      post_wf := r.post_wf
+      post_global := r.post_global
+      post_const := r.post_const
+      post_param := r.post_param
+      post_kernelEnv := r.post_kernelEnv
+      post_atomics := r.post_atomics
+      post_warpState := r.post_warpState
+      post_getWarp := r.post_getWarp
+      post_warp_wf := r.post_warp_wf
+      post_lockstep := r.post_lockstep
+      post_runnable := r.post_runnable
+      post_currentPc := r.post_currentPc
+      post_holds := trivial }
 
 /-- Construct a full `cvta` step record from per-lane source and conversion facts. -/
 noncomputable def cvtaStep
@@ -3513,6 +3678,27 @@ def SaxpyAfterCvtaRd4Post (n : Nat) (hn : n ≤ 32) (alpha : Int) (post : State)
       ls.pc = ("saxpyKernel$fallthrough0", 1) ∧
       ls.status = .running
 
+/-- Interface after `mul.wide.s32 %rd5, %r1, 4`. -/
+def SaxpyAfterMulWidePost (n : Nat) (hn : n ≤ 32) (alpha : Int) (post : State) :
+    Prop :=
+  ∀ j ∈ saxpyActiveLanes n hn,
+    ∃ ls : LaneState,
+      post.getLane? 0 0 j = some ls ∧
+      ls.regs["r2"]? = some (.u32 (UInt32.ofNat n)) ∧
+      ls.regs["r6"]? = some (.s32 (saxpyAlphaS32 alpha)) ∧
+      ls.regs["rd1"]? = some (.u64 (UInt64.ofNat saxpyXBase)) ∧
+      ls.regs["rd2"]? = some (.u64 (UInt64.ofNat saxpyYBase)) ∧
+      ls.regs["rd3"]? = some (.u64 (UInt64.ofNat saxpyRBase)) ∧
+      ls.regs["r3"]? = some (.u32 0) ∧
+      ls.regs["r4"]? = some (.u32 32) ∧
+      ls.regs["r5"]? = some (.u32 (UInt32.ofNat j.val)) ∧
+      ls.regs["r1"]? = some (.s32 (Int.ofNat j.val)) ∧
+      ls.preds["p1"]? = some false ∧
+      ls.regs["rd4"]? = some (.gaddr .global saxpyXBase) ∧
+      ls.regs["rd5"]? = some (saxpyLaneByteOffsetValue j) ∧
+      ls.pc = ("saxpyKernel$fallthrough0", 2) ∧
+      ls.status = .running
+
 /-! ## Step 1 of the chain: `ld.param.u32 %r2, [param_0]`
 
 The first executable step from `saxpyStateFor n α xs ys` (with `n > 0`)
@@ -4299,6 +4485,95 @@ theorem saxpy_step12_cvta_rd4_record_post
     ⟨ls12, hGet12, hR2_12, hR6_12, hRd1_12, hRd2_12, hRd3_12, hR3_12, hR4_12,
       hR5_12, hR1_12, hP1_12, hRd4, hPc12, hStatus12⟩
 
+/-- Body-step context for `mul.wide.s32 %rd5, %r1, 4`. -/
+noncomputable def saxpy_step13_ctx
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    BodyStepContext (saxpy_step12_cvta_rd4_record n hn hnpos alpha xs ys).post
+      ("saxpyKernel$fallthrough0", 1) saxpyFallthrough0 saxpyFallthrough0_mul_wide_index
+      (saxpyActiveLanes n hn) :=
+  BodyStepRecord.nextContextNone
+    (saxpy_step12_cvta_rd4_record n hn hnpos alpha xs ys)
+    rfl rfl saxpyFallthrough0_body1_mul_wide_index
+
+/-- Step-record form of `mul.wide.s32 %rd5, %r1, 4`. -/
+noncomputable def saxpy_step13_mul_wide_record
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    BodyStepRecord (saxpy_step13_ctx n hn hnpos alpha xs ys) (fun _ => True) :=
+  BodyStepContext.assignRegStepSome (saxpy_step13_ctx n hn hnpos alpha xs ys)
+    (fun lane hLane => by
+      have hPost := saxpy_step12_cvta_rd4_record_post n hn hnpos alpha xs ys
+      obtain ⟨ls, hGet, _hR2, _hR6, _hRd1, _hRd2, _hRd3, _hR3, _hR4, _hR5,
+        hR1, _hP1, _hRd4, _hPc, _hStatus⟩ := hPost lane hLane
+      refine ⟨saxpyLaneByteOffsetValue lane, ?_⟩
+      exact evalRValue_saxpyIndexByteOffsetRhs_of_r1 hGet hR1)
+
+theorem saxpy_step13_mul_wide_record_post
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    SaxpyAfterMulWidePost n hn alpha
+      (saxpy_step13_mul_wide_record n hn hnpos alpha xs ys).post := by
+  let step13 := saxpy_step13_mul_wide_record n hn hnpos alpha xs ys
+  have hStep12 := saxpy_step12_cvta_rd4_record_post n hn hnpos alpha xs ys
+  intro j hj
+  obtain ⟨ls12, hGet12, hR2, hR6, hRd1, hRd2, hRd3, hR3, hR4, hR5, hR1,
+    hP1, hRd4, hPc12, hStatus12⟩ := hStep12 j hj
+  have hEval :
+      evalRValue? (saxpy_step12_cvta_rd4_record n hn hnpos alpha xs ys).post
+          0 0 j saxpyIndexByteOffsetRhs =
+        some (saxpyLaneByteOffsetValue j) := by
+    exact evalRValue_saxpyIndexByteOffsetRhs_of_r1 hGet12 hR1
+  obtain ⟨ls13, hGet13, hRegs13, hPreds13, _hLocal13, hStatusFrame, hPc13Raw⟩ :=
+    stepInstr?_assignReg_lane_full
+      (dst := "rd5") (rhs := saxpyIndexByteOffsetRhs) (guard? := none)
+      (saxpy_step13_ctx n hn hnpos alpha xs ys).wf
+      (saxpy_step13_ctx n hn hnpos alpha xs ys).getWarp
+      (saxpy_step13_ctx n hn hnpos alpha xs ys).lockstep
+      (saxpy_step13_ctx n hn hnpos alpha xs ys).currentPc
+      (saxpy_step13_ctx n hn hnpos alpha xs ys).participants_eq
+      hj hGet12 hPc12 hEval step13.instrStep
+  have hRegFrame :
+      ∀ {r : RegName} {v : Value}, ls12.regs[r]? = some v → r ≠ "rd5" →
+        ls13.regs[r]? = some v := by
+    intro r v hReg hNe
+    rw [hRegs13, Std.HashMap.getElem?_insert]
+    by_cases hEqKey : "rd5" = r
+    · exact False.elim (hNe hEqKey.symm)
+    · simp [beq_iff_eq, hEqKey, hReg]
+  have hR2_13 : ls13.regs["r2"]? = some (.u32 (UInt32.ofNat n)) :=
+    hRegFrame hR2 (by decide)
+  have hR6_13 : ls13.regs["r6"]? = some (.s32 (saxpyAlphaS32 alpha)) :=
+    hRegFrame hR6 (by decide)
+  have hRd1_13 : ls13.regs["rd1"]? = some (.u64 (UInt64.ofNat saxpyXBase)) :=
+    hRegFrame hRd1 (by decide)
+  have hRd2_13 : ls13.regs["rd2"]? = some (.u64 (UInt64.ofNat saxpyYBase)) :=
+    hRegFrame hRd2 (by decide)
+  have hRd3_13 : ls13.regs["rd3"]? = some (.u64 (UInt64.ofNat saxpyRBase)) :=
+    hRegFrame hRd3 (by decide)
+  have hR3_13 : ls13.regs["r3"]? = some (.u32 0) :=
+    hRegFrame hR3 (by decide)
+  have hR4_13 : ls13.regs["r4"]? = some (.u32 32) :=
+    hRegFrame hR4 (by decide)
+  have hR5_13 : ls13.regs["r5"]? = some (.u32 (UInt32.ofNat j.val)) :=
+    hRegFrame hR5 (by decide)
+  have hR1_13 : ls13.regs["r1"]? = some (.s32 (Int.ofNat j.val)) :=
+    hRegFrame hR1 (by decide)
+  have hP1_13 : ls13.preds["p1"]? = some false := by
+    rw [hPreds13, hP1]
+  have hRd4_13 : ls13.regs["rd4"]? = some (.gaddr .global saxpyXBase) :=
+    hRegFrame hRd4 (by decide)
+  have hRd5 : ls13.regs["rd5"]? = some (saxpyLaneByteOffsetValue j) := by
+    rw [hRegs13]
+    simp [Std.HashMap.getElem?_insert]
+  have hPc13 : ls13.pc = ("saxpyKernel$fallthrough0", 2) := by
+    simpa using hPc13Raw
+  have hStatus13 : ls13.status = .running := by
+    rw [hStatusFrame, hStatus12]
+  refine
+    ⟨ls13, hGet13, hR2_13, hR6_13, hRd1_13, hRd2_13, hRd3_13, hR3_13, hR4_13,
+      hR5_13, hR1_13, hP1_13, hRd4_13, hRd5, hPc13, hStatus13⟩
+
 theorem saxpy_step11_branch_target_accumulated
     (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
     (alpha : Int) (xs ys : List Int) :
@@ -4368,5 +4643,43 @@ theorem saxpy_step12_cvta_rd4_accumulated
       step1.step, step2.step, step3.step, step4.step, step5.step, step6.step, step7.step,
       step8.step, step9.step, step10.step, step11.step, step12.step, ?_⟩
   exact saxpy_step12_cvta_rd4_record_post n hn hnpos alpha xs ys
+
+theorem saxpy_step13_mul_wide_accumulated
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    ∃ st1 st2 st3 st4 st5 st6 st7 st8 st9 st10 st11 st12 st13 : State,
+      StepMachine.step? (saxpyStateFor n alpha xs ys) = some st1 ∧
+      StepMachine.step? st1 = some st2 ∧
+      StepMachine.step? st2 = some st3 ∧
+      StepMachine.step? st3 = some st4 ∧
+      StepMachine.step? st4 = some st5 ∧
+      StepMachine.step? st5 = some st6 ∧
+      StepMachine.step? st6 = some st7 ∧
+      StepMachine.step? st7 = some st8 ∧
+      StepMachine.step? st8 = some st9 ∧
+      StepMachine.step? st9 = some st10 ∧
+      StepMachine.step? st10 = some st11 ∧
+      StepMachine.step? st11 = some st12 ∧
+      StepMachine.step? st12 = some st13 ∧
+      SaxpyAfterMulWidePost n hn alpha st13 := by
+  let step1 := saxpy_step1_load_param0_record n hn hnpos alpha xs ys
+  let step2 := saxpy_step2_load_param1_record n hn hnpos alpha xs ys
+  let step3 := saxpy_step3_load_param2_record n hn hnpos alpha xs ys
+  let step4 := saxpy_step4_load_param3_record n hn hnpos alpha xs ys
+  let step5 := saxpy_step5_load_param4_record n hn hnpos alpha xs ys
+  let step6 := saxpy_step6_mov_ctaidX_record n hn hnpos alpha xs ys
+  let step7 := saxpy_step7_mov_ntidX_record n hn hnpos alpha xs ys
+  let step8 := saxpy_step8_mov_tidX_record n hn hnpos alpha xs ys
+  let step9 := saxpy_step9_mad_index_record n hn hnpos alpha xs ys
+  let step10 := saxpy_step10_setp_ge_record n hn hnpos alpha xs ys
+  let step11 := saxpy_step11_branch_fallthrough_record n hn hnpos alpha xs ys
+  let step12 := saxpy_step12_cvta_rd4_record n hn hnpos alpha xs ys
+  let step13 := saxpy_step13_mul_wide_record n hn hnpos alpha xs ys
+  refine
+    ⟨step1.post, step2.post, step3.post, step4.post, step5.post, step6.post, step7.post,
+      step8.post, step9.post, step10.post, step11.post, step12.post, step13.post,
+      step1.step, step2.step, step3.step, step4.step, step5.step, step6.step, step7.step,
+      step8.step, step9.step, step10.step, step11.step, step12.step, step13.step, ?_⟩
+  exact saxpy_step13_mul_wide_record_post n hn hnpos alpha xs ys
 
 end CLean
