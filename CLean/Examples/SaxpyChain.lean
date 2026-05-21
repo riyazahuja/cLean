@@ -453,6 +453,21 @@ def Terminator.isTerminate : Terminator → Bool
   | .terminate => true
   | _ => false
 
+/-- Project a `cbr` condition of the shape `.pred p`. -/
+def Terminator.cbrCondPred? : Terminator → Option PredName
+  | .cbr (.pred p) _ _ => some p
+  | _ => none
+
+/-- Project a `cbr` true label. -/
+def Terminator.cbrTrueLabel? : Terminator → Option BlockLabel
+  | .cbr _ tLabel _ => some tLabel
+  | _ => none
+
+/-- Project a `cbr` false label. -/
+def Terminator.cbrFalseLabel? : Terminator → Option BlockLabel
+  | .cbr _ _ fLabel => some fLabel
+  | _ => none
+
 /-! ### Per-instruction operand projections
 
 For load/cvta/assignReg/etc., we project to the *operands* via small
@@ -678,6 +693,19 @@ theorem GInstr.eq_unguarded_assignPred_geS32_of_projection
   subst hGuard
   subst hInstr
   rfl
+
+/-- Recover a concrete predicate-conditioned `cbr` from small projections. -/
+theorem Terminator.cbr_pred_eq_of_projections
+    {term : Terminator} {pred : PredName} {tLabel fLabel : BlockLabel}
+    (hCbr : term.isCbr = true)
+    (hPred : term.cbrCondPred? = some pred)
+    (hTrue : term.cbrTrueLabel? = some tLabel)
+    (hFalse : term.cbrFalseLabel? = some fLabel) :
+    term = .cbr (.pred pred) tLabel fLabel := by
+  cases term <;> simp_all [Terminator.isCbr, Terminator.cbrCondPred?,
+    Terminator.cbrTrueLabel?, Terminator.cbrFalseLabel?]
+  rename_i cond _ _
+  cases cond <;> simp_all [Terminator.cbrCondPred?]
 
 /-! ### Body-slot 0: `ld.param.u32 %r2, [param_0]`
 
@@ -1049,6 +1077,26 @@ theorem saxpyBB0_body9_setp_ge_index_len :
     saxpyBB0.body[9]? = some saxpyBB0_setp_ge_index_len := by
   rw [saxpyBB0_body9, saxpyBB0_gi9_eq]
 
+/-- BB0 has no body instruction at PC slot 10; execution moves to its terminator. -/
+theorem saxpyBB0_body10_none : saxpyBB0.body[10]? = none := by
+  rw [← Option.isNone_iff_eq_none]
+  show (saxpyBB0.body[10]?).isNone = true
+  unfold saxpyBB0
+  native_decide
+
+/-- Concrete BB0 terminator: branch to exit if `%p1`, otherwise fall through. -/
+def saxpyBB0_cbr_index_guard : Terminator :=
+  .cbr (.pred "p1") "$L__BB0_2" "saxpyKernel$fallthrough0"
+
+theorem saxpyBB0_term_cbr_index_guard :
+    saxpyBB0.term = saxpyBB0_cbr_index_guard := by
+  unfold saxpyBB0_cbr_index_guard
+  apply Terminator.cbr_pred_eq_of_projections
+  · unfold saxpyBB0; native_decide
+  · unfold saxpyBB0; native_decide
+  · unfold saxpyBB0; native_decide
+  · unfold saxpyBB0; native_decide
+
 /-! ## Reusable step records
 
 The chain proofs should expose a small, uniform step artifact instead of
@@ -1213,6 +1261,20 @@ theorem participatingRunnableLaneIds?_none_of_lockstep
           exact congrArg (fun x => x.bind fun out => some out.reverse) hLoop
     _ = some (runnableLaneIds ws) := by simp
 
+theorem runnable_eq_participants_of_none
+    {st : State} {pc : PC} {block : Block} {gi : GInstr} {participants : List LaneId}
+    (ctx : BodyStepContext st pc block gi participants)
+    (hGuard : gi.guard? = none) :
+    runnableLaneIds ctx.warpState = participants := by
+  have hPrevNone :
+      participatingRunnableLaneIds? ctx.warpState none = some participants := by
+    rw [← hGuard]
+    exact ctx.participants_eq
+  have hPrevRunnable :=
+    participatingRunnableLaneIds?_none_of_lockstep ctx.lockstep ctx.currentPc
+  rw [hPrevRunnable] at hPrevNone
+  exact Option.some.inj hPrevNone
+
 end BodyStepContext
 
 /-- A body instruction step plus a postcondition on its successor. -/
@@ -1293,6 +1355,291 @@ def nextContextNone
       exact hPostNone }
 
 end BodyStepRecord
+
+/-- The runnable-lane subset used by `stepTerminator?` at the current PC. -/
+def termParticipantsFor (ws : WarpState) (pc : PC) : List LaneId :=
+  (runnableLaneIds ws).filter fun lane =>
+    match ws.getLane? lane with
+    | some laneState => laneState.pc == pc
+    | none => false
+
+theorem termParticipantsFor_nodup (ws : WarpState) (pc : PC) :
+    (termParticipantsFor ws pc).Nodup := by
+  have hLaneIdsNoDup : (laneIds : List LaneId).Nodup := by
+    unfold laneIds
+    exact List.nodup_finRange 32
+  have hRunNoDup : (runnableLaneIds ws).Nodup :=
+    List.Nodup.filter _ hLaneIdsNoDup
+  unfold termParticipantsFor
+  exact List.Nodup.filter _ hRunNoDup
+
+theorem termParticipantsFor_eq_runnable_of_lockstep
+    {ws : WarpState} {pc : PC}
+    (hLock : lockstepRunnable ws)
+    (hPc : currentRunnablePc? ws = some pc) :
+    termParticipantsFor ws pc = runnableLaneIds ws := by
+  unfold termParticipantsFor
+  apply List.filter_eq_self.mpr
+  intro lane hLane
+  unfold lockstepRunnable lockstepRunnable? at hLock
+  rw [hPc] at hLock
+  simp [List.all_eq_true] at hLock
+  have h := hLock lane hLane
+  cases hWsLane : ws.getLane? lane with
+  | none =>
+      rw [hWsLane] at h
+      simp at h
+  | some ls =>
+      rw [hWsLane] at h
+      simp at h
+      simp [h]
+
+/-- The internal branch-destination loop from `uniformBranchDestination?`, exposed
+so uniform false-branch proofs do not have to reason about the whole terminator. -/
+def branchDests? (st : State) (cta : CTAId) (warp : WarpId)
+    (lanes : List LaneId) (cond : RValue) (tLabel fLabel : BlockLabel)
+    (acc : List PC) : Option (List PC) :=
+  forIn lanes acc fun lane dests =>
+    (evalRValue? st cta warp lane cond).bind fun v =>
+      (valueToBool? v).bind fun b =>
+        some (ForInStep.yield ((if b then (tLabel, 0) else (fLabel, 0)) :: dests))
+
+private theorem branchDests?_false_loop
+    {st : State} {cta : CTAId} {warp : WarpId} {cond : RValue}
+    {tLabel fLabel : BlockLabel} :
+    ∀ (lanes : List LaneId) (acc : List PC),
+      (∀ pc ∈ acc, pc = (fLabel, 0)) →
+      (∀ lane ∈ lanes, evalRValue? st cta warp lane cond = some (.pred false)) →
+      ∃ out : List PC,
+        branchDests? st cta warp lanes cond tLabel fLabel acc = some out ∧
+        (∀ pc ∈ out, pc = (fLabel, 0)) ∧
+        (acc ≠ [] ∨ lanes ≠ [] → out ≠ []) := by
+  intro lanes
+  induction lanes with
+  | nil =>
+      intro acc hAcc _
+      refine ⟨acc, by simp [branchDests?], hAcc, ?_⟩
+      intro h
+      rcases h with hAccNe | hFalse
+      · exact hAccNe
+      · contradiction
+  | cons lane rest ih =>
+      intro acc hAcc hEval
+      have hLane := hEval lane List.mem_cons_self
+      have hRest : ∀ lane ∈ rest, evalRValue? st cta warp lane cond = some (.pred false) := by
+        intro l hl
+        exact hEval l (List.mem_cons_of_mem lane hl)
+      have hAcc' : ∀ pc ∈ ((fLabel, 0) :: acc), pc = (fLabel, 0) := by
+        intro pc hpc
+        rw [List.mem_cons] at hpc
+        rcases hpc with hhead | htail
+        · exact hhead
+        · exact hAcc pc htail
+      obtain ⟨out, hLoop, hOut, hNonempty⟩ := ih ((fLabel, 0) :: acc) hAcc' hRest
+      refine ⟨out, ?_, hOut, ?_⟩
+      · simp [branchDests?, hLane]
+        exact hLoop
+      · intro _
+        exact hNonempty (Or.inl (by simp))
+
+theorem uniformBranchDestination?_false
+    {st : State} {cta : CTAId} {warp : WarpId} {lanes : List LaneId}
+    {cond : RValue} {tLabel fLabel : BlockLabel}
+    (hNonempty : lanes ≠ [])
+    (hEval : ∀ lane ∈ lanes, evalRValue? st cta warp lane cond = some (.pred false)) :
+    uniformBranchDestination? st cta warp lanes cond tLabel fLabel = some (fLabel, 0) := by
+  unfold uniformBranchDestination?
+  change ((branchDests? st cta warp lanes cond tLabel fLabel []).bind fun dests =>
+    match dests.reverse with
+    | [] => none
+    | dest :: rest => if rest.all (fun pc' => pc' == dest) then some dest else none)
+    = some (fLabel, 0)
+  obtain ⟨out, hLoop, hOut, hOutNonempty⟩ :=
+    branchDests?_false_loop (st := st) (cta := cta) (warp := warp)
+      (cond := cond) (tLabel := tLabel) (fLabel := fLabel) lanes [] (by simp) hEval
+  rw [hLoop]
+  simp
+  have hRevNonempty : out.reverse ≠ [] := by
+    intro h
+    apply hOutNonempty (Or.inr hNonempty)
+    have := congrArg List.reverse h
+    simpa using this
+  cases hRev : out.reverse with
+  | nil =>
+      exact False.elim (hRevNonempty hRev)
+  | cons dest rest =>
+      have hDest : dest = (fLabel, 0) := by
+        have : dest ∈ out := by
+          rw [← List.mem_reverse]
+          rw [hRev]
+          exact List.mem_cons_self
+        exact hOut dest this
+      have hRestAll : (rest.all fun pc' => pc' == dest) = true := by
+        rw [List.all_eq_true]
+        intro pc hpc
+        have hpcOut : pc ∈ out := by
+          rw [← List.mem_reverse]
+          rw [hRev]
+          exact List.mem_cons_of_mem dest hpc
+        rw [hOut pc hpcOut, hDest]
+        simp
+      change (if (rest.all fun pc' => pc' == dest) = true then some dest else none) =
+        some (fLabel, 0)
+      rw [hRestAll, hDest]
+      simp
+
+/-- Structural context for a terminator step at the current runnable PC. -/
+structure TermStepContext (st : State) (pc : PC) (block : Block) (term : Terminator)
+    (participants : List LaneId) where
+  warpState : WarpState
+  wf : State.wf st
+  getWarp : st.getWarp? 0 0 = some warpState
+  warp_wf : WarpState.wf warpState
+  lockstep : lockstepRunnable warpState
+  currentPc : currentRunnablePc? warpState = some pc
+  block_lookup : st.kernelEnv.blocks[pc.1]? = some block
+  body_done : block.body[pc.2]? = none
+  block_term : block.term = term
+  participants_eq : termParticipantsFor warpState pc = participants
+
+namespace TermStepContext
+
+theorem participants_nodup
+    {st : State} {pc : PC} {block : Block} {term : Terminator} {participants : List LaneId}
+    (ctx : TermStepContext st pc block term participants) :
+    participants.Nodup := by
+  rw [← ctx.participants_eq]
+  exact termParticipantsFor_nodup ctx.warpState pc
+
+theorem step_of_term
+    {st : State} {pc : PC} {block : Block} {term : Terminator} {participants : List LaneId}
+    (ctx : TermStepContext st pc block term participants)
+    {post : State}
+    (hTerm : stepTerminator? st 0 0 term = some post) :
+    StepMachine.step? st = some post := by
+  calc
+    StepMachine.step? st = stepTerminator? st 0 0 block.term :=
+      step?_term ctx.wf ctx.getWarp ctx.warp_wf ctx.lockstep ctx.currentPc
+        ctx.block_lookup ctx.body_done
+    _ = stepTerminator? st 0 0 term := by rw [ctx.block_term]
+    _ = some post := hTerm
+
+theorem lane_pre
+    {st : State} {pc : PC} {block : Block} {term : Terminator} {participants : List LaneId}
+    (ctx : TermStepContext st pc block term participants)
+    {lane : LaneId}
+    (hLane : lane ∈ participants) :
+    ∃ laneState : LaneState,
+      st.getLane? 0 0 lane = some laneState ∧
+      laneState.pc = pc ∧
+      lane ∈ runnableLaneIds ctx.warpState := by
+  have hMem : lane ∈ termParticipantsFor ctx.warpState pc := by
+    rw [ctx.participants_eq]
+    exact hLane
+  unfold termParticipantsFor at hMem
+  rw [List.mem_filter] at hMem
+  obtain ⟨hRun, hPcFilter⟩ := hMem
+  cases hWarpLane : ctx.warpState.getLane? lane with
+  | none =>
+      rw [hWarpLane] at hPcFilter
+      simp at hPcFilter
+  | some laneState =>
+      refine ⟨laneState, ?_, ?_, hRun⟩
+      · unfold State.getLane?
+        rw [ctx.getWarp]
+        simp [hWarpLane]
+      · rw [hWarpLane] at hPcFilter
+        simpa using hPcFilter
+
+end TermStepContext
+
+/-- A terminator step plus a postcondition on its successor. -/
+structure TermStepRecord
+    {st : State} {pc : PC} {block : Block} {term : Terminator}
+    {participants : List LaneId}
+    (ctx : TermStepContext st pc block term participants) (Post : State → Prop) where
+  post : State
+  termStep : stepTerminator? st 0 0 term = some post
+  step : StepMachine.step? st = some post
+  post_holds : Post post
+
+/-- Full postcondition for a uniform `cbr`: each participating lane keeps its
+local state except for the branch target PC. -/
+def CbrStepFullPost (pre : State) (participants : List LaneId) (dest : PC)
+    (post : State) : Prop :=
+  ∀ lane ∈ participants,
+    ∃ preLane postLane : LaneState,
+      pre.getLane? 0 0 lane = some preLane ∧
+      post.getLane? 0 0 lane = some postLane ∧
+      postLane.regs = preLane.regs ∧
+      postLane.preds = preLane.preds ∧
+      postLane.localMem = preLane.localMem ∧
+      postLane.status = preLane.status ∧
+      postLane.pc = dest
+
+namespace TermStepContext
+
+/-- Construct a uniform false-branch terminator-step record. -/
+noncomputable def cbrFalseStep
+    {st : State} {pc : PC} {block : Block} {participants : List LaneId}
+    {cond : RValue} {tLabel fLabel : BlockLabel}
+    (ctx : TermStepContext st pc block (.cbr cond tLabel fLabel) participants)
+    (hNonempty : participants ≠ [])
+    (hEval : ∀ lane ∈ participants,
+      evalRValue? st 0 0 lane cond = some (.pred false)) :
+    TermStepRecord ctx (CbrStepFullPost st participants (fLabel, 0)) := by
+  classical
+  let dest : PC := (fLabel, 0)
+  set fBranch : LaneId → LaneState → Option LaneState := fun _ laneState =>
+    some { laneState with pc := dest } with hfBranch
+  have hPartLaneSome : ∀ lane ∈ participants,
+      ∃ ls, st.getLane? 0 0 lane = some ls ∧ (fBranch lane ls).isSome = true := by
+    intro lane hLane
+    obtain ⟨ls, hGet, _, _⟩ := lane_pre ctx hLane
+    refine ⟨ls, hGet, ?_⟩
+    simp [hfBranch]
+  have hApplyIsSome :
+      (applyToLaneIds? st 0 0 participants fBranch).isSome = true :=
+    applyToLaneIds?_isSome_of_each_some (participants_nodup ctx) st ctx.wf hPartLaneSome
+  have hApplyExists := Option.isSome_iff_exists.mp hApplyIsSome
+  let post := Classical.choose hApplyExists
+  have hApply : applyToLaneIds? st 0 0 participants fBranch = some post :=
+    Classical.choose_spec hApplyExists
+  have hDest : uniformBranchDestination? st 0 0 participants cond tLabel fLabel = some dest :=
+    uniformBranchDestination?_false hNonempty hEval
+  have hTerm :
+      stepTerminator? st 0 0 (.cbr cond tLabel fLabel) = some post := by
+    unfold stepTerminator?
+    rw [ctx.getWarp]
+    show ((some ctx.warpState).bind _) = some post
+    rw [Option.some_bind]
+    have hLockB := (lockstepRunnable_iff_bool ctx.warpState).1 ctx.lockstep
+    simp [hLockB, ctx.currentPc]
+    change ((uniformBranchDestination? st 0 0 (termParticipantsFor ctx.warpState pc) cond
+          tLabel fLabel).bind
+        fun dest =>
+          applyToLaneIds? st 0 0 (termParticipantsFor ctx.warpState pc)
+            (fun _ laneState => some { laneState with pc := dest })) = some post
+    rw [ctx.participants_eq, hDest]
+    change applyToLaneIds? st 0 0 participants
+        (fun _ laneState => some { laneState with pc := dest }) = some post
+    rw [← hfBranch]
+    exact hApply
+  refine
+    { post := post
+      termStep := hTerm
+      step := step_of_term ctx hTerm
+      post_holds := ?_ }
+  intro lane hLane
+  obtain ⟨preLane, hPreLane, _hPc, _hRun⟩ := lane_pre ctx hLane
+  have hMid := applyToLaneIds?_lane_in 0 0 fBranch participants
+    (participants_nodup ctx) st post ctx.wf hApply lane hLane preLane hPreLane
+  obtain ⟨postLane, hF, hPostLane⟩ := hMid
+  simp [hfBranch] at hF
+  subst postLane
+  exact ⟨preLane, { preLane with pc := dest }, hPreLane, hPostLane, rfl, rfl, rfl, rfl, rfl⟩
+
+end TermStepContext
 
 /-- Projection of a load body step: every participating lane has the loaded
 value in `dst`, advances by one slot, and remains runnable. -/
@@ -2072,6 +2419,14 @@ theorem saxpyActiveLanes_mem_lt
   have hVal : i = j.val := congrArg Fin.val hEq
   omega
 
+theorem saxpyActiveLanes_ne_nil
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n) :
+    saxpyActiveLanes n hn ≠ [] := by
+  unfold saxpyActiveLanes
+  cases n with
+  | zero => omega
+  | succ _ => simp
+
 theorem evalUnary_cvt_s32_u32_of_le32 (n : Nat) (hn : n ≤ 32) :
     evalUnary? (.cvt .s32) (.u32 (UInt32.ofNat n)) = some (.s32 (Int.ofNat n)) := by
   interval_cases n <;> rfl
@@ -2526,6 +2881,25 @@ def SaxpyBranchPredPost (n : Nat) (hn : n ≤ 32) (alpha : Int) (post : State) :
       ls.regs["r1"]? = some (.s32 (Int.ofNat j.val)) ∧
       ls.preds["p1"]? = some false ∧
       ls.pc = ("saxpyKernel", 10) ∧
+      ls.status = .running
+
+/-- Interface after BB0's branch terminator has taken the uniform fallthrough path. -/
+def SaxpyBranchTargetPost (n : Nat) (hn : n ≤ 32) (alpha : Int) (post : State) :
+    Prop :=
+  ∀ j ∈ saxpyActiveLanes n hn,
+    ∃ ls : LaneState,
+      post.getLane? 0 0 j = some ls ∧
+      ls.regs["r2"]? = some (.u32 (UInt32.ofNat n)) ∧
+      ls.regs["r6"]? = some (.s32 (saxpyAlphaS32 alpha)) ∧
+      ls.regs["rd1"]? = some (.u64 (UInt64.ofNat saxpyXBase)) ∧
+      ls.regs["rd2"]? = some (.u64 (UInt64.ofNat saxpyYBase)) ∧
+      ls.regs["rd3"]? = some (.u64 (UInt64.ofNat saxpyRBase)) ∧
+      ls.regs["r3"]? = some (.u32 0) ∧
+      ls.regs["r4"]? = some (.u32 32) ∧
+      ls.regs["r5"]? = some (.u32 (UInt32.ofNat j.val)) ∧
+      ls.regs["r1"]? = some (.s32 (Int.ofNat j.val)) ∧
+      ls.preds["p1"]? = some false ∧
+      ls.pc = ("saxpyKernel$fallthrough0", 0) ∧
       ls.status = .running
 
 /-! ## Step 1 of the chain: `ld.param.u32 %r2, [param_0]`
@@ -3085,6 +3459,59 @@ theorem saxpy_step10_branch_pred_record
     ⟨ls10, hGet10, hR2_10, hR6_10, hRd1_10, hRd2_10, hRd3_10, hR3_10, hR4_10,
       hR5_10, hR1_10, hP1, hPc10, hStatus10⟩
 
+theorem evalRValue_saxpy_step10_post_p1_false
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) {j : LaneId}
+    (hj : j ∈ saxpyActiveLanes n hn) :
+    evalRValue? (saxpy_step10_setp_ge_record n hn hnpos alpha xs ys).post
+        0 0 j (.pred "p1") =
+      some (.pred false) := by
+  have hPost := saxpy_step10_branch_pred_record n hn hnpos alpha xs ys
+  obtain ⟨ls, hGet, _hR2, _hR6, _hRd1, _hRd2, _hRd3, _hR3, _hR4, _hR5,
+    _hR1, hP1, _hPc, _hStatus⟩ := hPost j hj
+  simp [evalRValue?, readPred, hGet, hP1]
+
+/-- Terminator-step context for the BB0 conditional branch at PC 10. -/
+noncomputable def saxpy_step11_ctx
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    TermStepContext (saxpy_step10_setp_ge_record n hn hnpos alpha xs ys).post
+      ("saxpyKernel", 10) saxpyBB0
+      (.cbr (.pred "p1") "$L__BB0_2" "saxpyKernel$fallthrough0")
+      (saxpyActiveLanes n hn) := by
+  let step10 := saxpy_step10_setp_ge_record n hn hnpos alpha xs ys
+  exact
+    { warpState := step10.post_warpState
+      wf := step10.post_wf
+      getWarp := step10.post_getWarp
+      warp_wf := step10.post_warp_wf
+      lockstep := step10.post_lockstep
+      currentPc := step10.post_currentPc
+      block_lookup := by
+        rw [step10.post_kernelEnv]
+        exact (saxpy_step10_ctx n hn hnpos alpha xs ys).block_lookup
+      body_done := saxpyBB0_body10_none
+      block_term := by
+        simpa [saxpyBB0_cbr_index_guard] using saxpyBB0_term_cbr_index_guard
+      participants_eq := by
+        have hTermParticipants :=
+          termParticipantsFor_eq_runnable_of_lockstep step10.post_lockstep step10.post_currentPc
+        rw [hTermParticipants, step10.post_runnable]
+        exact BodyStepContext.runnable_eq_participants_of_none
+          (saxpy_step10_ctx n hn hnpos alpha xs ys) rfl }
+
+/-- Step-record form of BB0's conditional branch. Since `%p1` is uniformly
+false on active lanes, the branch falls through to `saxpyKernel$fallthrough0`. -/
+noncomputable def saxpy_step11_branch_fallthrough_record
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    TermStepRecord (saxpy_step11_ctx n hn hnpos alpha xs ys)
+      (CbrStepFullPost (saxpy_step10_setp_ge_record n hn hnpos alpha xs ys).post
+        (saxpyActiveLanes n hn) ("saxpyKernel$fallthrough0", 0)) :=
+  TermStepContext.cbrFalseStep (saxpy_step11_ctx n hn hnpos alpha xs ys)
+    (saxpyActiveLanes_ne_nil n hn hnpos)
+    (fun _ hLane => evalRValue_saxpy_step10_post_p1_false n hn hnpos alpha xs ys hLane)
+
 theorem saxpy_step10_branch_pred_accumulated
     (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
     (alpha : Int) (xs ys : List Int) :
@@ -3115,5 +3542,81 @@ theorem saxpy_step10_branch_pred_accumulated
       step8.post, step9.post, step10.post, step1.step, step2.step, step3.step, step4.step,
       step5.step, step6.step, step7.step, step8.step, step9.step, step10.step, ?_⟩
   exact saxpy_step10_branch_pred_record n hn hnpos alpha xs ys
+
+theorem saxpy_step11_branch_target_record
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    SaxpyBranchTargetPost n hn alpha
+      (saxpy_step11_branch_fallthrough_record n hn hnpos alpha xs ys).post := by
+  let step11 := saxpy_step11_branch_fallthrough_record n hn hnpos alpha xs ys
+  have hPred := saxpy_step10_branch_pred_record n hn hnpos alpha xs ys
+  intro j hj
+  obtain ⟨ls10, hGet10, hR2, hR6, hRd1, hRd2, hRd3, hR3, hR4, hR5, hR1,
+    hP1, _hPc10, hStatus10⟩ := hPred j hj
+  obtain ⟨preLane, ls11, hPre, hGet11, hRegs, hPreds, _hLocal, hStatusFrame, hPc11⟩ :=
+    step11.post_holds j hj
+  have hPreEq : preLane = ls10 := by
+    rw [hGet10] at hPre
+    exact (Option.some.inj hPre).symm
+  subst preLane
+  have hR2_11 : ls11.regs["r2"]? = some (.u32 (UInt32.ofNat n)) := by
+    rw [hRegs, hR2]
+  have hR6_11 : ls11.regs["r6"]? = some (.s32 (saxpyAlphaS32 alpha)) := by
+    rw [hRegs, hR6]
+  have hRd1_11 : ls11.regs["rd1"]? = some (.u64 (UInt64.ofNat saxpyXBase)) := by
+    rw [hRegs, hRd1]
+  have hRd2_11 : ls11.regs["rd2"]? = some (.u64 (UInt64.ofNat saxpyYBase)) := by
+    rw [hRegs, hRd2]
+  have hRd3_11 : ls11.regs["rd3"]? = some (.u64 (UInt64.ofNat saxpyRBase)) := by
+    rw [hRegs, hRd3]
+  have hR3_11 : ls11.regs["r3"]? = some (.u32 0) := by
+    rw [hRegs, hR3]
+  have hR4_11 : ls11.regs["r4"]? = some (.u32 32) := by
+    rw [hRegs, hR4]
+  have hR5_11 : ls11.regs["r5"]? = some (.u32 (UInt32.ofNat j.val)) := by
+    rw [hRegs, hR5]
+  have hR1_11 : ls11.regs["r1"]? = some (.s32 (Int.ofNat j.val)) := by
+    rw [hRegs, hR1]
+  have hP1_11 : ls11.preds["p1"]? = some false := by
+    rw [hPreds, hP1]
+  have hStatus11 : ls11.status = .running := by
+    rw [hStatusFrame, hStatus10]
+  refine
+    ⟨ls11, hGet11, hR2_11, hR6_11, hRd1_11, hRd2_11, hRd3_11, hR3_11, hR4_11,
+      hR5_11, hR1_11, hP1_11, hPc11, hStatus11⟩
+
+theorem saxpy_step11_branch_target_accumulated
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    ∃ st1 st2 st3 st4 st5 st6 st7 st8 st9 st10 st11 : State,
+      StepMachine.step? (saxpyStateFor n alpha xs ys) = some st1 ∧
+      StepMachine.step? st1 = some st2 ∧
+      StepMachine.step? st2 = some st3 ∧
+      StepMachine.step? st3 = some st4 ∧
+      StepMachine.step? st4 = some st5 ∧
+      StepMachine.step? st5 = some st6 ∧
+      StepMachine.step? st6 = some st7 ∧
+      StepMachine.step? st7 = some st8 ∧
+      StepMachine.step? st8 = some st9 ∧
+      StepMachine.step? st9 = some st10 ∧
+      StepMachine.step? st10 = some st11 ∧
+      SaxpyBranchTargetPost n hn alpha st11 := by
+  let step1 := saxpy_step1_load_param0_record n hn hnpos alpha xs ys
+  let step2 := saxpy_step2_load_param1_record n hn hnpos alpha xs ys
+  let step3 := saxpy_step3_load_param2_record n hn hnpos alpha xs ys
+  let step4 := saxpy_step4_load_param3_record n hn hnpos alpha xs ys
+  let step5 := saxpy_step5_load_param4_record n hn hnpos alpha xs ys
+  let step6 := saxpy_step6_mov_ctaidX_record n hn hnpos alpha xs ys
+  let step7 := saxpy_step7_mov_ntidX_record n hn hnpos alpha xs ys
+  let step8 := saxpy_step8_mov_tidX_record n hn hnpos alpha xs ys
+  let step9 := saxpy_step9_mad_index_record n hn hnpos alpha xs ys
+  let step10 := saxpy_step10_setp_ge_record n hn hnpos alpha xs ys
+  let step11 := saxpy_step11_branch_fallthrough_record n hn hnpos alpha xs ys
+  refine
+    ⟨step1.post, step2.post, step3.post, step4.post, step5.post, step6.post, step7.post,
+      step8.post, step9.post, step10.post, step11.post, step1.step, step2.step, step3.step,
+      step4.step, step5.step, step6.step, step7.step, step8.step, step9.step, step10.step,
+      step11.step, ?_⟩
+  exact saxpy_step11_branch_target_record n hn hnpos alpha xs ys
 
 end CLean
