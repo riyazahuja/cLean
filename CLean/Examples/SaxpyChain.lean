@@ -224,16 +224,23 @@ lemma readMem_saxpyStateFor_param1 (n : Nat) (alpha : Int) (xs ys : List Int) :
   unfold decodeScalar?
   simp [natToBytesLE_length, bytesToNatLE_natToBytesLE_4, Nat.mod_eq_of_lt hLt']
 
-theorem readMem?_param_s32_congr
-    {st st' : State} {offset : Nat}
+theorem readMem?_param_congr
+    {st st' : State} {ty : ScalarTy} {offset : Nat}
     (hParam : st.param = st'.param) :
-    readMem? st .param .s32 (.param offset) =
-      readMem? st' .param .s32 (.param offset) := by
+    readMem? st .param ty (.param offset) =
+      readMem? st' .param ty (.param offset) := by
   unfold readMem?
   simp [Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?,
         Typing.byteWidth?, Typing.aligned?, Typing.alignment?,
         Typing.addrSpaceMatches?, Addr.offset, Addr.space,
         getSpaceBaseMem?, hParam]
+
+theorem readMem?_param_s32_congr
+    {st st' : State} {offset : Nat}
+    (hParam : st.param = st'.param) :
+    readMem? st .param .s32 (.param offset) =
+      readMem? st' .param .s32 (.param offset) :=
+  readMem?_param_congr hParam
 
 /-- The third parameter slot encodes the base address of `xs` as a u64 value. -/
 lemma readBytes?_saxpyParamBytesFor_param2 (n : Nat) (alpha : Int) :
@@ -323,12 +330,8 @@ theorem readMem?_param_u64_congr
     {st st' : State} {offset : Nat}
     (hParam : st.param = st'.param) :
     readMem? st .param .u64 (.param offset) =
-      readMem? st' .param .u64 (.param offset) := by
-  unfold readMem?
-  simp [Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?,
-        Typing.byteWidth?, Typing.aligned?, Typing.alignment?,
-        Typing.addrSpaceMatches?, Addr.offset, Addr.space,
-        getSpaceBaseMem?, hParam]
+      readMem? st' .param .u64 (.param offset) :=
+  readMem?_param_congr hParam
 
 /-! ## Initial-state well-formedness
 
@@ -994,8 +997,8 @@ def nextContextNone
 
 end BodyStepRecord
 
-/-- Standard postcondition for a load body step: every participating lane has
-the loaded value in `dst`, advances by one slot, and remains runnable. -/
+/-- Projection of a load body step: every participating lane has the loaded
+value in `dst`, advances by one slot, and remains runnable. -/
 def LoadStepPost (participants : List LaneId) (dst : RegName)
     (valueAt : LaneId → Value) (pc : PC) (post : State) : Prop :=
   ∀ lane ∈ participants,
@@ -1004,6 +1007,102 @@ def LoadStepPost (participants : List LaneId) (dst : RegName)
       laneState.regs[dst]? = some (valueAt lane) ∧
       laneState.pc = (pc.1, pc.2 + 1) ∧
       laneState.status = .running
+
+/-- Full load-step postcondition. Besides the projected load result, this
+exposes the precise register-map update relative to the pre-step lane. -/
+def LoadStepFullPost (pre : State) (participants : List LaneId) (dst : RegName)
+    (valueAt : LaneId → Value) (pc : PC) (post : State) : Prop :=
+  ∀ lane ∈ participants,
+    ∃ preLane postLane : LaneState,
+      pre.getLane? 0 0 lane = some preLane ∧
+      post.getLane? 0 0 lane = some postLane ∧
+      postLane.regs = preLane.regs.insert dst (valueAt lane) ∧
+      postLane.pc = (pc.1, pc.2 + 1) ∧
+      postLane.status = .running
+
+namespace LoadStepFullPost
+
+theorem loaded_dst
+    {pre post : State} {participants : List LaneId} {dst : RegName}
+    {valueAt : LaneId → Value} {pc : PC}
+    (h : LoadStepFullPost pre participants dst valueAt pc post)
+    {lane : LaneId} (hLane : lane ∈ participants) :
+    ∃ postLane : LaneState,
+      post.getLane? 0 0 lane = some postLane ∧
+      postLane.regs[dst]? = some (valueAt lane) ∧
+      postLane.pc = (pc.1, pc.2 + 1) ∧
+      postLane.status = .running := by
+  obtain ⟨_, postLane, _, hPost, hRegs, hPc, hStatus⟩ := h lane hLane
+  refine ⟨postLane, hPost, ?_, hPc, hStatus⟩
+  rw [hRegs]
+  simp [Std.HashMap.getElem?_insert]
+
+theorem toLoadStepPost
+    {pre post : State} {participants : List LaneId} {dst : RegName}
+    {valueAt : LaneId → Value} {pc : PC}
+    (h : LoadStepFullPost pre participants dst valueAt pc post) :
+    LoadStepPost participants dst valueAt pc post := by
+  intro lane hLane
+  exact loaded_dst h hLane
+
+theorem loaded_dst_of_post_get
+    {pre post : State} {participants : List LaneId} {dst : RegName}
+    {valueAt : LaneId → Value} {pc : PC}
+    (h : LoadStepFullPost pre participants dst valueAt pc post)
+    {lane : LaneId} (hLane : lane ∈ participants)
+    {postLane : LaneState}
+    (hPostLane : post.getLane? 0 0 lane = some postLane) :
+    postLane.regs[dst]? = some (valueAt lane) := by
+  obtain ⟨_, postLane', _, hPostLane', hRegs, _, _⟩ := h lane hLane
+  have hEq : postLane' = postLane := by
+    rw [hPostLane] at hPostLane'
+    exact (Option.some.inj hPostLane').symm
+  subst postLane'
+  rw [hRegs]
+  simp [Std.HashMap.getElem?_insert]
+
+theorem reg_ne_of_post_get
+    {pre post : State} {participants : List LaneId} {dst r : RegName}
+    {valueAt : LaneId → Value} {pc : PC}
+    (h : LoadStepFullPost pre participants dst valueAt pc post)
+    {lane : LaneId} (hLane : lane ∈ participants)
+    {postLane : LaneState}
+    (hPostLane : post.getLane? 0 0 lane = some postLane)
+    (hNe : r ≠ dst) :
+    ∃ preLane : LaneState,
+      pre.getLane? 0 0 lane = some preLane ∧
+      postLane.regs[r]? = preLane.regs[r]? := by
+  obtain ⟨preLane, postLane', hPreLane, hPostLane', hRegs, _, _⟩ := h lane hLane
+  have hEq : postLane' = postLane := by
+    rw [hPostLane] at hPostLane'
+    exact (Option.some.inj hPostLane').symm
+  subst postLane'
+  refine ⟨preLane, hPreLane, ?_⟩
+  rw [hRegs, Std.HashMap.getElem?_insert]
+  by_cases hEqKey : dst = r
+  · exact False.elim (hNe hEqKey.symm)
+  · simp [beq_iff_eq, hEqKey]
+
+theorem preserves_reg_value
+    {pre post : State} {participants : List LaneId} {dst r : RegName}
+    {valueAt : LaneId → Value} {pc : PC}
+    (h : LoadStepFullPost pre participants dst valueAt pc post)
+    {lane : LaneId} (hLane : lane ∈ participants)
+    {preLane postLane : LaneState} {v : Value}
+    (hPreLane : pre.getLane? 0 0 lane = some preLane)
+    (hPostLane : post.getLane? 0 0 lane = some postLane)
+    (hReg : preLane.regs[r]? = some v)
+    (hNe : r ≠ dst) :
+    postLane.regs[r]? = some v := by
+  obtain ⟨preLane', hPreLane', hFrame⟩ :=
+    reg_ne_of_post_get h hLane hPostLane hNe
+  have hEq : preLane' = preLane := by
+    rw [hPreLane] at hPreLane'
+    exact (Option.some.inj hPreLane').symm
+  subst preLane'
+  rw [hFrame, hReg]
+
+end LoadStepFullPost
 
 namespace BodyStepContext
 
@@ -1017,7 +1116,7 @@ noncomputable def loadStep
     (hAddrRead : ∀ lane ∈ participants,
       ∃ addr, resolveAddr? st 0 0 lane src = some addr ∧
         readMem? st src.space src.ty addr = some (valueAt lane)) :
-    BodyStepRecord ctx (LoadStepPost participants dst valueAt pc) := by
+    BodyStepRecord ctx (LoadStepFullPost st participants dst valueAt pc) := by
   classical
   set fLoad : LaneId → LaneState → Option LaneState := fun lane laneState =>
     (resolveAddr? st 0 0 lane src).bind fun addr =>
@@ -1126,10 +1225,8 @@ noncomputable def loadStep
     stepInstr?_load_lane_full
       (dst := dst) (src := src) (guard? := guard?) ctx.wf ctx.getWarp ctx.lockstep ctx.currentPc
       ctx.participants_eq hLane hGet hLanePc hAddr hRead hInstr
-  refine ⟨laneState', hGet', ?_, hPc', ?_⟩
-  · rw [hRegs]
-    simp [Std.HashMap.getElem?_insert]
-  · rw [hStatus', hStatus]
+  refine ⟨laneState, laneState', hGet, hGet', hRegs, hPc', ?_⟩
+  rw [hStatus', hStatus]
 
 end BodyStepContext
 
@@ -1197,7 +1294,7 @@ noncomputable def saxpy_step1_load_param0_record
     (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
     (alpha : Int) (xs ys : List Int) :
     BodyStepRecord (saxpy_step1_ctx n hn hnpos alpha xs ys)
-      (LoadStepPost (saxpyActiveLanes n hn) "r2"
+      (LoadStepFullPost (saxpyStateFor n alpha xs ys) (saxpyActiveLanes n hn) "r2"
         (fun _ => .u32 (UInt32.ofNat n)) ("saxpyKernel", 0)) :=
   BodyStepContext.loadStep (saxpy_step1_ctx n hn hnpos alpha xs ys)
     (dst := "r2")
@@ -1233,7 +1330,8 @@ noncomputable def saxpy_step2_load_param1_record
     (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
     (alpha : Int) (xs ys : List Int) :
     BodyStepRecord (saxpy_step2_ctx n hn hnpos alpha xs ys)
-      (LoadStepPost (saxpyActiveLanes n hn) "r6"
+      (LoadStepFullPost (saxpy_step1_load_param0_record n hn hnpos alpha xs ys).post
+        (saxpyActiveLanes n hn) "r6"
         (fun _ => .s32 (saxpyAlphaS32 alpha)) ("saxpyKernel", 1)) :=
   BodyStepContext.loadStep (saxpy_step2_ctx n hn hnpos alpha xs ys)
     (dst := "r6")
@@ -1275,7 +1373,8 @@ noncomputable def saxpy_step3_load_param2_record
     (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
     (alpha : Int) (xs ys : List Int) :
     BodyStepRecord (saxpy_step3_ctx n hn hnpos alpha xs ys)
-      (LoadStepPost (saxpyActiveLanes n hn) "rd1"
+      (LoadStepFullPost (saxpy_step2_load_param1_record n hn hnpos alpha xs ys).post
+        (saxpyActiveLanes n hn) "rd1"
         (fun _ => .u64 (UInt64.ofNat saxpyXBase)) ("saxpyKernel", 2)) :=
   BodyStepContext.loadStep (saxpy_step3_ctx n hn hnpos alpha xs ys)
     (dst := "rd1")
@@ -1318,7 +1417,8 @@ noncomputable def saxpy_step4_load_param3_record
     (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
     (alpha : Int) (xs ys : List Int) :
     BodyStepRecord (saxpy_step4_ctx n hn hnpos alpha xs ys)
-      (LoadStepPost (saxpyActiveLanes n hn) "rd2"
+      (LoadStepFullPost (saxpy_step3_load_param2_record n hn hnpos alpha xs ys).post
+        (saxpyActiveLanes n hn) "rd2"
         (fun _ => .u64 (UInt64.ofNat saxpyYBase)) ("saxpyKernel", 3)) :=
   BodyStepContext.loadStep (saxpy_step4_ctx n hn hnpos alpha xs ys)
     (dst := "rd2")
@@ -1362,7 +1462,8 @@ noncomputable def saxpy_step5_load_param4_record
     (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
     (alpha : Int) (xs ys : List Int) :
     BodyStepRecord (saxpy_step5_ctx n hn hnpos alpha xs ys)
-      (LoadStepPost (saxpyActiveLanes n hn) "rd3"
+      (LoadStepFullPost (saxpy_step4_load_param3_record n hn hnpos alpha xs ys).post
+        (saxpyActiveLanes n hn) "rd3"
         (fun _ => .u64 (UInt64.ofNat saxpyRBase)) ("saxpyKernel", 4)) :=
   BodyStepContext.loadStep (saxpy_step5_ctx n hn hnpos alpha xs ys)
     (dst := "rd3")
@@ -1374,6 +1475,19 @@ noncomputable def saxpy_step5_load_param4_record
        resolveAddr_param_u64_imm
          (saxpy_step4_load_param3_record n hn hnpos alpha xs ys).post lane 24,
        readMem_saxpy_step4_post_param4 n hn hnpos alpha xs ys⟩)
+
+/-- Interface after the five parameter loads have executed. -/
+def SaxpyParamLoadsPost (n : Nat) (hn : n ≤ 32) (alpha : Int) (post : State) : Prop :=
+  ∀ j ∈ saxpyActiveLanes n hn,
+    ∃ ls : LaneState,
+      post.getLane? 0 0 j = some ls ∧
+      ls.regs["r2"]? = some (.u32 (UInt32.ofNat n)) ∧
+      ls.regs["r6"]? = some (.s32 (saxpyAlphaS32 alpha)) ∧
+      ls.regs["rd1"]? = some (.u64 (UInt64.ofNat saxpyXBase)) ∧
+      ls.regs["rd2"]? = some (.u64 (UInt64.ofNat saxpyYBase)) ∧
+      ls.regs["rd3"]? = some (.u64 (UInt64.ofNat saxpyRBase)) ∧
+      ls.pc = ("saxpyKernel", 5) ∧
+      ls.status = .running
 
 /-! ## Step 1 of the chain: `ld.param.u32 %r2, [param_0]`
 
@@ -1395,8 +1509,9 @@ theorem saxpy_step1_load_param0
   obtain ⟨st1, hStep, hPost⟩ :=
     BodyStepRecord.to_exists (saxpy_step1_load_param0_record n hn hnpos alpha xs ys)
   refine ⟨st1, hStep, ?_⟩
+  have hPostSimple := LoadStepFullPost.toLoadStepPost hPost
   intro j hj
-  simpa [LoadStepPost] using hPost j hj
+  simpa [LoadStepPost] using hPostSimple j hj
 
 /-! ## Step 2 of the chain: `ld.param.s32 %r6, [param_1]`
 
@@ -1419,8 +1534,9 @@ theorem saxpy_step2_load_param1
   let step1 := saxpy_step1_load_param0_record n hn hnpos alpha xs ys
   let step2 := saxpy_step2_load_param1_record n hn hnpos alpha xs ys
   refine ⟨step1.post, step2.post, step1.step, step2.step, ?_⟩
+  have hPostSimple := LoadStepFullPost.toLoadStepPost step2.post_holds
   intro j hj
-  simpa [LoadStepPost, step2] using step2.post_holds j hj
+  simpa [LoadStepPost, step2] using hPostSimple j hj
 
 /-! ## Step 3 of the chain: `ld.param.u64 %rd1, [param_2]`
 
@@ -1444,8 +1560,9 @@ theorem saxpy_step3_load_param2
   let step2 := saxpy_step2_load_param1_record n hn hnpos alpha xs ys
   let step3 := saxpy_step3_load_param2_record n hn hnpos alpha xs ys
   refine ⟨step1.post, step2.post, step3.post, step1.step, step2.step, step3.step, ?_⟩
+  have hPostSimple := LoadStepFullPost.toLoadStepPost step3.post_holds
   intro j hj
-  simpa [LoadStepPost, step3] using step3.post_holds j hj
+  simpa [LoadStepPost, step3] using hPostSimple j hj
 
 /-! ## Step 4 of the chain: `ld.param.u64 %rd2, [param_3]` -/
 
@@ -1470,8 +1587,9 @@ theorem saxpy_step4_load_param3
   refine
     ⟨step1.post, step2.post, step3.post, step4.post,
       step1.step, step2.step, step3.step, step4.step, ?_⟩
+  have hPostSimple := LoadStepFullPost.toLoadStepPost step4.post_holds
   intro j hj
-  simpa [LoadStepPost, step4] using step4.post_holds j hj
+  simpa [LoadStepPost, step4] using hPostSimple j hj
 
 /-! ## Step 5 of the chain: `ld.param.u64 %rd3, [param_4]` -/
 
@@ -1498,7 +1616,73 @@ theorem saxpy_step5_load_param4
   refine
     ⟨step1.post, step2.post, step3.post, step4.post, step5.post,
       step1.step, step2.step, step3.step, step4.step, step5.step, ?_⟩
+  have hPostSimple := LoadStepFullPost.toLoadStepPost step5.post_holds
   intro j hj
-  simpa [LoadStepPost, step5] using step5.post_holds j hj
+  simpa [LoadStepPost, step5] using hPostSimple j hj
+
+theorem saxpy_step5_param_loads_accumulated
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) :
+    ∃ st1 st2 st3 st4 st5 : State,
+      StepMachine.step? (saxpyStateFor n alpha xs ys) = some st1 ∧
+      StepMachine.step? st1 = some st2 ∧
+      StepMachine.step? st2 = some st3 ∧
+      StepMachine.step? st3 = some st4 ∧
+      StepMachine.step? st4 = some st5 ∧
+      SaxpyParamLoadsPost n hn alpha st5 := by
+  let step1 := saxpy_step1_load_param0_record n hn hnpos alpha xs ys
+  let step2 := saxpy_step2_load_param1_record n hn hnpos alpha xs ys
+  let step3 := saxpy_step3_load_param2_record n hn hnpos alpha xs ys
+  let step4 := saxpy_step4_load_param3_record n hn hnpos alpha xs ys
+  let step5 := saxpy_step5_load_param4_record n hn hnpos alpha xs ys
+  refine
+    ⟨step1.post, step2.post, step3.post, step4.post, step5.post,
+      step1.step, step2.step, step3.step, step4.step, step5.step, ?_⟩
+  intro j hj
+  obtain ⟨ls5, hGet5, hRd3, hPc5, hStatus5⟩ :=
+    LoadStepFullPost.loaded_dst step5.post_holds hj
+  have hRd2 : ls5.regs["rd2"]? = some (.u64 (UInt64.ofNat saxpyYBase)) := by
+    obtain ⟨ls4, hGet4, hFrame5⟩ :=
+      LoadStepFullPost.reg_ne_of_post_get (r := "rd2") step5.post_holds hj hGet5
+        (by decide)
+    have hLoad4 := LoadStepFullPost.loaded_dst_of_post_get step4.post_holds hj hGet4
+    rw [hFrame5, hLoad4]
+  have hRd1 : ls5.regs["rd1"]? = some (.u64 (UInt64.ofNat saxpyXBase)) := by
+    obtain ⟨ls4, hGet4, hFrame5⟩ :=
+      LoadStepFullPost.reg_ne_of_post_get (r := "rd1") step5.post_holds hj hGet5
+        (by decide)
+    obtain ⟨ls3, hGet3, hFrame4⟩ :=
+      LoadStepFullPost.reg_ne_of_post_get (r := "rd1") step4.post_holds hj hGet4
+        (by decide)
+    have hLoad3 := LoadStepFullPost.loaded_dst_of_post_get step3.post_holds hj hGet3
+    rw [hFrame5, hFrame4, hLoad3]
+  have hR6 : ls5.regs["r6"]? = some (.s32 (saxpyAlphaS32 alpha)) := by
+    obtain ⟨ls4, hGet4, hFrame5⟩ :=
+      LoadStepFullPost.reg_ne_of_post_get (r := "r6") step5.post_holds hj hGet5
+        (by decide)
+    obtain ⟨ls3, hGet3, hFrame4⟩ :=
+      LoadStepFullPost.reg_ne_of_post_get (r := "r6") step4.post_holds hj hGet4
+        (by decide)
+    obtain ⟨ls2, hGet2, hFrame3⟩ :=
+      LoadStepFullPost.reg_ne_of_post_get (r := "r6") step3.post_holds hj hGet3
+        (by decide)
+    have hLoad2 := LoadStepFullPost.loaded_dst_of_post_get step2.post_holds hj hGet2
+    rw [hFrame5, hFrame4, hFrame3, hLoad2]
+  have hR2 : ls5.regs["r2"]? = some (.u32 (UInt32.ofNat n)) := by
+    obtain ⟨ls4, hGet4, hFrame5⟩ :=
+      LoadStepFullPost.reg_ne_of_post_get (r := "r2") step5.post_holds hj hGet5
+        (by decide)
+    obtain ⟨ls3, hGet3, hFrame4⟩ :=
+      LoadStepFullPost.reg_ne_of_post_get (r := "r2") step4.post_holds hj hGet4
+        (by decide)
+    obtain ⟨ls2, hGet2, hFrame3⟩ :=
+      LoadStepFullPost.reg_ne_of_post_get (r := "r2") step3.post_holds hj hGet3
+        (by decide)
+    obtain ⟨ls1, hGet1, hFrame2⟩ :=
+      LoadStepFullPost.reg_ne_of_post_get (r := "r2") step2.post_holds hj hGet2
+        (by decide)
+    have hLoad1 := LoadStepFullPost.loaded_dst_of_post_get step1.post_holds hj hGet1
+    rw [hFrame5, hFrame4, hFrame3, hFrame2, hLoad1]
+  refine ⟨ls5, hGet5, hR2, hR6, hRd1, hRd2, hRd3, hPc5, hStatus5⟩
 
 end CLean
