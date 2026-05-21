@@ -709,6 +709,15 @@ def Instr.assignRegMadS32Regs? : Instr → Option (RegName × RegName × RegName
         (.unop (.cvt .s32) (.reg c))) => some (dst, a, b, c)
   | _ => none
 
+/-- Project an `assignReg` of the fallthrough signed mad shape. -/
+def Instr.assignRegMadS32RegCvtReg? : Instr → Option (RegName × RegName × RegName × RegName)
+  | .assignReg dst
+      (.triop .mad
+        (.reg a)
+        (.unop (.cvt .s32) (.reg b))
+        (.reg c)) => some (dst, a, b, c)
+  | _ => none
+
 /-- Project an `assignReg` of the lowered `mul.wide.s32 reg, imm` shape. -/
 def Instr.assignRegMulWideS32RegImm? : Instr → Option (RegName × RegName × Int)
   | .assignReg dst
@@ -941,6 +950,48 @@ theorem GInstr.eq_unguarded_assignReg_madS32_of_projection
                (.unop (.cvt .s32) (.reg b))
                (.unop (.cvt .s32) (.reg c))) } := by
   have hInstr := Instr.assignReg_madS32_eq_of_projection hProj
+  rcases hgi : gi with ⟨g, i⟩
+  rw [hgi] at hGuard hInstr
+  simp at hGuard hInstr
+  subst hGuard
+  subst hInstr
+  rfl
+
+/-- Recover a concrete fallthrough signed mad `assignReg` from its projection. -/
+theorem Instr.assignReg_madS32_reg_cvt_reg_eq_of_projection
+    {i : Instr} {dst a b c : RegName}
+    (hProj : i.assignRegMadS32RegCvtReg? = some (dst, a, b, c)) :
+    i = .assignReg dst
+      (.triop .mad
+        (.reg a)
+        (.unop (.cvt .s32) (.reg b))
+        (.reg c)) := by
+  cases i <;> simp_all [Instr.assignRegMadS32RegCvtReg?]
+  rename_i _ rhs
+  cases rhs <;> simp_all [Instr.assignRegMadS32RegCvtReg?]
+  rename_i op x y z
+  cases op <;> simp_all [Instr.assignRegMadS32RegCvtReg?]
+  cases x <;> simp_all [Instr.assignRegMadS32RegCvtReg?]
+  cases y <;> simp_all [Instr.assignRegMadS32RegCvtReg?]
+  rename_i opy yy
+  cases opy <;> simp_all [Instr.assignRegMadS32RegCvtReg?]
+  rename_i tyy
+  cases tyy <;> simp_all [Instr.assignRegMadS32RegCvtReg?]
+  cases yy <;> simp_all [Instr.assignRegMadS32RegCvtReg?]
+  cases z <;> simp_all [Instr.assignRegMadS32RegCvtReg?]
+
+/-- Recover a concrete unguarded fallthrough signed mad `GInstr`. -/
+theorem GInstr.eq_unguarded_assignReg_madS32_reg_cvt_reg_of_projection
+    {gi : GInstr} {dst a b c : RegName}
+    (hGuard : gi.guard? = none)
+    (hProj : gi.instr.assignRegMadS32RegCvtReg? = some (dst, a, b, c)) :
+    gi = { guard? := none
+           instr := .assignReg dst
+             (.triop .mad
+               (.reg a)
+               (.unop (.cvt .s32) (.reg b))
+               (.reg c)) } := by
+  have hInstr := Instr.assignReg_madS32_reg_cvt_reg_eq_of_projection hProj
   rcases hgi : gi with ⟨g, i⟩
   rw [hgi] at hGuard hInstr
   simp at hGuard hInstr
@@ -1809,6 +1860,49 @@ theorem saxpyFallthrough0_gi6_eq :
 theorem saxpyFallthrough0_body6_load_y :
     saxpyFallthrough0.body[6]? = some saxpyFallthrough0_load_y := by
   rw [saxpyFallthrough0_body6, saxpyFallthrough0_gi6_eq]
+
+/-- Lowered RHS of `mad.lo.s32 %r9, %r7, %r6, %r8`. -/
+def saxpyMulAddRhs : RValue :=
+  .triop .mad
+    (.reg "r7")
+    (.unop (.cvt .s32) (.reg "r6"))
+    (.reg "r8")
+
+/-- Per-lane value computed by the SAXPY multiply-add instruction. -/
+def saxpyMulAddValue (alpha : Int) (xs ys : List Int) (j : LaneId) : Value :=
+  (evalTernary? .mad
+    (saxpyLoadedS32Value xs j)
+    ((evalUnary? (.cvt .s32) (.s32 (saxpyAlphaS32 alpha))).getD (.s32 0))
+    (saxpyLoadedS32Value ys j)).getD (.s32 0)
+
+/-- Concrete eighth fallthrough instruction: `mad.lo.s32 %r9, %r7, %r6, %r8`. -/
+def saxpyFallthrough0_mul_add : GInstr :=
+  { guard? := none, instr := .assignReg "r9" saxpyMulAddRhs }
+
+theorem saxpyFallthrough0_body7_isSome : (saxpyFallthrough0.body[7]?).isSome = true := by
+  unfold saxpyFallthrough0
+  native_decide
+
+def saxpyFallthrough0_gi7 : GInstr :=
+  saxpyFallthrough0.body[7]?.get saxpyFallthrough0_body7_isSome
+
+theorem saxpyFallthrough0_body7 : saxpyFallthrough0.body[7]? = some saxpyFallthrough0_gi7 :=
+  Option.eq_some_iff_get_eq.mpr ⟨saxpyFallthrough0_body7_isSome, rfl⟩
+
+theorem saxpyFallthrough0_gi7_eq :
+    saxpyFallthrough0_gi7 = saxpyFallthrough0_mul_add := by
+  unfold saxpyFallthrough0_mul_add saxpyMulAddRhs
+  apply GInstr.eq_unguarded_assignReg_madS32_reg_cvt_reg_of_projection
+  · rw [← Option.isNone_iff_eq_none]
+    show saxpyFallthrough0_gi7.guard?.isNone = true
+    unfold saxpyFallthrough0_gi7 saxpyFallthrough0
+    native_decide
+  · unfold saxpyFallthrough0_gi7 saxpyFallthrough0
+    native_decide
+
+theorem saxpyFallthrough0_body7_mul_add :
+    saxpyFallthrough0.body[7]? = some saxpyFallthrough0_mul_add := by
+  rw [saxpyFallthrough0_body7, saxpyFallthrough0_gi7_eq]
 
 /-! ## Reusable step records
 
@@ -4381,6 +4475,34 @@ def SaxpyAfterYLoadPost
       ls.pc = ("saxpyKernel$fallthrough0", 7) ∧
       ls.status = .running
 
+/-- Interface after `mad.lo.s32 %r9, %r7, %r6, %r8`. -/
+def SaxpyAfterMulAddPost
+    (n : Nat) (hn : n ≤ 32) (alpha : Int) (xs ys : List Int) (post : State) :
+    Prop :=
+  ∀ j ∈ saxpyActiveLanes n hn,
+    ∃ ls : LaneState,
+      post.getLane? 0 0 j = some ls ∧
+      ls.regs["r2"]? = some (.u32 (UInt32.ofNat n)) ∧
+      ls.regs["r6"]? = some (.s32 (saxpyAlphaS32 alpha)) ∧
+      ls.regs["rd1"]? = some (.u64 (UInt64.ofNat saxpyXBase)) ∧
+      ls.regs["rd2"]? = some (.u64 (UInt64.ofNat saxpyYBase)) ∧
+      ls.regs["rd3"]? = some (.u64 (UInt64.ofNat saxpyRBase)) ∧
+      ls.regs["r3"]? = some (.u32 0) ∧
+      ls.regs["r4"]? = some (.u32 32) ∧
+      ls.regs["r5"]? = some (.u32 (UInt32.ofNat j.val)) ∧
+      ls.regs["r1"]? = some (.s32 (Int.ofNat j.val)) ∧
+      ls.preds["p1"]? = some false ∧
+      ls.regs["rd4"]? = some (.gaddr .global saxpyXBase) ∧
+      ls.regs["rd5"]? = some (saxpyLaneByteOffsetValue j) ∧
+      ls.regs["rd6"]? = some (saxpyXElementAddrValue j) ∧
+      ls.regs["rd7"]? = some (.gaddr .global saxpyYBase) ∧
+      ls.regs["rd8"]? = some (saxpyYElementAddrValue j) ∧
+      ls.regs["r7"]? = some (saxpyLoadedS32Value xs j) ∧
+      ls.regs["r8"]? = some (saxpyLoadedS32Value ys j) ∧
+      ls.regs["r9"]? = some (saxpyMulAddValue alpha xs ys j) ∧
+      ls.pc = ("saxpyKernel$fallthrough0", 8) ∧
+      ls.status = .running
+
 /-! ## Step 1 of the chain: `ld.param.u32 %r2, [param_0]`
 
 The first executable step from `saxpyStateFor n α xs ys` (with `n > 0`)
@@ -5771,6 +5893,119 @@ theorem saxpy_step18_load_y_record_post
       hR4_18, hR5_18, hR1_18, hP1_18, hRd4_18, hRd5_18, hRd6_18, hRd7_18,
       hRd8_18, hR7_18, hR8, hPc18, hStatus18⟩
 
+theorem evalRValue_saxpy_step18_post_mul_add
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n)
+    {j : LaneId} (hj : j ∈ saxpyActiveLanes n hn) :
+    evalRValue? (saxpy_step18_load_y_record n hn hnpos alpha xs ys hxs hys).post
+        0 0 j saxpyMulAddRhs =
+      some (saxpyMulAddValue alpha xs ys j) := by
+  have hPost := saxpy_step18_load_y_record_post n hn hnpos alpha xs ys hxs hys
+  obtain ⟨ls, hGet, _hR2, hR6, _hRd1, _hRd2, _hRd3, _hR3, _hR4, _hR5,
+    _hR1, _hP1, _hRd4, _hRd5, _hRd6, _hRd7, _hRd8, hR7, hR8, _hPc, _hStatus⟩ :=
+    hPost j hj
+  have hCvt :
+      evalUnary? (.cvt .s32) (.s32 (saxpyAlphaS32 alpha)) =
+        some (.s32 (saxpyAlphaS32 alpha)) := by
+    simp [evalUnary?, Typing.valueType?]
+  simp [saxpyMulAddRhs, saxpyMulAddValue, saxpyLoadedS32Value, evalRValue?, readReg,
+    evalTernary?, hGet, hR7, hR6, hR8, hCvt]
+
+/-- Body-step context for `mad.lo.s32 %r9, %r7, %r6, %r8`. -/
+noncomputable def saxpy_step19_ctx
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    BodyStepContext (saxpy_step18_load_y_record n hn hnpos alpha xs ys hxs hys).post
+      ("saxpyKernel$fallthrough0", 7) saxpyFallthrough0 saxpyFallthrough0_mul_add
+      (saxpyActiveLanes n hn) :=
+  BodyStepRecord.nextContextNone
+    (saxpy_step18_load_y_record n hn hnpos alpha xs ys hxs hys)
+    rfl rfl saxpyFallthrough0_body7_mul_add
+
+/-- Step-record form of `mad.lo.s32 %r9, %r7, %r6, %r8`. -/
+noncomputable def saxpy_step19_mul_add_record
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    BodyStepRecord (saxpy_step19_ctx n hn hnpos alpha xs ys hxs hys)
+      (AssignRegFullPost (saxpy_step18_load_y_record n hn hnpos alpha xs ys hxs hys).post
+        (saxpyActiveLanes n hn) "r9" (saxpyMulAddValue alpha xs ys)
+        ("saxpyKernel$fallthrough0", 7)) :=
+  BodyStepContext.assignRegStep (saxpy_step19_ctx n hn hnpos alpha xs ys hxs hys)
+    (dst := "r9")
+    (rhs := saxpyMulAddRhs)
+    (guard? := none)
+    (saxpyMulAddValue alpha xs ys)
+    (fun _ hLane =>
+      evalRValue_saxpy_step18_post_mul_add n hn hnpos alpha xs ys hxs hys hLane)
+
+theorem saxpy_step19_mul_add_record_post
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    SaxpyAfterMulAddPost n hn alpha xs ys
+      (saxpy_step19_mul_add_record n hn hnpos alpha xs ys hxs hys).post := by
+  let step19 := saxpy_step19_mul_add_record n hn hnpos alpha xs ys hxs hys
+  have hStep18 := saxpy_step18_load_y_record_post n hn hnpos alpha xs ys hxs hys
+  intro j hj
+  obtain ⟨ls18, hGet18, hR2, hR6, hRd1, hRd2, hRd3, hR3, hR4, hR5, hR1,
+    hP1, hRd4, hRd5, hRd6, hRd7, hRd8, hR7, hR8, _hPc18, _hStatus18⟩ :=
+    hStep18 j hj
+  obtain ⟨ls19, hGet19, hR9, hPc19, hStatus19⟩ :=
+    AssignRegFullPost.assigned_dst step19.post_holds hj
+  have hR2_19 : ls19.regs["r2"]? = some (.u32 (UInt32.ofNat n)) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hR2
+      (by decide)
+  have hR6_19 : ls19.regs["r6"]? = some (.s32 (saxpyAlphaS32 alpha)) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hR6
+      (by decide)
+  have hRd1_19 : ls19.regs["rd1"]? = some (.u64 (UInt64.ofNat saxpyXBase)) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hRd1
+      (by decide)
+  have hRd2_19 : ls19.regs["rd2"]? = some (.u64 (UInt64.ofNat saxpyYBase)) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hRd2
+      (by decide)
+  have hRd3_19 : ls19.regs["rd3"]? = some (.u64 (UInt64.ofNat saxpyRBase)) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hRd3
+      (by decide)
+  have hR3_19 : ls19.regs["r3"]? = some (.u32 0) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hR3
+      (by decide)
+  have hR4_19 : ls19.regs["r4"]? = some (.u32 32) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hR4
+      (by decide)
+  have hR5_19 : ls19.regs["r5"]? = some (.u32 (UInt32.ofNat j.val)) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hR5
+      (by decide)
+  have hR1_19 : ls19.regs["r1"]? = some (.s32 (Int.ofNat j.val)) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hR1
+      (by decide)
+  have hP1_19 : ls19.preds["p1"]? = some false :=
+    AssignRegFullPost.preserves_pred_value step19.post_holds hj hGet18 hGet19 hP1
+  have hRd4_19 : ls19.regs["rd4"]? = some (.gaddr .global saxpyXBase) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hRd4
+      (by decide)
+  have hRd5_19 : ls19.regs["rd5"]? = some (saxpyLaneByteOffsetValue j) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hRd5
+      (by decide)
+  have hRd6_19 : ls19.regs["rd6"]? = some (saxpyXElementAddrValue j) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hRd6
+      (by decide)
+  have hRd7_19 : ls19.regs["rd7"]? = some (.gaddr .global saxpyYBase) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hRd7
+      (by decide)
+  have hRd8_19 : ls19.regs["rd8"]? = some (saxpyYElementAddrValue j) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hRd8
+      (by decide)
+  have hR7_19 : ls19.regs["r7"]? = some (saxpyLoadedS32Value xs j) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hR7
+      (by decide)
+  have hR8_19 : ls19.regs["r8"]? = some (saxpyLoadedS32Value ys j) :=
+    AssignRegFullPost.preserves_reg_value step19.post_holds hj hGet18 hGet19 hR8
+      (by decide)
+  refine
+    ⟨ls19, hGet19, hR2_19, hR6_19, hRd1_19, hRd2_19, hRd3_19, hR3_19,
+      hR4_19, hR5_19, hR1_19, hP1_19, hRd4_19, hRd5_19, hRd6_19, hRd7_19,
+      hRd8_19, hR7_19, hR8_19, hR9, hPc19, hStatus19⟩
+
 theorem saxpy_step11_branch_target_accumulated
     (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
     (alpha : Int) (xs ys : List Int) :
@@ -6108,5 +6343,59 @@ theorem saxpy_step18_load_y_accumulated
       step8.step, step9.step, step10.step, step11.step, step12.step, step13.step,
       step14.step, step15.step, step16.step, step17.step, step18.step, ?_⟩
   exact saxpy_step18_load_y_record_post n hn hnpos alpha xs ys hxs hys
+
+theorem saxpy_step19_mul_add_accumulated
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    ∃ st1 st2 st3 st4 st5 st6 st7 st8 st9 st10 st11 st12 st13 st14 st15
+        st16 st17 st18 st19 : State,
+      StepMachine.step? (saxpyStateFor n alpha xs ys) = some st1 ∧
+      StepMachine.step? st1 = some st2 ∧
+      StepMachine.step? st2 = some st3 ∧
+      StepMachine.step? st3 = some st4 ∧
+      StepMachine.step? st4 = some st5 ∧
+      StepMachine.step? st5 = some st6 ∧
+      StepMachine.step? st6 = some st7 ∧
+      StepMachine.step? st7 = some st8 ∧
+      StepMachine.step? st8 = some st9 ∧
+      StepMachine.step? st9 = some st10 ∧
+      StepMachine.step? st10 = some st11 ∧
+      StepMachine.step? st11 = some st12 ∧
+      StepMachine.step? st12 = some st13 ∧
+      StepMachine.step? st13 = some st14 ∧
+      StepMachine.step? st14 = some st15 ∧
+      StepMachine.step? st15 = some st16 ∧
+      StepMachine.step? st16 = some st17 ∧
+      StepMachine.step? st17 = some st18 ∧
+      StepMachine.step? st18 = some st19 ∧
+      SaxpyAfterMulAddPost n hn alpha xs ys st19 := by
+  let step1 := saxpy_step1_load_param0_record n hn hnpos alpha xs ys
+  let step2 := saxpy_step2_load_param1_record n hn hnpos alpha xs ys
+  let step3 := saxpy_step3_load_param2_record n hn hnpos alpha xs ys
+  let step4 := saxpy_step4_load_param3_record n hn hnpos alpha xs ys
+  let step5 := saxpy_step5_load_param4_record n hn hnpos alpha xs ys
+  let step6 := saxpy_step6_mov_ctaidX_record n hn hnpos alpha xs ys
+  let step7 := saxpy_step7_mov_ntidX_record n hn hnpos alpha xs ys
+  let step8 := saxpy_step8_mov_tidX_record n hn hnpos alpha xs ys
+  let step9 := saxpy_step9_mad_index_record n hn hnpos alpha xs ys
+  let step10 := saxpy_step10_setp_ge_record n hn hnpos alpha xs ys
+  let step11 := saxpy_step11_branch_fallthrough_record n hn hnpos alpha xs ys
+  let step12 := saxpy_step12_cvta_rd4_record n hn hnpos alpha xs ys
+  let step13 := saxpy_step13_mul_wide_record n hn hnpos alpha xs ys
+  let step14 := saxpy_step14_add_x_addr_record n hn hnpos alpha xs ys
+  let step15 := saxpy_step15_cvta_rd7_record n hn hnpos alpha xs ys
+  let step16 := saxpy_step16_add_y_addr_record n hn hnpos alpha xs ys
+  let step17 := saxpy_step17_load_x_record n hn hnpos alpha xs ys hxs
+  let step18 := saxpy_step18_load_y_record n hn hnpos alpha xs ys hxs hys
+  let step19 := saxpy_step19_mul_add_record n hn hnpos alpha xs ys hxs hys
+  refine
+    ⟨step1.post, step2.post, step3.post, step4.post, step5.post, step6.post, step7.post,
+      step8.post, step9.post, step10.post, step11.post, step12.post, step13.post,
+      step14.post, step15.post, step16.post, step17.post, step18.post, step19.post,
+      step1.step, step2.step, step3.step, step4.step, step5.step, step6.step,
+      step7.step, step8.step, step9.step, step10.step, step11.step, step12.step,
+      step13.step, step14.step, step15.step, step16.step, step17.step, step18.step,
+      step19.step, ?_⟩
+  exact saxpy_step19_mul_add_record_post n hn hnpos alpha xs ys hxs hys
 
 end CLean
