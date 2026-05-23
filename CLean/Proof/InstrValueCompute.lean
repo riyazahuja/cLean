@@ -1708,6 +1708,64 @@ theorem writeMem?_global_preserves_kernelEnv
                 unfold Helpers.setSpaceBaseMem? at hWrite
                 simp at hWrite
 
+/-- `writeMem?` to a concrete global address succeeds once access preconditions
+and scalar encoding succeed. -/
+theorem writeMem?_global_isSome_of_pre_encode
+    {st : State} {ty : ScalarTy} {off : Nat} {value : Value} {bytes : List Byte}
+    (hPre : Typing.typedAccessPreconditions? .global ty (.global off) = true)
+    (hEnc : Helpers.encodeScalar? ty value = some bytes) :
+    (Helpers.writeMem? st .global ty (.global off) value).isSome = true := by
+  unfold Helpers.writeMem?
+  simp [hPre, hEnc, Helpers.getSpaceBaseMem?, Helpers.setSpaceBaseMem?]
+
+/-- `writeMem?` to a global address modifies only global byte memory. -/
+theorem writeMem?_global_preserves_top
+    {st st' : State} {ty : ScalarTy} {addr : Addr} {value : Value}
+    (hSpace : addr.space = .global)
+    (hWrite : Helpers.writeMem? st .global ty addr value = some st') :
+    st'.const = st.const ∧
+      st'.param = st.param ∧
+      st'.ctas = st.ctas ∧
+      st'.kernelEnv = st.kernelEnv ∧
+      st'.atomics = st.atomics := by
+  unfold Helpers.writeMem? at hWrite
+  split at hWrite
+  · simp at hWrite
+  · cases hEnc : Helpers.encodeScalar? ty value with
+    | none => rw [hEnc] at hWrite; simp at hWrite
+    | some bytes =>
+        rw [hEnc] at hWrite; simp at hWrite
+        cases hGet : Helpers.getSpaceBaseMem? st addr with
+        | none => rw [hGet] at hWrite; simp at hWrite
+        | some mem =>
+            rw [hGet] at hWrite; simp at hWrite
+            cases addr with
+            | global off =>
+                unfold Helpers.setSpaceBaseMem? at hWrite
+                simp at hWrite
+                rw [← hWrite]
+                exact ⟨rfl, rfl, rfl, rfl, rfl⟩
+            | shared _ _ => simp [Addr.space] at hSpace
+            | «local» _ _ _ _ => simp [Addr.space] at hSpace
+            | param _ => simp [Addr.space] at hSpace
+            | const _ => simp [Addr.space] at hSpace
+            | generic _ _ =>
+                unfold Helpers.setSpaceBaseMem? at hWrite
+                simp at hWrite
+
+/-- `writeMem?` to a global address preserves `State.wf`, because the well-formedness
+predicate ignores global byte memory. -/
+theorem writeMem?_global_preserves_wf
+    {st st' : State} {ty : ScalarTy} {addr : Addr} {value : Value}
+    (hSpace : addr.space = .global)
+    (hWrite : Helpers.writeMem? st .global ty addr value = some st')
+    (hWf : State.wf st) :
+    State.wf st' := by
+  have hTop := writeMem?_global_preserves_top hSpace hWrite
+  unfold State.wf State.wf?
+  rw [hTop.2.2.1, hTop.2.2.2.1]
+  exact hWf
+
 /-- `writeMem?` to a global address modifies only `global.bytes`. -/
 theorem writeMem?_global_bytes_eq
     {st st' : State} {ty : ScalarTy} {off : Nat} {value : Value}
@@ -1820,7 +1878,7 @@ private theorem writeBytes_fold_preserves_disjoint
 
 /-- Byte-level lemma: after folding `writeBytes` of `(laneOff l, laneBytes l)`
 over a Nodup list of lanes, reading at any lane's offset returns its bytes. -/
-private theorem writeBytes_fold_target_value
+theorem writeBytes_fold_target_value
     (lanes : List LaneId) (hNoDup : lanes.Nodup)
     (laneOff : LaneId → Nat) (laneBytes : LaneId → List Byte)
     (wByte : Nat) (hLen : ∀ l, (laneBytes l).length = wByte)
@@ -1871,14 +1929,14 @@ private theorem forIn_store_post_state
     (dst : TypedAddr) (value : RValue)
     (laneAddrOff : LaneId → Nat) (laneBytes : LaneId → List Byte)
     (st0 : State)
-    -- Each candidate lane's resolveAddr? is .global (laneAddrOff l)
-    (hAddrSt0 : ∀ l, Helpers.resolveAddr? st0 cta warp l dst =
-                       some (.global (laneAddrOff l)))
-    -- Each candidate lane's evalRValue? is some v, and v's encoding matches laneBytes
-    (hValSt0 : ∀ l, ∃ v, Helpers.evalRValue? st0 cta warp l value = some v ∧
-                          Helpers.encodeScalar? dst.ty v = some (laneBytes l))
     (hSpace : dst.space = .global) :
     ∀ (lanes : List LaneId) (stIn stOut : State),
+      -- Each lane in this loop resolves to `.global (laneAddrOff l)`.
+      (∀ l, l ∈ lanes → Helpers.resolveAddr? st0 cta warp l dst =
+                       some (.global (laneAddrOff l))) →
+      -- Each lane in this loop evaluates to a scalar value whose encoding matches laneBytes.
+      (∀ l, l ∈ lanes → ∃ v, Helpers.evalRValue? st0 cta warp l value = some v ∧
+                          Helpers.encodeScalar? dst.ty v = some (laneBytes l)) →
       (∀ l, stIn.getLane? cta warp l = st0.getLane? cta warp l) →
       stIn.kernelEnv = st0.kernelEnv →
       (forIn (m := Option) lanes stIn fun l acc =>
@@ -1894,12 +1952,12 @@ private theorem forIn_store_post_state
   intro lanes
   induction lanes with
   | nil =>
-      intro stIn stOut hLaneIn hKerIn hLoop
+      intro stIn stOut _hAddrSt0 _hValSt0 hLaneIn hKerIn hLoop
       simp [List.forIn_nil] at hLoop
       subst hLoop
       exact ⟨rfl, hLaneIn, hKerIn⟩
   | cons a rest ih =>
-      intro stIn stOut hLaneIn hKerIn hLoop
+      intro stIn stOut hAddrSt0 hValSt0 hLaneIn hKerIn hLoop
       simp [List.forIn_cons] at hLoop
       -- Compute the body's effect for lane a.
       have hGridIn : stIn.kernelEnv.gridCtx = st0.kernelEnv.gridCtx := by rw [hKerIn]
@@ -1907,8 +1965,8 @@ private theorem forIn_store_post_state
                     some (.global (laneAddrOff a)) := by
         rw [resolveAddr?_lane_state_invariant dst st0 stIn cta warp a
             (hLaneIn a) hGridIn]
-        exact hAddrSt0 a
-      obtain ⟨vA, hValA_st0, hEncA⟩ := hValSt0 a
+        exact hAddrSt0 a List.mem_cons_self
+      obtain ⟨vA, hValA_st0, hEncA⟩ := hValSt0 a List.mem_cons_self
       have hValA : Helpers.evalRValue? stIn cta warp a value = some vA := by
         rw [evalRValue?_lane_state_invariant value st0 stIn cta warp a
             (hLaneIn a) hGridIn]
@@ -1940,10 +1998,103 @@ private theorem forIn_store_post_state
             writeMem?_global_bytes_eq hEncA hWriteSpaceA
           -- Apply IH on rest.
           obtain ⟨hBytesOut, hLaneOut, hKerOut⟩ :=
-            ih accAfter stOut hLaneAfter hKerAfter hLoop
+            ih accAfter stOut
+              (fun l hl => hAddrSt0 l (List.mem_cons_of_mem a hl))
+              (fun l hl => hValSt0 l (List.mem_cons_of_mem a hl))
+              hLaneAfter hKerAfter hLoop
           refine ⟨?_, hLaneOut, hKerOut⟩
           rw [hBytesOut, hBytesAfter]
           simp [List.foldl_cons]
+
+/-- A store `forIn` loop succeeds when every participating lane resolves to a
+well-typed global address and evaluates to an encodable scalar value. The loop
+only changes global byte memory. -/
+theorem forIn_store_isSome_of_pre_encode
+    (cta : CTAId) (warp : WarpId)
+    (dst : TypedAddr) (value : RValue)
+    (laneAddrOff : LaneId → Nat) (laneBytes : LaneId → List Byte)
+    (st0 : State)
+    (hSpace : dst.space = .global) :
+    ∀ (lanes : List LaneId) (stIn : State),
+      (∀ l, l ∈ lanes →
+        Typing.typedAccessPreconditions? .global dst.ty (.global (laneAddrOff l)) = true) →
+      (∀ l, l ∈ lanes → Helpers.resolveAddr? st0 cta warp l dst =
+        some (.global (laneAddrOff l))) →
+      (∀ l, l ∈ lanes → ∃ v, Helpers.evalRValue? st0 cta warp l value = some v ∧
+        Helpers.encodeScalar? dst.ty v = some (laneBytes l)) →
+      (∀ l, stIn.getLane? cta warp l = st0.getLane? cta warp l) →
+      stIn.kernelEnv = st0.kernelEnv →
+      State.wf stIn →
+      stIn.const = st0.const →
+      stIn.param = st0.param →
+      stIn.ctas = st0.ctas →
+      stIn.atomics = st0.atomics →
+      ∃ stOut : State,
+        (forIn (m := Option) lanes stIn fun l acc =>
+          (Helpers.resolveAddr? acc cta warp l dst).bind fun addr =>
+            (Helpers.evalRValue? acc cta warp l value).bind fun v =>
+              (Helpers.writeMem? acc dst.space dst.ty addr v).bind fun r =>
+                some (ForInStep.yield r)) = some stOut ∧
+        State.wf stOut ∧
+        (∀ l, stOut.getLane? cta warp l = st0.getLane? cta warp l) ∧
+        stOut.const = st0.const ∧
+        stOut.param = st0.param ∧
+        stOut.ctas = st0.ctas ∧
+        stOut.kernelEnv = st0.kernelEnv ∧
+        stOut.atomics = st0.atomics := by
+  intro lanes
+  induction lanes with
+  | nil =>
+      intro stIn _hPre _hAddr _hVal hLaneIn hKerIn hWf hConst hParam hCtas hAtomics
+      refine ⟨stIn, by simp [List.forIn_nil], hWf, hLaneIn, hConst, hParam, hCtas,
+        hKerIn, hAtomics⟩
+  | cons a rest ih =>
+      intro stIn hPre hAddr hVal hLaneIn hKerIn hWf hConst hParam hCtas hAtomics
+      have hGridIn : stIn.kernelEnv.gridCtx = st0.kernelEnv.gridCtx := by rw [hKerIn]
+      have hAddrA : Helpers.resolveAddr? stIn cta warp a dst =
+          some (.global (laneAddrOff a)) := by
+        rw [resolveAddr?_lane_state_invariant dst st0 stIn cta warp a
+          (hLaneIn a) hGridIn]
+        exact hAddr a List.mem_cons_self
+      obtain ⟨vA, hValA_st0, hEncA⟩ := hVal a List.mem_cons_self
+      have hValA : Helpers.evalRValue? stIn cta warp a value = some vA := by
+        rw [evalRValue?_lane_state_invariant value st0 stIn cta warp a
+          (hLaneIn a) hGridIn]
+        exact hValA_st0
+      have hWriteIsSome :
+          (Helpers.writeMem? stIn dst.space dst.ty (.global (laneAddrOff a)) vA).isSome =
+            true := by
+        rw [hSpace]
+        exact writeMem?_global_isSome_of_pre_encode (hPre a List.mem_cons_self) hEncA
+      obtain ⟨accAfter, hWrite⟩ := Option.isSome_iff_exists.mp hWriteIsSome
+      have hWriteGlobal :
+          Helpers.writeMem? stIn .global dst.ty (.global (laneAddrOff a)) vA =
+            some accAfter := by
+        simpa [hSpace] using hWrite
+      have hLaneAfter :
+          ∀ l, accAfter.getLane? cta warp l = st0.getLane? cta warp l := by
+        intro l
+        rw [writeMem?_global_preserves_lane (by rfl) hWriteGlobal]
+        exact hLaneIn l
+      have hTopAfter := writeMem?_global_preserves_top (by rfl) hWriteGlobal
+      have hWfAfter : State.wf accAfter :=
+        writeMem?_global_preserves_wf (by rfl) hWriteGlobal hWf
+      obtain ⟨stOut, hLoopRest, hWfOut, hLaneOut, hConstOut, hParamOut, hCtasOut,
+        hKerOut, hAtomicsOut⟩ :=
+        ih accAfter
+          (fun l hl => hPre l (List.mem_cons_of_mem a hl))
+          (fun l hl => hAddr l (List.mem_cons_of_mem a hl))
+          (fun l hl => hVal l (List.mem_cons_of_mem a hl))
+          hLaneAfter
+          (hTopAfter.2.2.2.1.trans hKerIn)
+          hWfAfter
+          (hTopAfter.1.trans hConst)
+          (hTopAfter.2.1.trans hParam)
+          (hTopAfter.2.2.1.trans hCtas)
+          (hTopAfter.2.2.2.2.trans hAtomics)
+      refine ⟨stOut, ?_, hWfOut, hLaneOut, hConstOut, hParamOut, hCtasOut,
+        hKerOut, hAtomicsOut⟩
+      simpa [List.forIn_cons, hAddrA, hValA, hWrite] using hLoopRest
 
 /-! ## User-facing `stepInstr?_store_lane_memory` -/
 
@@ -1969,11 +2120,11 @@ theorem stepInstr?_store_lane_memory
     (hjIn : j ∈ participants)
     (hNoDup : participants.Nodup)
     (hSpace : dst.space = .global)
-    (hWidth : Typing.byteWidth? dst.ty = some wByte)
+    (_hWidth : Typing.byteWidth? dst.ty = some wByte)
     (hLen : ∀ l, (laneBytes l).length = wByte)
-    (hAddrSt : ∀ l, Helpers.resolveAddr? st cta warp l dst =
+    (hAddrSt : ∀ l, l ∈ participants → Helpers.resolveAddr? st cta warp l dst =
                       some (.global (laneAddrOff l)))
-    (hValSt : ∀ l, ∃ v, Helpers.evalRValue? st cta warp l value = some v ∧
+    (hValSt : ∀ l, l ∈ participants → ∃ v, Helpers.evalRValue? st cta warp l value = some v ∧
                           Helpers.encodeScalar? dst.ty v = some (laneBytes l))
     (hDisj : ∀ l₁ l₂, l₁ ∈ participants → l₂ ∈ participants → l₁ ≠ l₂ →
         laneAddrOff l₁ + wByte ≤ laneAddrOff l₂ ∨
@@ -2000,7 +2151,7 @@ theorem stepInstr?_store_lane_memory
       have hLaneSt : ∀ l, st.getLane? cta warp l = st.getLane? cta warp l := fun _ => rfl
       obtain ⟨hBytesMid, _, _⟩ :=
         forIn_store_post_state cta warp dst value laneAddrOff laneBytes st
-          hAddrSt hValSt hSpace participants st sMid hLaneSt rfl hLoop
+          hSpace participants st sMid hAddrSt hValSt hLaneSt rfl hLoop
       -- advanceRunnablePcs? preserves global.bytes.
       have hAdvTop := advanceRunnablePcs?_preserves_top hStep
       rw [hAdvTop.1, hBytesMid]

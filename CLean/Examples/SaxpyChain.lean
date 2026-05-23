@@ -634,6 +634,11 @@ def Terminator.cbrCondPred? : Terminator → Option PredName
   | .cbr (.pred p) _ _ => some p
   | _ => none
 
+/-- Project a `br` destination label. -/
+def Terminator.brLabel? : Terminator → Option BlockLabel
+  | .br label => some label
+  | _ => none
+
 /-- Project a `cbr` true label. -/
 def Terminator.cbrTrueLabel? : Terminator → Option BlockLabel
   | .cbr _ tLabel _ => some tLabel
@@ -673,6 +678,26 @@ def Instr.loadSrcImmU64? : Instr → Option UInt64
 /-- Project a load's source-address `.reg r` to `r`. -/
 def Instr.loadSrcReg? : Instr → Option RegName
   | .load _ { addr := .reg r, .. } => some r
+  | _ => none
+
+/-- Project a store's destination `TypedAddr.space`. -/
+def Instr.storeDstSpace? : Instr → Option AddrSpace
+  | .store dst _ => some dst.space
+  | _ => none
+
+/-- Project a store's destination `TypedAddr.ty`. -/
+def Instr.storeDstTy? : Instr → Option ScalarTy
+  | .store dst _ => some dst.ty
+  | _ => none
+
+/-- Project a store's destination-address `.reg r` to `r`. -/
+def Instr.storeDstReg? : Instr → Option RegName
+  | .store { addr := .reg r, .. } _ => some r
+  | _ => none
+
+/-- Project a store value of the shape `.reg r` to `r`. -/
+def Instr.storeValueReg? : Instr → Option RegName
+  | .store _ (.reg r) => some r
   | _ => none
 
 /-- Project a `cvta` destination register. -/
@@ -822,6 +847,56 @@ theorem GInstr.eq_unguarded_load_reg_of_projections
     gi = { guard? := none
            instr := .load dst { space := space, ty := ty, addr := .reg addrReg } } := by
   have hInstr := Instr.load_reg_eq_of_projections hLoad hDst hSpace hTy hReg
+  rcases hgi : gi with ⟨g, i⟩
+  rw [hgi] at hGuard hInstr
+  simp at hGuard hInstr
+  subst hGuard
+  subst hInstr
+  rfl
+
+/-- Recover a concrete register-address/register-value `Instr.store` from small projections. -/
+theorem Instr.store_reg_reg_eq_of_projections
+    {i : Instr} {addrReg valueReg : RegName} {space : AddrSpace} {ty : ScalarTy}
+    (hStore : i.isStore = true)
+    (hSpace : i.storeDstSpace? = some space)
+    (hTy : i.storeDstTy? = some ty)
+    (hAddrReg : i.storeDstReg? = some addrReg)
+    (hValueReg : i.storeValueReg? = some valueReg) :
+    i = .store { space := space, ty := ty, addr := .reg addrReg } (.reg valueReg) := by
+  generalize i = instr at hStore hSpace hTy hAddrReg hValueReg ⊢
+  cases instr
+  case store dst value =>
+    obtain ⟨space', ty', addr⟩ := dst
+    simp [Instr.storeDstSpace?] at hSpace
+    simp [Instr.storeDstTy?] at hTy
+    subst hSpace
+    subst hTy
+    cases addr
+    case reg r =>
+      simp [Instr.storeDstReg?] at hAddrReg
+      subst hAddrReg
+      cases value
+      case reg v =>
+        simp [Instr.storeValueReg?] at hValueReg
+        subst hValueReg
+        rfl
+      all_goals (exfalso; exact absurd hValueReg (by simp [Instr.storeValueReg?]))
+    all_goals (exfalso; exact absurd hAddrReg (by simp [Instr.storeDstReg?]))
+  all_goals (exfalso; exact absurd hStore (by simp [Instr.isStore]))
+
+/-- Recover a concrete unguarded register-address/register-value store `GInstr`. -/
+theorem GInstr.eq_unguarded_store_reg_reg_of_projections
+    {gi : GInstr} {addrReg valueReg : RegName} {space : AddrSpace} {ty : ScalarTy}
+    (hGuard : gi.guard? = none)
+    (hStore : gi.instr.isStore = true)
+    (hSpace : gi.instr.storeDstSpace? = some space)
+    (hTy : gi.instr.storeDstTy? = some ty)
+    (hAddrReg : gi.instr.storeDstReg? = some addrReg)
+    (hValueReg : gi.instr.storeValueReg? = some valueReg) :
+    gi = { guard? := none
+           instr := .store { space := space, ty := ty, addr := .reg addrReg }
+             (.reg valueReg) } := by
+  have hInstr := Instr.store_reg_reg_eq_of_projections hStore hSpace hTy hAddrReg hValueReg
   rcases hgi : gi with ⟨g, i⟩
   rw [hgi] at hGuard hInstr
   simp at hGuard hInstr
@@ -1117,6 +1192,14 @@ theorem Terminator.cbr_pred_eq_of_projections
     Terminator.cbrTrueLabel?, Terminator.cbrFalseLabel?]
   rename_i cond _ _
   cases cond <;> simp_all [Terminator.cbrCondPred?]
+
+/-- Recover a concrete `br` from small projections. -/
+theorem Terminator.br_eq_of_projections
+    {term : Terminator} {label : BlockLabel}
+    (hBr : term.isBr = true)
+    (hLabel : term.brLabel? = some label) :
+    term = .br label := by
+  cases term <;> simp_all [Terminator.isBr, Terminator.brLabel?]
 
 /-! ### Body-slot 0: `ld.param.u32 %r2, [param_0]`
 
@@ -1998,6 +2081,128 @@ theorem saxpyFallthrough0_body9_add_result_addr :
     saxpyFallthrough0.body[9]? = some saxpyFallthrough0_add_result_addr := by
   rw [saxpyFallthrough0_body9, saxpyFallthrough0_gi9_eq]
 
+/-- Destination address for `st.global.s32 [%rd10], %r9`. -/
+def saxpyStoreResultDst : TypedAddr :=
+  { space := .global, ty := .s32, addr := .reg "rd10" }
+
+/-- Concrete eleventh fallthrough instruction: `st.global.s32 [%rd10], %r9`. -/
+def saxpyFallthrough0_store_result : GInstr :=
+  { guard? := none, instr := .store saxpyStoreResultDst (.reg "r9") }
+
+theorem saxpyFallthrough0_body10_isSome : (saxpyFallthrough0.body[10]?).isSome = true := by
+  unfold saxpyFallthrough0
+  native_decide
+
+def saxpyFallthrough0_gi10 : GInstr :=
+  saxpyFallthrough0.body[10]?.get saxpyFallthrough0_body10_isSome
+
+theorem saxpyFallthrough0_body10 : saxpyFallthrough0.body[10]? = some saxpyFallthrough0_gi10 :=
+  Option.eq_some_iff_get_eq.mpr ⟨saxpyFallthrough0_body10_isSome, rfl⟩
+
+theorem saxpyFallthrough0_gi10_eq :
+    saxpyFallthrough0_gi10 = saxpyFallthrough0_store_result := by
+  unfold saxpyFallthrough0_store_result saxpyStoreResultDst
+  apply GInstr.eq_unguarded_store_reg_reg_of_projections
+  · rw [← Option.isNone_iff_eq_none]
+    show saxpyFallthrough0_gi10.guard?.isNone = true
+    unfold saxpyFallthrough0_gi10 saxpyFallthrough0
+    native_decide
+  · unfold saxpyFallthrough0_gi10 saxpyFallthrough0
+    native_decide
+  · unfold saxpyFallthrough0_gi10 saxpyFallthrough0
+    native_decide
+  · unfold saxpyFallthrough0_gi10 saxpyFallthrough0
+    native_decide
+  · unfold saxpyFallthrough0_gi10 saxpyFallthrough0
+    native_decide
+  · unfold saxpyFallthrough0_gi10 saxpyFallthrough0
+    native_decide
+
+theorem saxpyFallthrough0_body10_store_result :
+    saxpyFallthrough0.body[10]? = some saxpyFallthrough0_store_result := by
+  rw [saxpyFallthrough0_body10, saxpyFallthrough0_gi10_eq]
+
+theorem saxpyFallthrough0_body11_none : saxpyFallthrough0.body[11]? = none := by
+  rw [← Option.isNone_iff_eq_none]
+  show saxpyFallthrough0.body[11]?.isNone = true
+  unfold saxpyFallthrough0
+  native_decide
+
+theorem saxpyFallthrough0_term_br_exit : saxpyFallthrough0.term = .br "$L__BB0_2" := by
+  apply Terminator.br_eq_of_projections
+  · unfold saxpyFallthrough0
+    native_decide
+  · unfold saxpyFallthrough0
+    native_decide
+
+/-- Result-array byte offset for lane `j`. -/
+def saxpyResultStoreOffset (j : LaneId) : Nat :=
+  saxpyRBase + j.val * 4
+
+/-- The exact four bytes stored by the final `st.global.s32` for lane `j`. -/
+def saxpyStoreResultBytes (alpha : Int) (xs ys : List Int) (j : LaneId) : List Byte :=
+  match saxpyMulAddValue alpha xs ys j with
+  | .s32 x => natToBytesLE (signedToNat 32 x) 4
+  | _ => []
+
+theorem encodeScalar_saxpyMulAddValue
+    (alpha : Int) (xs ys : List Int) (j : LaneId) :
+    encodeScalar? .s32 (saxpyMulAddValue alpha xs ys j) =
+      some (saxpyStoreResultBytes alpha xs ys j) := by
+  unfold saxpyStoreResultBytes saxpyMulAddValue saxpyLoadedS32Value
+  simp [evalUnary?, evalTernary?, Typing.valueType?, encodeScalar?]
+
+theorem saxpyStoreResultBytes_length
+    (alpha : Int) (xs ys : List Int) (j : LaneId) :
+    (saxpyStoreResultBytes alpha xs ys j).length = 4 := by
+  unfold saxpyStoreResultBytes saxpyMulAddValue saxpyLoadedS32Value
+  simp [evalUnary?, evalTernary?, Typing.valueType?, natToBytesLE_length]
+
+theorem saxpyStoreResult_pre (j : LaneId) :
+    Typing.typedAccessPreconditions? .global .s32 (.global (saxpyResultStoreOffset j)) =
+      true := by
+  unfold saxpyResultStoreOffset
+  have hAlign : (saxpyRBase + j.val * 4) % 4 = 0 := by
+    unfold saxpyRBase
+    omega
+  simp [Typing.typedAccessPreconditions?, Typing.scalarCodecSupported?,
+    Typing.byteWidth?, Typing.aligned?, Typing.alignment?, Typing.addrSpaceMatches?,
+    Addr.offset, Addr.space, hAlign]
+
+theorem resolveAddr_saxpyStoreResultDst_of_rd10
+    {st : State} {j : LaneId} {ls : LaneState}
+    (hGet : st.getLane? 0 0 j = some ls)
+    (hRd10 : ls.regs["rd10"]? = some (saxpyResultElementAddrValue j)) :
+    resolveAddr? st 0 0 j saxpyStoreResultDst =
+      some (.global (saxpyResultStoreOffset j)) := by
+  unfold saxpyStoreResultDst saxpyResultStoreOffset resolveAddr? evalRValue? readReg
+  simp [hGet, hRd10]
+  fin_cases j <;> unfold saxpyResultElementAddrValue saxpyLaneByteOffsetValue <;> rfl
+
+theorem evalRValue_saxpyStoreResultValue_of_r9
+    {st : State} {j : LaneId} {ls : LaneState}
+    (hGet : st.getLane? 0 0 j = some ls)
+    (hR9 : ls.regs["r9"]? = some (saxpyMulAddValue alpha xs ys j)) :
+    evalRValue? st 0 0 j (.reg "r9") = some (saxpyMulAddValue alpha xs ys j) := by
+  simp [evalRValue?, readReg, hGet, hR9]
+
+theorem saxpyResultStoreOffsets_disjoint
+    {l₁ l₂ : LaneId} (_h₁ : l₁ ∈ saxpyActiveLanes n hn)
+    (_h₂ : l₂ ∈ saxpyActiveLanes n hn) (hNe : l₁ ≠ l₂) :
+    saxpyResultStoreOffset l₁ + 4 ≤ saxpyResultStoreOffset l₂ ∨
+      saxpyResultStoreOffset l₂ + 4 ≤ saxpyResultStoreOffset l₁ := by
+  unfold saxpyResultStoreOffset
+  have hValNe : l₁.val ≠ l₂.val := by
+    intro hVal
+    exact hNe (Fin.ext hVal)
+  cases Nat.lt_or_gt_of_ne hValNe with
+  | inl hLt =>
+      left
+      omega
+  | inr hGt =>
+      right
+      omega
+
 /-! ## Reusable step records
 
 The chain proofs should expose a small, uniform step artifact instead of
@@ -2674,6 +2879,137 @@ def nextBodyContextNone
       exact hPostNone }
 
 end TermStepRecord
+
+/-- Full postcondition for a global store body step. The store preserves each
+participating lane's local state, advances its PC, and exposes the bytes written
+at that lane's resolved global address. -/
+def StoreStepFullPost (pre : State) (participants : List LaneId)
+    (laneAddrOff : LaneId → Nat) (laneBytes : LaneId → List Byte)
+    (wByte : Nat) (pc : PC) (post : State) : Prop :=
+  ∀ lane ∈ participants,
+    ∃ preLane postLane : LaneState,
+      pre.getLane? 0 0 lane = some preLane ∧
+      post.getLane? 0 0 lane = some postLane ∧
+      postLane.regs = preLane.regs ∧
+      postLane.preds = preLane.preds ∧
+      postLane.localMem = preLane.localMem ∧
+      postLane.status = preLane.status ∧
+      postLane.pc = (pc.1, pc.2 + 1) ∧
+      readBytes? post.global.bytes (laneAddrOff lane) wByte = some (laneBytes lane)
+
+/-- Lightweight frame postcondition for a global store body step. The byte-level
+memory fact is recovered separately from the record's `instrStep` when needed. -/
+def StoreStepLanePost (pre : State) (participants : List LaneId) (pc : PC)
+    (post : State) : Prop :=
+  ∀ lane ∈ participants,
+    ∃ preLane postLane : LaneState,
+      pre.getLane? 0 0 lane = some preLane ∧
+      post.getLane? 0 0 lane = some postLane ∧
+      postLane.regs = preLane.regs ∧
+      postLane.preds = preLane.preds ∧
+      postLane.localMem = preLane.localMem ∧
+      postLane.status = preLane.status ∧
+      postLane.pc = (pc.1, pc.2 + 1)
+
+namespace StoreStepFullPost
+
+theorem toLanePost
+    {pre post : State} {participants : List LaneId}
+    {laneAddrOff : LaneId → Nat} {laneBytes : LaneId → List Byte}
+    {wByte : Nat} {pc : PC}
+    (h : StoreStepFullPost pre participants laneAddrOff laneBytes wByte pc post) :
+    StoreStepLanePost pre participants pc post := by
+  intro lane hLane
+  obtain ⟨preLane, postLane, hPre, hPost, hRegs, hPreds, hLocal, hStatus, hPc, _hRead⟩ :=
+    h lane hLane
+  exact ⟨preLane, postLane, hPre, hPost, hRegs, hPreds, hLocal, hStatus, hPc⟩
+
+end StoreStepFullPost
+
+/-- A store body instruction step plus successor structure. Unlike
+`BodyStepRecord`, this intentionally has no `post_global = st.global` field. -/
+structure StoreStepRecord
+    {st : State} {pc : PC} {block : Block} {gi : GInstr}
+    {participants : List LaneId}
+    (ctx : BodyStepContext st pc block gi participants) (Post : State → Prop) where
+  post : State
+  instrStep : stepInstr? st 0 0 gi = some post
+  step : StepMachine.step? st = some post
+  post_wf : State.wf post
+  post_const : post.const = st.const
+  post_param : post.param = st.param
+  post_kernelEnv : post.kernelEnv = st.kernelEnv
+  post_atomics : post.atomics = st.atomics
+  post_warpState : WarpState
+  post_getWarp : post.getWarp? 0 0 = some post_warpState
+  post_warp_wf : WarpState.wf post_warpState
+  post_lockstep : lockstepRunnable post_warpState
+  post_runnable : runnableLaneIds post_warpState = runnableLaneIds ctx.warpState
+  post_currentPc : currentRunnablePc? post_warpState = some (pc.1, pc.2 + 1)
+  post_holds : Post post
+
+namespace StoreStepRecord
+
+def toStepRecord
+    {st : State} {pc : PC} {block : Block} {gi : GInstr} {participants : List LaneId}
+    {ctx : BodyStepContext st pc block gi participants} {Post : State → Prop}
+    (r : StoreStepRecord ctx Post) :
+    StepRecord st Post :=
+  ⟨r.post, r.step, r.post_holds⟩
+
+/-- Build the terminator context after an unguarded store at the final body slot. -/
+def nextTermContextNone
+    {st : State} {pc : PC} {block : Block} {gi : GInstr} {term : Terminator}
+    {participants : List LaneId} {Post : State → Prop}
+    {ctx : BodyStepContext st pc block gi participants}
+    (r : StoreStepRecord ctx Post)
+    (hPrevGuard : gi.guard? = none)
+    (hBodyDone : block.body[pc.2 + 1]? = none)
+    (hTerm : block.term = term) :
+    TermStepContext r.post (pc.1, pc.2 + 1) block term participants :=
+  { warpState := r.post_warpState
+    wf := r.post_wf
+    getWarp := r.post_getWarp
+    warp_wf := r.post_warp_wf
+    lockstep := r.post_lockstep
+    currentPc := r.post_currentPc
+    block_lookup := by
+      rw [r.post_kernelEnv]
+      exact ctx.block_lookup
+    body_done := hBodyDone
+    block_term := hTerm
+    participants_eq := by
+      have hPrevRun := BodyStepContext.runnable_eq_participants_of_none ctx hPrevGuard
+      have hPostRun :=
+        termParticipantsFor_eq_runnable_of_lockstep r.post_lockstep r.post_currentPc
+      rw [hPostRun, r.post_runnable, hPrevRun] }
+
+theorem store_lane_memory
+    {st : State} {pc : PC} {block : Block} {participants : List LaneId}
+    {dst : TypedAddr} {value : RValue} {guard? : Option Guard}
+    {ctx : BodyStepContext st pc block
+      { guard? := guard?, instr := .store dst value } participants}
+    {Post : State → Prop}
+    (r : StoreStepRecord ctx Post)
+    {laneAddrOff : LaneId → Nat} {laneBytes : LaneId → List Byte}
+    {wByte : Nat} {j : LaneId}
+    (hj : j ∈ participants)
+    (hSpace : dst.space = .global)
+    (hWidth : Typing.byteWidth? dst.ty = some wByte)
+    (hLen : ∀ lane, (laneBytes lane).length = wByte)
+    (hAddr : ∀ lane, lane ∈ participants →
+      resolveAddr? st 0 0 lane dst = some (.global (laneAddrOff lane)))
+    (hVal : ∀ lane, lane ∈ participants →
+      ∃ v, evalRValue? st 0 0 lane value = some v ∧
+        encodeScalar? dst.ty v = some (laneBytes lane))
+    (hDisj : ∀ l₁ l₂, l₁ ∈ participants → l₂ ∈ participants → l₁ ≠ l₂ →
+      laneAddrOff l₁ + wByte ≤ laneAddrOff l₂ ∨
+        laneAddrOff l₂ + wByte ≤ laneAddrOff l₁) :
+    readBytes? r.post.global.bytes (laneAddrOff j) wByte = some (laneBytes j) :=
+  stepInstr?_store_lane_memory ctx.getWarp ctx.lockstep ctx.participants_eq hj
+    (BodyStepContext.participants_nodup ctx) hSpace hWidth hLen hAddr hVal hDisj r.instrStep
+
+end StoreStepRecord
 
 /-- Full postcondition for a uniform `cbr`: each participating lane keeps its
 local state except for the branch target PC. -/
@@ -3833,6 +4169,266 @@ noncomputable def assignPredStep
   refine ⟨laneState, laneState', hGet, hGet', hRegs, hPreds, hPc', ?_⟩
   rw [hStatus', hStatus]
 
+/-- Construct a full global-store step record from per-lane address, value, and
+disjointness facts. -/
+noncomputable def storeStep
+    {st : State} {pc : PC} {block : Block} {participants : List LaneId}
+    {dst : TypedAddr} {value : RValue} {guard? : Option Guard}
+    (ctx : BodyStepContext st pc block
+      { guard? := guard?, instr := .store dst value } participants)
+    (laneAddrOff : LaneId → Nat) (laneBytes : LaneId → List Byte) (wByte : Nat)
+    (hSpace : dst.space = .global)
+    (hWidth : Typing.byteWidth? dst.ty = some wByte)
+    (hLen : ∀ lane, (laneBytes lane).length = wByte)
+    (hPre : ∀ lane, lane ∈ participants →
+      Typing.typedAccessPreconditions? .global dst.ty (.global (laneAddrOff lane)) = true)
+    (hAddr : ∀ lane, lane ∈ participants →
+      resolveAddr? st 0 0 lane dst = some (.global (laneAddrOff lane)))
+    (hVal : ∀ lane, lane ∈ participants →
+      ∃ v, evalRValue? st 0 0 lane value = some v ∧
+        encodeScalar? dst.ty v = some (laneBytes lane))
+    (hDisj : ∀ l₁ l₂, l₁ ∈ participants → l₂ ∈ participants → l₁ ≠ l₂ →
+      laneAddrOff l₁ + wByte ≤ laneAddrOff l₂ ∨
+        laneAddrOff l₂ + wByte ≤ laneAddrOff l₁) :
+    StoreStepRecord ctx
+      (StoreStepFullPost st participants laneAddrOff laneBytes wByte pc) := by
+  classical
+  have hLoopExists :
+      ∃ stMid : State,
+        (forIn participants st fun l acc =>
+          (resolveAddr? acc 0 0 l dst).bind fun addr =>
+            (evalRValue? acc 0 0 l value).bind fun v =>
+              (writeMem? acc dst.space dst.ty addr v).bind fun r =>
+                some (ForInStep.yield r)) = some stMid ∧
+        State.wf stMid ∧
+        (∀ l, stMid.getLane? 0 0 l = st.getLane? 0 0 l) ∧
+        stMid.const = st.const ∧
+        stMid.param = st.param ∧
+        stMid.ctas = st.ctas ∧
+        stMid.kernelEnv = st.kernelEnv ∧
+        stMid.atomics = st.atomics :=
+    forIn_store_isSome_of_pre_encode 0 0 dst value laneAddrOff laneBytes st hSpace
+      participants st hPre hAddr hVal (fun _ => rfl) rfl ctx.wf rfl rfl rfl rfl
+  let stMid := Classical.choose hLoopExists
+  have hLoopSpec := Classical.choose_spec hLoopExists
+  have hLoop :
+      (forIn participants st fun l acc =>
+        (resolveAddr? acc 0 0 l dst).bind fun addr =>
+          (evalRValue? acc 0 0 l value).bind fun v =>
+            (writeMem? acc dst.space dst.ty addr v).bind fun r =>
+              some (ForInStep.yield r)) = some stMid := hLoopSpec.1
+  have hWfMid : State.wf stMid := hLoopSpec.2.1
+  have hLaneMid : ∀ l, stMid.getLane? 0 0 l = st.getLane? 0 0 l := hLoopSpec.2.2.1
+  have hConstMid : stMid.const = st.const := hLoopSpec.2.2.2.1
+  have hParamMid : stMid.param = st.param := hLoopSpec.2.2.2.2.1
+  have hCtasMid : stMid.ctas = st.ctas := hLoopSpec.2.2.2.2.2.1
+  have hKernelMid : stMid.kernelEnv = st.kernelEnv := hLoopSpec.2.2.2.2.2.2.1
+  have hAtomicsMid : stMid.atomics = st.atomics := hLoopSpec.2.2.2.2.2.2.2
+  have hWsMid : stMid.getWarp? 0 0 = some ctx.warpState := by
+    have hGetWarp := ctx.getWarp
+    unfold State.getWarp? State.getCTA? at hGetWarp ⊢
+    rw [hCtasMid]
+    exact hGetWarp
+  have hAdvIsSome : (advanceRunnablePcs? stMid 0 0).isSome = true :=
+    advanceRunnablePcs?_isSome_of_currentRunnablePc hWfMid hWsMid ctx.currentPc
+  have hAdvExists := Option.isSome_iff_exists.mp hAdvIsSome
+  let post := Classical.choose hAdvExists
+  have hAdv : advanceRunnablePcs? stMid 0 0 = some post :=
+    Classical.choose_spec hAdvExists
+  have hInstr :
+      stepInstr? st 0 0 { guard? := guard?, instr := .store dst value } = some post := by
+    unfold stepInstr?
+    rw [ctx.getWarp]
+    show ((some ctx.warpState).bind _) = some post
+    rw [Option.some_bind]
+    have hLockB := (lockstepRunnable_iff_bool ctx.warpState).1 ctx.lockstep
+    simp [hLockB, ctx.participants_eq, hLoop, hAdv]
+  have hPostWarpExists := advanceRunnablePcs?_post_warp hWfMid hWsMid ctx.lockstep
+    ctx.currentPc hAdv
+  let wsPost := Classical.choose hPostWarpExists
+  have hPostWarpSpec := Classical.choose_spec hPostWarpExists
+  have hPostWf : State.wf post := hPostWarpSpec.1
+  have hPostWarp : post.getWarp? 0 0 = some wsPost := hPostWarpSpec.2.1
+  have hPostWarpWf : WarpState.wf wsPost := hPostWarpSpec.2.2.1
+  have hPostRunnable : runnableLaneIds wsPost = runnableLaneIds ctx.warpState :=
+    hPostWarpSpec.2.2.2.1
+  have hPostPc : currentRunnablePc? wsPost = some (pc.1, pc.2 + 1) :=
+    hPostWarpSpec.2.2.2.2.1
+  have hPostLock : lockstepRunnable wsPost := hPostWarpSpec.2.2.2.2.2
+  have hTopAdv := advanceRunnablePcs?_preserves_top hAdv
+  have hConst : post.const = st.const := hTopAdv.2.1.trans hConstMid
+  have hParam : post.param = st.param := hTopAdv.2.2.1.trans hParamMid
+  have hKernel : post.kernelEnv = st.kernelEnv := hTopAdv.2.2.2.1.trans hKernelMid
+  have hAtomics : post.atomics = st.atomics := hTopAdv.2.2.2.2.trans hAtomicsMid
+  refine
+    { post := post
+      instrStep := hInstr
+      step := step_of_instr ctx hInstr
+      post_wf := hPostWf
+      post_const := hConst
+      post_param := hParam
+      post_kernelEnv := hKernel
+      post_atomics := hAtomics
+      post_warpState := wsPost
+      post_getWarp := hPostWarp
+      post_warp_wf := hPostWarpWf
+      post_lockstep := hPostLock
+      post_runnable := hPostRunnable
+      post_currentPc := hPostPc
+      post_holds := ?_ }
+  intro lane hLane
+  obtain ⟨preLane, hGet, hLanePc⟩ := lane_pre ctx hLane
+  have hMidGet : stMid.getLane? 0 0 lane = some preLane := by
+    rw [hLaneMid lane]
+    exact hGet
+  have hRunIn := (participant_runnable_pc ctx.currentPc ctx.participants_eq lane hLane).1
+  obtain ⟨postLane, hPostGet, hRegs, hPreds, hLocal, hStatus⟩ :=
+    advanceRunnablePcs?_preserves_lane_regs_preds (st := stMid) (st' := post)
+      (cta := 0) (warp := 0) (lane := lane) hWfMid hAdv hMidGet
+  obtain ⟨postLanePc, hPostGetPc, hPc⟩ :=
+    advanceRunnablePcs?_advances_lane_pc (st := stMid) (st' := post)
+      (cta := 0) (warp := 0) (lane := lane) (warpState := ctx.warpState)
+      (pc := pc) (laneState := preLane) hWfMid hWsMid ctx.currentPc hMidGet
+      hLanePc hRunIn hAdv
+  have hPostEq : postLane = postLanePc := by
+    rw [hPostGet] at hPostGetPc
+    exact Option.some.inj hPostGetPc
+  have hPcPost : postLane.pc = (pc.1, pc.2 + 1) := by
+    rw [hPostEq]
+    exact hPc
+  have hRead :=
+    stepInstr?_store_lane_memory ctx.getWarp ctx.lockstep ctx.participants_eq hLane
+      (participants_nodup ctx) hSpace hWidth hLen hAddr hVal hDisj hInstr
+  exact
+    ⟨preLane, postLane, hGet, hPostGet, hRegs, hPreds, hLocal, hStatus,
+      hPcPost, hRead⟩
+
+/-- Construct a global-store step record carrying only the lane frame. This is
+the right chaining artifact; byte-level memory facts can be recovered from
+`instrStep` with `stepInstr?_store_lane_memory`. -/
+noncomputable def storeStepFrame
+    {st : State} {pc : PC} {block : Block} {participants : List LaneId}
+    {dst : TypedAddr} {value : RValue} {guard? : Option Guard}
+    (ctx : BodyStepContext st pc block
+      { guard? := guard?, instr := .store dst value } participants)
+    (laneAddrOff : LaneId → Nat) (laneBytes : LaneId → List Byte)
+    (hSpace : dst.space = .global)
+    (hPre : ∀ lane, lane ∈ participants →
+      Typing.typedAccessPreconditions? .global dst.ty (.global (laneAddrOff lane)) = true)
+    (hAddr : ∀ lane, lane ∈ participants →
+      resolveAddr? st 0 0 lane dst = some (.global (laneAddrOff lane)))
+    (hVal : ∀ lane, lane ∈ participants →
+      ∃ v, evalRValue? st 0 0 lane value = some v ∧
+        encodeScalar? dst.ty v = some (laneBytes lane)) :
+    StoreStepRecord ctx (StoreStepLanePost st participants pc) := by
+  classical
+  have hLoopExists :
+      ∃ stMid : State,
+        (forIn participants st fun l acc =>
+          (resolveAddr? acc 0 0 l dst).bind fun addr =>
+            (evalRValue? acc 0 0 l value).bind fun v =>
+              (writeMem? acc dst.space dst.ty addr v).bind fun r =>
+                some (ForInStep.yield r)) = some stMid ∧
+        State.wf stMid ∧
+        (∀ l, stMid.getLane? 0 0 l = st.getLane? 0 0 l) ∧
+        stMid.const = st.const ∧
+        stMid.param = st.param ∧
+        stMid.ctas = st.ctas ∧
+        stMid.kernelEnv = st.kernelEnv ∧
+        stMid.atomics = st.atomics :=
+    forIn_store_isSome_of_pre_encode 0 0 dst value laneAddrOff laneBytes st hSpace
+      participants st hPre hAddr hVal (fun _ => rfl) rfl ctx.wf rfl rfl rfl rfl
+  let stMid := Classical.choose hLoopExists
+  have hLoopSpec := Classical.choose_spec hLoopExists
+  have hLoop :
+      (forIn participants st fun l acc =>
+        (resolveAddr? acc 0 0 l dst).bind fun addr =>
+          (evalRValue? acc 0 0 l value).bind fun v =>
+            (writeMem? acc dst.space dst.ty addr v).bind fun r =>
+              some (ForInStep.yield r)) = some stMid := hLoopSpec.1
+  have hWfMid : State.wf stMid := hLoopSpec.2.1
+  have hLaneMid : ∀ l, stMid.getLane? 0 0 l = st.getLane? 0 0 l := hLoopSpec.2.2.1
+  have hConstMid : stMid.const = st.const := hLoopSpec.2.2.2.1
+  have hParamMid : stMid.param = st.param := hLoopSpec.2.2.2.2.1
+  have hCtasMid : stMid.ctas = st.ctas := hLoopSpec.2.2.2.2.2.1
+  have hKernelMid : stMid.kernelEnv = st.kernelEnv := hLoopSpec.2.2.2.2.2.2.1
+  have hAtomicsMid : stMid.atomics = st.atomics := hLoopSpec.2.2.2.2.2.2.2
+  have hWsMid : stMid.getWarp? 0 0 = some ctx.warpState := by
+    have hGetWarp := ctx.getWarp
+    unfold State.getWarp? State.getCTA? at hGetWarp ⊢
+    rw [hCtasMid]
+    exact hGetWarp
+  have hAdvIsSome : (advanceRunnablePcs? stMid 0 0).isSome = true :=
+    advanceRunnablePcs?_isSome_of_currentRunnablePc hWfMid hWsMid ctx.currentPc
+  have hAdvExists := Option.isSome_iff_exists.mp hAdvIsSome
+  let post := Classical.choose hAdvExists
+  have hAdv : advanceRunnablePcs? stMid 0 0 = some post :=
+    Classical.choose_spec hAdvExists
+  have hInstr :
+      stepInstr? st 0 0 { guard? := guard?, instr := .store dst value } = some post := by
+    unfold stepInstr?
+    rw [ctx.getWarp]
+    show ((some ctx.warpState).bind _) = some post
+    rw [Option.some_bind]
+    have hLockB := (lockstepRunnable_iff_bool ctx.warpState).1 ctx.lockstep
+    simp [hLockB, ctx.participants_eq, hLoop, hAdv]
+  have hPostWarpExists := advanceRunnablePcs?_post_warp hWfMid hWsMid ctx.lockstep
+    ctx.currentPc hAdv
+  let wsPost := Classical.choose hPostWarpExists
+  have hPostWarpSpec := Classical.choose_spec hPostWarpExists
+  have hPostWf : State.wf post := hPostWarpSpec.1
+  have hPostWarp : post.getWarp? 0 0 = some wsPost := hPostWarpSpec.2.1
+  have hPostWarpWf : WarpState.wf wsPost := hPostWarpSpec.2.2.1
+  have hPostRunnable : runnableLaneIds wsPost = runnableLaneIds ctx.warpState :=
+    hPostWarpSpec.2.2.2.1
+  have hPostPc : currentRunnablePc? wsPost = some (pc.1, pc.2 + 1) :=
+    hPostWarpSpec.2.2.2.2.1
+  have hPostLock : lockstepRunnable wsPost := hPostWarpSpec.2.2.2.2.2
+  have hTopAdv := advanceRunnablePcs?_preserves_top hAdv
+  have hConst : post.const = st.const := hTopAdv.2.1.trans hConstMid
+  have hParam : post.param = st.param := hTopAdv.2.2.1.trans hParamMid
+  have hKernel : post.kernelEnv = st.kernelEnv := hTopAdv.2.2.2.1.trans hKernelMid
+  have hAtomics : post.atomics = st.atomics := hTopAdv.2.2.2.2.trans hAtomicsMid
+  refine
+    { post := post
+      instrStep := hInstr
+      step := step_of_instr ctx hInstr
+      post_wf := hPostWf
+      post_const := hConst
+      post_param := hParam
+      post_kernelEnv := hKernel
+      post_atomics := hAtomics
+      post_warpState := wsPost
+      post_getWarp := hPostWarp
+      post_warp_wf := hPostWarpWf
+      post_lockstep := hPostLock
+      post_runnable := hPostRunnable
+      post_currentPc := hPostPc
+      post_holds := ?_ }
+  intro lane hLane
+  obtain ⟨preLane, hGet, hLanePc⟩ := lane_pre ctx hLane
+  have hMidGet : stMid.getLane? 0 0 lane = some preLane := by
+    rw [hLaneMid lane]
+    exact hGet
+  have hRunIn := (participant_runnable_pc ctx.currentPc ctx.participants_eq lane hLane).1
+  obtain ⟨postLane, hPostGet, hRegs, hPreds, hLocal, hStatus⟩ :=
+    advanceRunnablePcs?_preserves_lane_regs_preds (st := stMid) (st' := post)
+      (cta := 0) (warp := 0) (lane := lane) hWfMid hAdv hMidGet
+  obtain ⟨postLanePc, hPostGetPc, hPc⟩ :=
+    advanceRunnablePcs?_advances_lane_pc (st := stMid) (st' := post)
+      (cta := 0) (warp := 0) (lane := lane) (warpState := ctx.warpState)
+      (pc := pc) (laneState := preLane) hWfMid hWsMid ctx.currentPc hMidGet
+      hLanePc hRunIn hAdv
+  have hPostEq : postLane = postLanePc := by
+    rw [hPostGet] at hPostGetPc
+    exact Option.some.inj hPostGetPc
+  have hPcPost : postLane.pc = (pc.1, pc.2 + 1) := by
+    rw [hPostEq]
+    exact hPc
+  exact ⟨preLane, postLane, hGet, hPostGet, hRegs, hPreds, hLocal, hStatus, hPcPost⟩
+
+attribute [irreducible] storeStepFrame
+
 end BodyStepContext
 
 /-! ## Per-lane initial-state characterization
@@ -4636,6 +5232,20 @@ def SaxpyAfterResultAddrPost
       ls.regs["r9"]? = some (saxpyMulAddValue alpha xs ys j) ∧
       ls.regs["rd10"]? = some (saxpyResultElementAddrValue j) ∧
       ls.pc = ("saxpyKernel$fallthrough0", 10) ∧
+      ls.status = .running
+
+/-- Interface after the final global store in the fallthrough block. -/
+def SaxpyAfterStorePost
+    (n : Nat) (hn : n ≤ 32) (alpha : Int) (xs ys : List Int) (post : State) :
+    Prop :=
+  ∀ j ∈ saxpyActiveLanes n hn,
+    ∃ ls : LaneState,
+      post.getLane? 0 0 j = some ls ∧
+      ls.regs["r9"]? = some (saxpyMulAddValue alpha xs ys j) ∧
+      ls.regs["rd10"]? = some (saxpyResultElementAddrValue j) ∧
+      readBytes? post.global.bytes (saxpyResultStoreOffset j) 4 =
+        some (saxpyStoreResultBytes alpha xs ys j) ∧
+      ls.pc = ("saxpyKernel$fallthrough0", 11) ∧
       ls.status = .running
 
 /-! ## Step 1 of the chain: `ld.param.u32 %r2, [param_0]`
@@ -6258,7 +6868,7 @@ noncomputable def saxpy_step21_ctx
     rfl rfl saxpyFallthrough0_body9_add_result_addr
 
 /-- Step-record form of `add.s64 %rd10, %rd9, %rd5`. -/
-noncomputable def saxpy_step21_add_result_addr_record
+noncomputable opaque saxpy_step21_add_result_addr_record
     (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
     (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
     BodyStepRecord (saxpy_step21_ctx n hn hnpos alpha xs ys hxs hys)
@@ -6292,9 +6902,126 @@ theorem saxpy_step21_add_result_addr_record_post
   obtain ⟨ls21, hGet21, hRd10, hPc21, hStatus21⟩ :=
     AssignRegFullPost.assigned_dst step21.post_holds hj
   have hR9_21 : ls21.regs["r9"]? = some (saxpyMulAddValue alpha xs ys j) :=
-    AssignRegFullPost.preserves_reg_value step21.post_holds hj hGet20 hGet21 hR9
+      AssignRegFullPost.preserves_reg_value step21.post_holds hj hGet20 hGet21 hR9
       (by decide)
   exact ⟨ls21, hGet21, hR9_21, hRd10, hPc21, hStatus21⟩
+
+/-- Body-step context for `st.global.s32 [%rd10], %r9`. -/
+noncomputable opaque saxpy_step22_ctx
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    BodyStepContext (saxpy_step21_add_result_addr_record n hn hnpos alpha xs ys hxs hys).post
+      ("saxpyKernel$fallthrough0", 10) saxpyFallthrough0 saxpyFallthrough0_store_result
+      (saxpyActiveLanes n hn) :=
+  BodyStepRecord.nextContextNone
+    (saxpy_step21_add_result_addr_record n hn hnpos alpha xs ys hxs hys)
+    rfl rfl saxpyFallthrough0_body10_store_result
+
+theorem saxpy_step22_store_addr_all
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    ∀ lane, lane ∈ saxpyActiveLanes n hn →
+      resolveAddr? (saxpy_step21_add_result_addr_record n hn hnpos alpha xs ys hxs hys).post
+          0 0 lane saxpyStoreResultDst =
+        some (.global (saxpyResultStoreOffset lane)) := by
+  intro lane hLane
+  have hPost := saxpy_step21_add_result_addr_record_post n hn hnpos alpha xs ys hxs hys
+  obtain ⟨ls, hGet, _hR9, hRd10, _hPc, _hStatus⟩ := hPost lane hLane
+  exact resolveAddr_saxpyStoreResultDst_of_rd10 hGet hRd10
+
+theorem saxpy_step22_store_val_all
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    ∀ lane, lane ∈ saxpyActiveLanes n hn →
+      ∃ v,
+        evalRValue? (saxpy_step21_add_result_addr_record n hn hnpos alpha xs ys hxs hys).post
+          0 0 lane (.reg "r9") = some v ∧
+        encodeScalar? saxpyStoreResultDst.ty v = some (saxpyStoreResultBytes alpha xs ys lane) := by
+  intro lane hLane
+  have hPost := saxpy_step21_add_result_addr_record_post n hn hnpos alpha xs ys hxs hys
+  obtain ⟨ls, hGet, hR9, _hRd10, _hPc, _hStatus⟩ := hPost lane hLane
+  exact
+    ⟨saxpyMulAddValue alpha xs ys lane,
+      evalRValue_saxpyStoreResultValue_of_r9 (alpha := alpha) (xs := xs) (ys := ys)
+        hGet hR9,
+      encodeScalar_saxpyMulAddValue alpha xs ys lane⟩
+
+set_option maxHeartbeats 1000000
+
+/-- Step-record form of `st.global.s32 [%rd10], %r9`. -/
+noncomputable opaque saxpy_step22_store_result_record
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    StoreStepRecord (saxpy_step22_ctx n hn hnpos alpha xs ys hxs hys)
+      (StoreStepLanePost
+        (saxpy_step21_add_result_addr_record n hn hnpos alpha xs ys hxs hys).post
+        (saxpyActiveLanes n hn) ("saxpyKernel$fallthrough0", 10)) :=
+  BodyStepContext.storeStepFrame
+    (st := (saxpy_step21_add_result_addr_record n hn hnpos alpha xs ys hxs hys).post)
+    (pc := ("saxpyKernel$fallthrough0", 10))
+    (block := saxpyFallthrough0)
+    (participants := saxpyActiveLanes n hn)
+    (dst := saxpyStoreResultDst)
+    (value := .reg "r9")
+    (guard? := none)
+    (saxpy_step22_ctx n hn hnpos alpha xs ys hxs hys)
+    saxpyResultStoreOffset
+    (saxpyStoreResultBytes alpha xs ys)
+    rfl
+    (fun lane _ => saxpyStoreResult_pre lane)
+    (saxpy_step22_store_addr_all n hn hnpos alpha xs ys hxs hys)
+    (saxpy_step22_store_val_all n hn hnpos alpha xs ys hxs hys)
+
+set_option maxHeartbeats 1000000
+
+theorem saxpy_step22_store_result_record_post
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    SaxpyAfterStorePost n hn alpha xs ys
+      (saxpy_step22_store_result_record n hn hnpos alpha xs ys hxs hys).post := by
+  let step22 := saxpy_step22_store_result_record n hn hnpos alpha xs ys hxs hys
+  have hStep21 := saxpy_step21_add_result_addr_record_post n hn hnpos alpha xs ys hxs hys
+  intro j hj
+  obtain ⟨ls21, hGet21, hR9, hRd10, _hPc21, hStatus21⟩ := hStep21 j hj
+  obtain ⟨preLane, postLane, hPreGet, hPostGet, hRegs, _hPreds, _hLocal, hStatus,
+    hPc⟩ := step22.post_holds j hj
+  have hPreEq : preLane = ls21 := by
+    rw [hGet21] at hPreGet
+    exact (Option.some.inj hPreGet).symm
+  have hR9Post : postLane.regs["r9"]? = some (saxpyMulAddValue alpha xs ys j) := by
+    rw [hRegs, hPreEq]
+    exact hR9
+  have hRd10Post : postLane.regs["rd10"]? = some (saxpyResultElementAddrValue j) := by
+    rw [hRegs, hPreEq]
+    exact hRd10
+  have hStatusPost : postLane.status = .running := by
+    rw [hStatus, hPreEq, hStatus21]
+  let ctx22 := saxpy_step22_ctx n hn hnpos alpha xs ys hxs hys
+  have hAddrAll := saxpy_step22_store_addr_all n hn hnpos alpha xs ys hxs hys
+  have hValAll := saxpy_step22_store_val_all n hn hnpos alpha xs ys hxs hys
+  have hRead :=
+    StoreStepRecord.store_lane_memory
+      (st := (saxpy_step21_add_result_addr_record n hn hnpos alpha xs ys hxs hys).post)
+      (pc := ("saxpyKernel$fallthrough0", 10))
+      (block := saxpyFallthrough0)
+      (ctx := ctx22)
+      (r := step22)
+      (dst := saxpyStoreResultDst)
+      (value := .reg "r9")
+      (guard? := none)
+      (participants := saxpyActiveLanes n hn)
+      (laneAddrOff := saxpyResultStoreOffset)
+      (laneBytes := saxpyStoreResultBytes alpha xs ys)
+      (wByte := 4)
+      (j := j)
+      hj rfl rfl
+      (fun lane => saxpyStoreResultBytes_length alpha xs ys lane)
+      hAddrAll hValAll
+      (fun l₁ l₂ h₁ h₂ hNe =>
+        saxpyResultStoreOffsets_disjoint (n := n) (hn := hn) h₁ h₂ hNe)
+  exact ⟨postLane, hPostGet, hR9Post, hRd10Post, hRead, hPc, hStatusPost⟩
+
+set_option maxHeartbeats 200000
 
 theorem saxpy_step11_branch_target_accumulated
     (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
@@ -6745,5 +7472,66 @@ theorem saxpy_step21_add_result_addr_accumulated
       step11.step, step12.step, step13.step, step14.step, step15.step, step16.step,
       step17.step, step18.step, step19.step, step20.step, step21.step, ?_⟩
   exact saxpy_step21_add_result_addr_record_post n hn hnpos alpha xs ys hxs hys
+
+theorem saxpy_step22_store_result_accumulated
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    ∃ st1 st2 st3 st4 st5 st6 st7 st8 st9 st10 st11 st12 st13 st14 st15
+        st16 st17 st18 st19 st20 st21 st22 : State,
+      StepMachine.step? (saxpyStateFor n alpha xs ys) = some st1 ∧
+      StepMachine.step? st1 = some st2 ∧
+      StepMachine.step? st2 = some st3 ∧
+      StepMachine.step? st3 = some st4 ∧
+      StepMachine.step? st4 = some st5 ∧
+      StepMachine.step? st5 = some st6 ∧
+      StepMachine.step? st6 = some st7 ∧
+      StepMachine.step? st7 = some st8 ∧
+      StepMachine.step? st8 = some st9 ∧
+      StepMachine.step? st9 = some st10 ∧
+      StepMachine.step? st10 = some st11 ∧
+      StepMachine.step? st11 = some st12 ∧
+      StepMachine.step? st12 = some st13 ∧
+      StepMachine.step? st13 = some st14 ∧
+      StepMachine.step? st14 = some st15 ∧
+      StepMachine.step? st15 = some st16 ∧
+      StepMachine.step? st16 = some st17 ∧
+      StepMachine.step? st17 = some st18 ∧
+      StepMachine.step? st18 = some st19 ∧
+      StepMachine.step? st19 = some st20 ∧
+      StepMachine.step? st20 = some st21 ∧
+      StepMachine.step? st21 = some st22 ∧
+      SaxpyAfterStorePost n hn alpha xs ys st22 := by
+  let step1 := saxpy_step1_load_param0_record n hn hnpos alpha xs ys
+  let step2 := saxpy_step2_load_param1_record n hn hnpos alpha xs ys
+  let step3 := saxpy_step3_load_param2_record n hn hnpos alpha xs ys
+  let step4 := saxpy_step4_load_param3_record n hn hnpos alpha xs ys
+  let step5 := saxpy_step5_load_param4_record n hn hnpos alpha xs ys
+  let step6 := saxpy_step6_mov_ctaidX_record n hn hnpos alpha xs ys
+  let step7 := saxpy_step7_mov_ntidX_record n hn hnpos alpha xs ys
+  let step8 := saxpy_step8_mov_tidX_record n hn hnpos alpha xs ys
+  let step9 := saxpy_step9_mad_index_record n hn hnpos alpha xs ys
+  let step10 := saxpy_step10_setp_ge_record n hn hnpos alpha xs ys
+  let step11 := saxpy_step11_branch_fallthrough_record n hn hnpos alpha xs ys
+  let step12 := saxpy_step12_cvta_rd4_record n hn hnpos alpha xs ys
+  let step13 := saxpy_step13_mul_wide_record n hn hnpos alpha xs ys
+  let step14 := saxpy_step14_add_x_addr_record n hn hnpos alpha xs ys
+  let step15 := saxpy_step15_cvta_rd7_record n hn hnpos alpha xs ys
+  let step16 := saxpy_step16_add_y_addr_record n hn hnpos alpha xs ys
+  let step17 := saxpy_step17_load_x_record n hn hnpos alpha xs ys hxs
+  let step18 := saxpy_step18_load_y_record n hn hnpos alpha xs ys hxs hys
+  let step19 := saxpy_step19_mul_add_record n hn hnpos alpha xs ys hxs hys
+  let step20 := saxpy_step20_cvta_rd9_record n hn hnpos alpha xs ys hxs hys
+  let step21 := saxpy_step21_add_result_addr_record n hn hnpos alpha xs ys hxs hys
+  let step22 := saxpy_step22_store_result_record n hn hnpos alpha xs ys hxs hys
+  refine
+    ⟨step1.post, step2.post, step3.post, step4.post, step5.post, step6.post, step7.post,
+      step8.post, step9.post, step10.post, step11.post, step12.post, step13.post,
+      step14.post, step15.post, step16.post, step17.post, step18.post, step19.post,
+      step20.post, step21.post, step22.post, step1.step, step2.step, step3.step,
+      step4.step, step5.step, step6.step, step7.step, step8.step, step9.step,
+      step10.step, step11.step, step12.step, step13.step, step14.step, step15.step,
+      step16.step, step17.step, step18.step, step19.step, step20.step, step21.step,
+      step22.step, ?_⟩
+  exact saxpy_step22_store_result_record_post n hn hnpos alpha xs ys hxs hys
 
 end CLean
