@@ -1201,6 +1201,13 @@ theorem Terminator.br_eq_of_projections
     term = .br label := by
   cases term <;> simp_all [Terminator.isBr, Terminator.brLabel?]
 
+/-- Recover a concrete `terminate` from its discriminator. -/
+theorem Terminator.terminate_eq_of_projection
+    {term : Terminator}
+    (hTerm : term.isTerminate = true) :
+    term = .terminate := by
+  cases term <;> simp_all [Terminator.isTerminate]
+
 /-! ### Body-slot 0: `ld.param.u32 %r2, [param_0]`
 
 The first instruction of saxpy's entry block. -/
@@ -2135,6 +2142,36 @@ theorem saxpyFallthrough0_term_br_exit : saxpyFallthrough0.term = .br "$L__BB0_2
   · unfold saxpyFallthrough0
     native_decide
 
+/-! ### Exit block extraction -/
+
+/-- The lowered exit block of saxpy, reached after the result store. -/
+def saxpyExitBlock : Block :=
+  ((PTX.lowerKernelEnvCheckedD saxpyKernel).blocks["$L__BB0_2"]?).get
+    (by native_decide)
+
+theorem saxpyExitBlock_lookup :
+    (PTX.lowerKernelEnvCheckedD saxpyKernel).blocks["$L__BB0_2"]? =
+      some saxpyExitBlock :=
+  Option.eq_some_iff_get_eq.mpr ⟨by native_decide, rfl⟩
+
+theorem saxpyStateFor_exit_lookup (n : Nat) (alpha : Int) (xs ys : List Int) :
+    (saxpyStateFor n alpha xs ys).kernelEnv.blocks["$L__BB0_2"]? =
+      some saxpyExitBlock := by
+  show (PTX.lowerKernelEnvCheckedD saxpyKernel).blocks["$L__BB0_2"]? =
+    some saxpyExitBlock
+  exact saxpyExitBlock_lookup
+
+theorem saxpyExitBlock_body0_none : saxpyExitBlock.body[0]? = none := by
+  rw [← Option.isNone_iff_eq_none]
+  show saxpyExitBlock.body[0]?.isNone = true
+  unfold saxpyExitBlock
+  native_decide
+
+theorem saxpyExitBlock_term_terminate : saxpyExitBlock.term = .terminate := by
+  apply Terminator.terminate_eq_of_projection
+  unfold saxpyExitBlock
+  native_decide
+
 /-- Result-array byte offset for lane `j`. -/
 def saxpyResultStoreOffset (j : LaneId) : Nat :=
   saxpyRBase + j.val * 4
@@ -2878,6 +2915,34 @@ def nextBodyContextNone
       rw [r.post_runnable, hCtxRun] at hPostNone
       exact hPostNone }
 
+def nextTermContext
+    {st : State} {pc nextPc : PC} {block nextBlock : Block} {term nextTerm : Terminator}
+    {participants : List LaneId} {Post : State → Prop}
+    {ctx : TermStepContext st pc block term participants}
+    (r : TermStepRecord ctx (some nextPc) Post)
+    (hNextBlock : r.post.kernelEnv.blocks[nextPc.1]? = some nextBlock)
+    (hBodyDone : nextBlock.body[nextPc.2]? = none)
+    (hTerm : nextBlock.term = nextTerm) :
+    TermStepContext r.post nextPc nextBlock nextTerm participants :=
+  { warpState := r.post_warpState
+    wf := r.post_wf
+    getWarp := r.post_getWarp
+    warp_wf := r.post_warp_wf
+    lockstep := r.post_lockstep
+    currentPc := r.post_currentPc
+    block_lookup := hNextBlock
+    body_done := hBodyDone
+    block_term := hTerm
+    participants_eq := by
+      have hCtxTerm :=
+        termParticipantsFor_eq_runnable_of_lockstep ctx.lockstep ctx.currentPc
+      have hCtxRun : runnableLaneIds ctx.warpState = participants := by
+        rw [← hCtxTerm]
+        exact ctx.participants_eq
+      have hPostTerm :=
+        termParticipantsFor_eq_runnable_of_lockstep r.post_lockstep r.post_currentPc
+      rw [hPostTerm, r.post_runnable, hCtxRun] }
+
 end TermStepRecord
 
 /-- Full postcondition for a global store body step. The store preserves each
@@ -3025,7 +3090,216 @@ def CbrStepFullPost (pre : State) (participants : List LaneId) (dest : PC)
       postLane.status = preLane.status ∧
       postLane.pc = dest
 
+/-- Full postcondition for an unconditional branch. -/
+abbrev BranchStepFullPost := CbrStepFullPost
+
+/-- Full postcondition for a terminating return. -/
+def TerminateStepFullPost (pre : State) (participants : List LaneId)
+    (post : State) : Prop :=
+  ∀ lane ∈ participants,
+    ∃ preLane postLane : LaneState,
+      pre.getLane? 0 0 lane = some preLane ∧
+      post.getLane? 0 0 lane = some postLane ∧
+      postLane.regs = preLane.regs ∧
+      postLane.preds = preLane.preds ∧
+      postLane.localMem = preLane.localMem ∧
+      postLane.pc = preLane.pc ∧
+      postLane.status = .terminated
+
+/-- A terminating return step plus its postcondition. Termination deliberately
+does not preserve the runnable-lane set, so it uses a smaller record than
+`TermStepRecord`. -/
+structure TerminateStepRecord
+    {st : State} {pc : PC} {block : Block} {participants : List LaneId}
+    (ctx : TermStepContext st pc block .terminate participants) (Post : State → Prop) where
+  post : State
+  termStep : stepTerminator? st 0 0 .terminate = some post
+  step : StepMachine.step? st = some post
+  post_wf : State.wf post
+  post_global : post.global = st.global
+  post_const : post.const = st.const
+  post_param : post.param = st.param
+  post_kernelEnv : post.kernelEnv = st.kernelEnv
+  post_atomics : post.atomics = st.atomics
+  post_holds : Post post
+
 namespace TermStepContext
+
+/-- Construct an unconditional branch terminator-step record. -/
+noncomputable def brStep
+    {st : State} {pc : PC} {block : Block} {participants : List LaneId}
+    {label : BlockLabel}
+    (ctx : TermStepContext st pc block (.br label) participants)
+    (hNonempty : participants ≠ []) :
+    TermStepRecord ctx (some (label, 0)) (BranchStepFullPost st participants (label, 0)) := by
+  classical
+  let dest : PC := (label, 0)
+  set fBranch : LaneId → LaneState → Option LaneState := fun _ laneState =>
+    some { laneState with pc := dest } with hfBranch
+  have hPartLaneSome : ∀ lane ∈ participants,
+      ∃ ls, st.getLane? 0 0 lane = some ls ∧ (fBranch lane ls).isSome = true := by
+    intro lane hLane
+    obtain ⟨ls, hGet, _, _⟩ := lane_pre ctx hLane
+    refine ⟨ls, hGet, ?_⟩
+    simp [hfBranch]
+  have hApplyIsSome :
+      (applyToLaneIds? st 0 0 participants fBranch).isSome = true :=
+    applyToLaneIds?_isSome_of_each_some (participants_nodup ctx) st ctx.wf hPartLaneSome
+  have hApplyExists := Option.isSome_iff_exists.mp hApplyIsSome
+  let post := Classical.choose hApplyExists
+  have hApply : applyToLaneIds? st 0 0 participants fBranch = some post :=
+    Classical.choose_spec hApplyExists
+  have hTerm : stepTerminator? st 0 0 (.br label) = some post := by
+    unfold stepTerminator?
+    rw [ctx.getWarp]
+    show ((some ctx.warpState).bind _) = some post
+    rw [Option.some_bind]
+    have hLockB := (lockstepRunnable_iff_bool ctx.warpState).1 ctx.lockstep
+    simp [hLockB, ctx.currentPc]
+    change applyToLaneIds? st 0 0 (termParticipantsFor ctx.warpState pc)
+        (fun _ laneState => some { laneState with pc := dest }) = some post
+    rw [ctx.participants_eq]
+    rw [← hfBranch]
+    exact hApply
+  have hPostWf : State.wf post := applyToLaneIds?_preserves_wf ctx.wf hApply
+  have hTopApply := applyToLaneIds?_preserves_top hApply
+  have hWsPostExists := applyToLaneIds?_preserves_activeMask hApply ctx.warpState ctx.getWarp
+  let wsPost := Classical.choose hWsPostExists
+  have hPostWarp : post.getWarp? 0 0 = some wsPost :=
+    (Classical.choose_spec hWsPostExists).1
+  have hPostWarpWf : WarpState.wf wsPost := WarpState.wf_of_getWarp? hPostWf hPostWarp
+  have hStatusF : PreservesStatusOnly fBranch := by
+    intro lane laneState laneState' hF
+    simp [hfBranch] at hF
+    subst laneState'
+    rfl
+  have hPostRunnable : runnableLaneIds wsPost = runnableLaneIds ctx.warpState :=
+    applyToLaneIds?_preserves_runnableLaneIds_of_status hStatusF ctx.wf ctx.getWarp
+      hPostWarp ctx.warp_wf hApply
+  have hCtxTerm := termParticipantsFor_eq_runnable_of_lockstep ctx.lockstep ctx.currentPc
+  have hCtxRun : runnableLaneIds ctx.warpState = participants := by
+    rw [← hCtxTerm]
+    exact ctx.participants_eq
+  have hPostRunParticipants : runnableLaneIds wsPost = participants :=
+    hPostRunnable.trans hCtxRun
+  have hPostPc : currentRunnablePc? wsPost = some dest := by
+    unfold currentRunnablePc?
+    rw [hPostRunParticipants]
+    cases hParts : participants with
+    | nil => exact False.elim (hNonempty hParts)
+    | cons head tail =>
+        have hHead : head ∈ participants := by
+          rw [hParts]
+          exact List.mem_cons_self
+        obtain ⟨preLane, hPreLane, _hPrePc, _hRun⟩ := lane_pre ctx hHead
+        have hMid := applyToLaneIds?_lane_in 0 0 fBranch participants
+          (participants_nodup ctx) st post ctx.wf hApply head hHead preLane hPreLane
+        obtain ⟨postLane, hF, hPostLane⟩ := hMid
+        simp [hfBranch] at hF
+        subst postLane
+        have hWsPostLane : wsPost.getLane? head = some { preLane with pc := dest } := by
+          unfold State.getLane? at hPostLane
+          rw [hPostWarp] at hPostLane
+          simpa using hPostLane
+        simp [hWsPostLane]
+  have hPostLock : lockstepRunnable wsPost := by
+    unfold lockstepRunnable lockstepRunnable?
+    rw [hPostPc]
+    simp [List.all_eq_true]
+    intro lane hLane
+    have hLanePart : lane ∈ participants := by
+      rw [hPostRunParticipants] at hLane
+      exact hLane
+    obtain ⟨preLane, hPreLane, _hPrePc, _hRun⟩ := lane_pre ctx hLanePart
+    have hMid := applyToLaneIds?_lane_in 0 0 fBranch participants
+      (participants_nodup ctx) st post ctx.wf hApply lane hLanePart preLane hPreLane
+    obtain ⟨postLane, hF, hPostLane⟩ := hMid
+    simp [hfBranch] at hF
+    subst postLane
+    have hWsPostLane : wsPost.getLane? lane = some { preLane with pc := dest } := by
+      unfold State.getLane? at hPostLane
+      rw [hPostWarp] at hPostLane
+      simpa using hPostLane
+    rw [hWsPostLane]
+    simp
+  refine
+    { post := post
+      termStep := hTerm
+      step := step_of_term ctx hTerm
+      post_wf := hPostWf
+      post_global := hTopApply.1
+      post_const := hTopApply.2.1
+      post_param := hTopApply.2.2.1
+      post_kernelEnv := hTopApply.2.2.2.1
+      post_atomics := hTopApply.2.2.2.2
+      post_warpState := wsPost
+      post_getWarp := hPostWarp
+      post_warp_wf := hPostWarpWf
+      post_lockstep := hPostLock
+      post_runnable := hPostRunnable
+      post_currentPc := hPostPc
+      post_holds := ?_ }
+  intro lane hLane
+  obtain ⟨preLane, hPreLane, _hPc, _hRun⟩ := lane_pre ctx hLane
+  have hMid := applyToLaneIds?_lane_in 0 0 fBranch participants
+    (participants_nodup ctx) st post ctx.wf hApply lane hLane preLane hPreLane
+  obtain ⟨postLane, hF, hPostLane⟩ := hMid
+  simp [hfBranch] at hF
+  subst postLane
+  exact ⟨preLane, { preLane with pc := dest }, hPreLane, hPostLane, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- Construct a terminating return-step record. -/
+noncomputable def terminateStep
+    {st : State} {pc : PC} {block : Block} {participants : List LaneId}
+    (ctx : TermStepContext st pc block .terminate participants) :
+    TerminateStepRecord ctx (TerminateStepFullPost st participants) := by
+  classical
+  set fTerm : LaneId → LaneState → Option LaneState := fun _ laneState =>
+    some { laneState with status := .terminated } with hfTerm
+  have hPartLaneSome : ∀ lane ∈ participants,
+      ∃ ls, st.getLane? 0 0 lane = some ls ∧ (fTerm lane ls).isSome = true := by
+    intro lane hLane
+    obtain ⟨ls, hGet, _, _⟩ := lane_pre ctx hLane
+    refine ⟨ls, hGet, ?_⟩
+    simp [hfTerm]
+  have hApplyIsSome :
+      (applyToLaneIds? st 0 0 participants fTerm).isSome = true :=
+    applyToLaneIds?_isSome_of_each_some (participants_nodup ctx) st ctx.wf hPartLaneSome
+  have hApplyExists := Option.isSome_iff_exists.mp hApplyIsSome
+  let post := Classical.choose hApplyExists
+  have hApply : applyToLaneIds? st 0 0 participants fTerm = some post :=
+    Classical.choose_spec hApplyExists
+  have hTerm : stepTerminator? st 0 0 .terminate = some post := by
+    unfold stepTerminator?
+    rw [ctx.getWarp]
+    show ((some ctx.warpState).bind _) = some post
+    rw [Option.some_bind]
+    have hLockB := (lockstepRunnable_iff_bool ctx.warpState).1 ctx.lockstep
+    simp [hLockB, ctx.currentPc]
+    change applyToLaneIds? st 0 0 (termParticipantsFor ctx.warpState pc)
+        (fun _ laneState => some { laneState with status := .terminated }) = some post
+    rw [ctx.participants_eq]
+    rw [← hfTerm]
+    exact hApply
+  have hPostWf : State.wf post := applyToLaneIds?_preserves_wf ctx.wf hApply
+  have hTopApply := applyToLaneIds?_preserves_top hApply
+  refine
+    { post := post
+      termStep := hTerm
+      step := step_of_term ctx hTerm
+      post_wf := hPostWf
+      post_global := hTopApply.1
+      post_const := hTopApply.2.1
+      post_param := hTopApply.2.2.1
+      post_kernelEnv := hTopApply.2.2.2.1
+      post_atomics := hTopApply.2.2.2.2
+      post_holds := ?_ }
+  intro lane hLane
+  obtain ⟨preLane, hPreLane, hPrePc, hRun⟩ := lane_pre ctx hLane
+  obtain ⟨postLane, hPostLane, hRegs, hPreds, hLocal, hPc, hStatus⟩ :=
+    stepTerminator?_terminate_lane_full ctx.wf ctx.getWarp ctx.lockstep ctx.currentPc
+      hPreLane hPrePc hRun hTerm
+  exact ⟨preLane, postLane, hPreLane, hPostLane, hRegs, hPreds, hLocal, hPc, hStatus⟩
 
 /-- Construct a uniform false-branch terminator-step record. -/
 noncomputable def cbrFalseStep
@@ -5248,6 +5522,75 @@ def SaxpyAfterStorePost
       ls.pc = ("saxpyKernel$fallthrough0", 11) ∧
       ls.status = .running
 
+/-- Interface after the fallthrough block branches to the exit block. -/
+def SaxpyAfterExitBranchPost
+    (n : Nat) (hn : n ≤ 32) (alpha : Int) (xs ys : List Int) (post : State) :
+    Prop :=
+  ∀ j ∈ saxpyActiveLanes n hn,
+    ∃ ls : LaneState,
+      post.getLane? 0 0 j = some ls ∧
+      readBytes? post.global.bytes (saxpyResultStoreOffset j) 4 =
+        some (saxpyStoreResultBytes alpha xs ys j) ∧
+      ls.pc = ("$L__BB0_2", 0) ∧
+      ls.status = .running
+
+/-- Final SAXPY interface after the exit block terminates active lanes. -/
+def SaxpyFinalPost
+    (n : Nat) (hn : n ≤ 32) (alpha : Int) (xs ys : List Int) (post : State) :
+    Prop :=
+  ∀ j ∈ saxpyActiveLanes n hn,
+    ∃ ls : LaneState,
+      post.getLane? 0 0 j = some ls ∧
+      readBytes? post.global.bytes (saxpyResultStoreOffset j) 4 =
+        some (saxpyStoreResultBytes alpha xs ys j) ∧
+      ls.pc = ("$L__BB0_2", 0) ∧
+      ls.status = .terminated
+
+theorem SaxpyAfterStorePost.after_exit_branch
+    {n : Nat} {hn : n ≤ 32} {alpha : Int} {xs ys : List Int} {pre post : State}
+    (hStore : SaxpyAfterStorePost n hn alpha xs ys pre)
+    (hBranch : BranchStepFullPost pre (saxpyActiveLanes n hn) ("$L__BB0_2", 0) post)
+    (hGlobal : post.global = pre.global) :
+    SaxpyAfterExitBranchPost n hn alpha xs ys post := by
+  intro j hj
+  obtain ⟨lsPre, hGetPre, _hR9, _hRd10, hReadPre, _hPcPre, hStatusPre⟩ :=
+    hStore j hj
+  obtain ⟨preLane, postLane, hPreGet, hPostGet, _hRegs, _hPreds, _hLocal, hStatus,
+    hPc⟩ := hBranch j hj
+  have hPreEq : preLane = lsPre := by
+    rw [hGetPre] at hPreGet
+    exact (Option.some.inj hPreGet).symm
+  have hReadPost :
+      readBytes? post.global.bytes (saxpyResultStoreOffset j) 4 =
+        some (saxpyStoreResultBytes alpha xs ys j) := by
+    rw [hGlobal]
+    exact hReadPre
+  have hStatusPost : postLane.status = .running := by
+    rw [hStatus, hPreEq, hStatusPre]
+  exact ⟨postLane, hPostGet, hReadPost, hPc, hStatusPost⟩
+
+theorem SaxpyAfterExitBranchPost.after_terminate
+    {n : Nat} {hn : n ≤ 32} {alpha : Int} {xs ys : List Int} {pre post : State}
+    (hExit : SaxpyAfterExitBranchPost n hn alpha xs ys pre)
+    (hTerm : TerminateStepFullPost pre (saxpyActiveLanes n hn) post)
+    (hGlobal : post.global = pre.global) :
+    SaxpyFinalPost n hn alpha xs ys post := by
+  intro j hj
+  obtain ⟨lsPre, hGetPre, hReadPre, hPcPre, _hStatusPre⟩ := hExit j hj
+  obtain ⟨preLane, postLane, hPreGet, hPostGet, _hRegs, _hPreds, _hLocal, hPc,
+    hStatus⟩ := hTerm j hj
+  have hPreEq : preLane = lsPre := by
+    rw [hGetPre] at hPreGet
+    exact (Option.some.inj hPreGet).symm
+  have hReadPost :
+      readBytes? post.global.bytes (saxpyResultStoreOffset j) 4 =
+        some (saxpyStoreResultBytes alpha xs ys j) := by
+    rw [hGlobal]
+    exact hReadPre
+  have hPcPost : postLane.pc = ("$L__BB0_2", 0) := by
+    rw [hPc, hPreEq, hPcPre]
+  exact ⟨postLane, hPostGet, hReadPost, hPcPost, hStatus⟩
+
 /-! ## Step 1 of the chain: `ld.param.u32 %r2, [param_0]`
 
 The first executable step from `saxpyStateFor n α xs ys` (with `n > 0`)
@@ -7023,6 +7366,117 @@ theorem saxpy_step22_store_result_record_post
 
 set_option maxHeartbeats 200000
 
+theorem saxpy_step22_post_kernelEnv
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    (saxpy_step22_store_result_record n hn hnpos alpha xs ys hxs hys).post.kernelEnv =
+      (saxpyStateFor n alpha xs ys).kernelEnv := by
+  calc
+    (saxpy_step22_store_result_record n hn hnpos alpha xs ys hxs hys).post.kernelEnv =
+        (saxpy_step21_add_result_addr_record n hn hnpos alpha xs ys hxs hys).post.kernelEnv :=
+      (saxpy_step22_store_result_record n hn hnpos alpha xs ys hxs hys).post_kernelEnv
+    _ = (saxpy_step20_cvta_rd9_record n hn hnpos alpha xs ys hxs hys).post.kernelEnv :=
+      (saxpy_step21_add_result_addr_record n hn hnpos alpha xs ys hxs hys).post_kernelEnv
+    _ = (saxpy_step19_mul_add_record n hn hnpos alpha xs ys hxs hys).post.kernelEnv :=
+      (saxpy_step20_cvta_rd9_record n hn hnpos alpha xs ys hxs hys).post_kernelEnv
+    _ = (saxpy_step18_load_y_record n hn hnpos alpha xs ys hxs hys).post.kernelEnv :=
+      (saxpy_step19_mul_add_record n hn hnpos alpha xs ys hxs hys).post_kernelEnv
+    _ = (saxpy_step17_load_x_record n hn hnpos alpha xs ys hxs).post.kernelEnv :=
+      (saxpy_step18_load_y_record n hn hnpos alpha xs ys hxs hys).post_kernelEnv
+    _ = (saxpy_step16_add_y_addr_record n hn hnpos alpha xs ys).post.kernelEnv :=
+      (saxpy_step17_load_x_record n hn hnpos alpha xs ys hxs).post_kernelEnv
+    _ = (saxpy_step15_cvta_rd7_record n hn hnpos alpha xs ys).post.kernelEnv :=
+      (saxpy_step16_add_y_addr_record n hn hnpos alpha xs ys).post_kernelEnv
+    _ = (saxpy_step14_add_x_addr_record n hn hnpos alpha xs ys).post.kernelEnv :=
+      (saxpy_step15_cvta_rd7_record n hn hnpos alpha xs ys).post_kernelEnv
+    _ = (saxpy_step13_mul_wide_record n hn hnpos alpha xs ys).post.kernelEnv :=
+      (saxpy_step14_add_x_addr_record n hn hnpos alpha xs ys).post_kernelEnv
+    _ = (saxpy_step12_cvta_rd4_record n hn hnpos alpha xs ys).post.kernelEnv :=
+      (saxpy_step13_mul_wide_record n hn hnpos alpha xs ys).post_kernelEnv
+    _ = (saxpy_step11_branch_fallthrough_record n hn hnpos alpha xs ys).post.kernelEnv :=
+      (saxpy_step12_cvta_rd4_record n hn hnpos alpha xs ys).post_kernelEnv
+    _ = (saxpyStateFor n alpha xs ys).kernelEnv :=
+      saxpy_step11_post_kernelEnv n hn hnpos alpha xs ys
+
+set_option maxHeartbeats 5000000
+
+/-- Terminator-step context for the branch out of the fallthrough block. -/
+noncomputable opaque saxpy_step23_ctx
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    TermStepContext (saxpy_step22_store_result_record n hn hnpos alpha xs ys hxs hys).post
+      ("saxpyKernel$fallthrough0", 11) saxpyFallthrough0 (.br "$L__BB0_2")
+      (saxpyActiveLanes n hn) :=
+  StoreStepRecord.nextTermContextNone
+    (saxpy_step22_store_result_record n hn hnpos alpha xs ys hxs hys)
+    rfl saxpyFallthrough0_body11_none saxpyFallthrough0_term_br_exit
+
+/-- Step-record form of the unconditional exit branch after the result store. -/
+noncomputable opaque saxpy_step23_branch_exit_record
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    TermStepRecord (saxpy_step23_ctx n hn hnpos alpha xs ys hxs hys)
+      (some ("$L__BB0_2", 0))
+      (BranchStepFullPost
+        (saxpy_step22_store_result_record n hn hnpos alpha xs ys hxs hys).post
+        (saxpyActiveLanes n hn) ("$L__BB0_2", 0)) :=
+  TermStepContext.brStep (saxpy_step23_ctx n hn hnpos alpha xs ys hxs hys)
+    (saxpyActiveLanes_ne_nil n hn hnpos)
+
+theorem saxpy_step23_branch_exit_record_post
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    SaxpyAfterExitBranchPost n hn alpha xs ys
+      (saxpy_step23_branch_exit_record n hn hnpos alpha xs ys hxs hys).post := by
+  let branch := saxpy_step23_branch_exit_record n hn hnpos alpha xs ys hxs hys
+  exact SaxpyAfterStorePost.after_exit_branch
+    (saxpy_step22_store_result_record_post n hn hnpos alpha xs ys hxs hys)
+    branch.post_holds branch.post_global
+
+theorem saxpy_step23_post_kernelEnv
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    (saxpy_step23_branch_exit_record n hn hnpos alpha xs ys hxs hys).post.kernelEnv =
+      (saxpyStateFor n alpha xs ys).kernelEnv :=
+  (saxpy_step23_branch_exit_record n hn hnpos alpha xs ys hxs hys).post_kernelEnv.trans
+    (saxpy_step22_post_kernelEnv n hn hnpos alpha xs ys hxs hys)
+
+/-- Terminator-step context for the exit block's `terminate`. -/
+noncomputable opaque saxpy_step24_ctx
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    TermStepContext (saxpy_step23_branch_exit_record n hn hnpos alpha xs ys hxs hys).post
+      ("$L__BB0_2", 0) saxpyExitBlock .terminate (saxpyActiveLanes n hn) :=
+  TermStepRecord.nextTermContext
+    (saxpy_step23_branch_exit_record n hn hnpos alpha xs ys hxs hys)
+    (by
+      rw [saxpy_step23_post_kernelEnv n hn hnpos alpha xs ys hxs hys]
+      exact saxpyStateFor_exit_lookup n alpha xs ys)
+    saxpyExitBlock_body0_none
+    saxpyExitBlock_term_terminate
+
+/-- Step-record form of the final exit-block terminate. -/
+noncomputable opaque saxpy_step24_terminate_record
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    TerminateStepRecord (saxpy_step24_ctx n hn hnpos alpha xs ys hxs hys)
+      (TerminateStepFullPost
+        (saxpy_step23_branch_exit_record n hn hnpos alpha xs ys hxs hys).post
+        (saxpyActiveLanes n hn)) :=
+  TermStepContext.terminateStep (saxpy_step24_ctx n hn hnpos alpha xs ys hxs hys)
+
+theorem saxpy_step24_terminate_record_post
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    SaxpyFinalPost n hn alpha xs ys
+      (saxpy_step24_terminate_record n hn hnpos alpha xs ys hxs hys).post := by
+  let term := saxpy_step24_terminate_record n hn hnpos alpha xs ys hxs hys
+  exact SaxpyAfterExitBranchPost.after_terminate
+    (saxpy_step23_branch_exit_record_post n hn hnpos alpha xs ys hxs hys)
+    term.post_holds term.post_global
+
+set_option maxHeartbeats 200000
+
 theorem saxpy_step11_branch_target_accumulated
     (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
     (alpha : Int) (xs ys : List Int) :
@@ -7533,5 +7987,70 @@ theorem saxpy_step22_store_result_accumulated
       step16.step, step17.step, step18.step, step19.step, step20.step, step21.step,
       step22.step, ?_⟩
   exact saxpy_step22_store_result_record_post n hn hnpos alpha xs ys hxs hys
+
+theorem saxpy_step24_terminate_accumulated
+    (n : Nat) (hn : n ≤ 32) (hnpos : 0 < n)
+    (alpha : Int) (xs ys : List Int) (hxs : xs.length = n) (hys : ys.length = n) :
+    ∃ st1 st2 st3 st4 st5 st6 st7 st8 st9 st10 st11 st12 st13 st14 st15
+        st16 st17 st18 st19 st20 st21 st22 st23 st24 : State,
+      StepMachine.step? (saxpyStateFor n alpha xs ys) = some st1 ∧
+      StepMachine.step? st1 = some st2 ∧
+      StepMachine.step? st2 = some st3 ∧
+      StepMachine.step? st3 = some st4 ∧
+      StepMachine.step? st4 = some st5 ∧
+      StepMachine.step? st5 = some st6 ∧
+      StepMachine.step? st6 = some st7 ∧
+      StepMachine.step? st7 = some st8 ∧
+      StepMachine.step? st8 = some st9 ∧
+      StepMachine.step? st9 = some st10 ∧
+      StepMachine.step? st10 = some st11 ∧
+      StepMachine.step? st11 = some st12 ∧
+      StepMachine.step? st12 = some st13 ∧
+      StepMachine.step? st13 = some st14 ∧
+      StepMachine.step? st14 = some st15 ∧
+      StepMachine.step? st15 = some st16 ∧
+      StepMachine.step? st16 = some st17 ∧
+      StepMachine.step? st17 = some st18 ∧
+      StepMachine.step? st18 = some st19 ∧
+      StepMachine.step? st19 = some st20 ∧
+      StepMachine.step? st20 = some st21 ∧
+      StepMachine.step? st21 = some st22 ∧
+      StepMachine.step? st22 = some st23 ∧
+      StepMachine.step? st23 = some st24 ∧
+      SaxpyFinalPost n hn alpha xs ys st24 := by
+  let step1 := saxpy_step1_load_param0_record n hn hnpos alpha xs ys
+  let step2 := saxpy_step2_load_param1_record n hn hnpos alpha xs ys
+  let step3 := saxpy_step3_load_param2_record n hn hnpos alpha xs ys
+  let step4 := saxpy_step4_load_param3_record n hn hnpos alpha xs ys
+  let step5 := saxpy_step5_load_param4_record n hn hnpos alpha xs ys
+  let step6 := saxpy_step6_mov_ctaidX_record n hn hnpos alpha xs ys
+  let step7 := saxpy_step7_mov_ntidX_record n hn hnpos alpha xs ys
+  let step8 := saxpy_step8_mov_tidX_record n hn hnpos alpha xs ys
+  let step9 := saxpy_step9_mad_index_record n hn hnpos alpha xs ys
+  let step10 := saxpy_step10_setp_ge_record n hn hnpos alpha xs ys
+  let step11 := saxpy_step11_branch_fallthrough_record n hn hnpos alpha xs ys
+  let step12 := saxpy_step12_cvta_rd4_record n hn hnpos alpha xs ys
+  let step13 := saxpy_step13_mul_wide_record n hn hnpos alpha xs ys
+  let step14 := saxpy_step14_add_x_addr_record n hn hnpos alpha xs ys
+  let step15 := saxpy_step15_cvta_rd7_record n hn hnpos alpha xs ys
+  let step16 := saxpy_step16_add_y_addr_record n hn hnpos alpha xs ys
+  let step17 := saxpy_step17_load_x_record n hn hnpos alpha xs ys hxs
+  let step18 := saxpy_step18_load_y_record n hn hnpos alpha xs ys hxs hys
+  let step19 := saxpy_step19_mul_add_record n hn hnpos alpha xs ys hxs hys
+  let step20 := saxpy_step20_cvta_rd9_record n hn hnpos alpha xs ys hxs hys
+  let step21 := saxpy_step21_add_result_addr_record n hn hnpos alpha xs ys hxs hys
+  let step22 := saxpy_step22_store_result_record n hn hnpos alpha xs ys hxs hys
+  let step23 := saxpy_step23_branch_exit_record n hn hnpos alpha xs ys hxs hys
+  let step24 := saxpy_step24_terminate_record n hn hnpos alpha xs ys hxs hys
+  refine
+    ⟨step1.post, step2.post, step3.post, step4.post, step5.post, step6.post, step7.post,
+      step8.post, step9.post, step10.post, step11.post, step12.post, step13.post,
+      step14.post, step15.post, step16.post, step17.post, step18.post, step19.post,
+      step20.post, step21.post, step22.post, step23.post, step24.post,
+      step1.step, step2.step, step3.step, step4.step, step5.step, step6.step,
+      step7.step, step8.step, step9.step, step10.step, step11.step, step12.step,
+      step13.step, step14.step, step15.step, step16.step, step17.step, step18.step,
+      step19.step, step20.step, step21.step, step22.step, step23.step, step24.step, ?_⟩
+  exact saxpy_step24_terminate_record_post n hn hnpos alpha xs ys hxs hys
 
 end CLean
