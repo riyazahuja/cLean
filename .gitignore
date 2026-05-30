@@ -6,3 +6,5 @@ logs/
 .cache/
 CODEX.log
 lean4-skills
+.loom
+.iris-lean
