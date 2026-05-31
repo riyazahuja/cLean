@@ -1,6 +1,7 @@
 import CLean.PTX.Bridge
 import CLean.Examples.Loop
 import CLean.Examples.MatmulLoop
+import CLean.Examples.Saxpy
 
 namespace CLean
 namespace Examples

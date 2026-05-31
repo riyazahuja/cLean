@@ -21,8 +21,18 @@ structure SaxpyParams where
 def saxpyLaneOutputOffset (params : SaxpyParams) (i : Nat) : Nat :=
   params.outBase + i * 4
 
+def saxpyLaneXOffset (params : SaxpyParams) (i : Nat) : Nat :=
+  params.xBase + i * 4
+
+def saxpyLaneYOffset (params : SaxpyParams) (i : Nat) : Nat :=
+  params.yBase + i * 4
+
 def saxpyExpectedValue (params : SaxpyParams) (x y : Int) : Int :=
-  params.alpha * x + y
+  Helpers.normalizeSigned 32 (Helpers.normalizeSigned 32 (params.alpha * x) + y)
+
+def saxpyLaneForIndex {params : SaxpyParams} (hn : params.n ≤ 32)
+    (i : Nat) (hi : i < params.n) : LaneId :=
+  ⟨i, Nat.lt_of_lt_of_le hi hn⟩
 
 def saxpyLaneByteOffset : RValue :=
   .unop (.cvt .u64)
@@ -2270,6 +2280,44 @@ theorem saxpy_scalar_kernel_valid
     (hpostNoStep := hpostNoStep)
     (hsuffixNoFinal := hsuffixNoFinal)
 
+theorem saxpyScalarPost_read_output
+    {lane : LaneId} {xOffset yOffset outOffset : Nat}
+    {xBytes yBytes newOut : List Byte} {x y prod sum : Int}
+    {st : State} {r : Resource}
+    (haccess : AccessOk .global .s32 (.global outOffset))
+    (hwidth : Typing.byteWidth? .s32 = some newOut.length)
+    (hdecode : DecodedScalar .s32 newOut (.s32 sum))
+    (hpost :
+      saxpyScalarPost lane xOffset yOffset outOffset xBytes yBytes newOut
+        x y prod sum st r) :
+    readGlobalS32? st outOffset = some sum := by
+  rcases hpost with ⟨_rTerm, rResources, _hcomp, _hequiv, _hterm, hresources⟩
+  unfold saxpyScalarFinalResources at hresources
+  change
+      CSL.sepList [
+        CSL.globalBytes outOffset .write newOut,
+        CSL.reg 0 0 lane "sum" (.s32 sum),
+        CSL.reg 0 0 lane "prod" (.s32 prod),
+        CSL.reg 0 0 lane "y" (.s32 y),
+        CSL.reg 0 0 lane "x" (.s32 x),
+        CSL.globalBytes xOffset .read xBytes,
+        CSL.globalBytes yOffset .read yBytes] st rResources at hresources
+  change
+      (CSL.globalBytes outOffset .write newOut ∗
+        CSL.sepList [
+          CSL.reg 0 0 lane "sum" (.s32 sum),
+          CSL.reg 0 0 lane "prod" (.s32 prod),
+          CSL.reg 0 0 lane "y" (.s32 y),
+          CSL.reg 0 0 lane "x" (.s32 x),
+          CSL.globalBytes xOffset .read xBytes,
+          CSL.globalBytes yOffset .read yBytes]) st rResources at hresources
+  rcases hresources with ⟨_rOut, _rRest, _hcompOut, _hequivOut, hout, _hrest⟩
+  have hread : ReadMemFact st .global .s32 (.global outOffset) (.s32 sum) :=
+    globalReadMem_of_globalBytes haccess hwidth hout hdecode
+  unfold readGlobalS32?
+  unfold ReadMemFact at hread
+  simp [hread]
+
 def saxpyPost
     (params : SaxpyParams) (xs ys : Nat → Int) (st : State) (_r : Resource) : Prop :=
   ∀ i, i < params.n →
@@ -2284,6 +2332,231 @@ def saxpyKernelSpec
     pre := fun st r => st = init ∧ r = resource
     post := saxpyPost params xs ys }
 
+structure SaxpyVectorData where
+  xBytes : Nat → List Byte
+  yBytes : Nat → List Byte
+  oldOut : Nat → List Byte
+  newOut : Nat → List Byte
+  oldX : Nat → Value
+  oldY : Nat → Value
+  oldProd : Nat → Value
+  oldSum : Nat → Value
+  prod : Nat → Int
+  sum : Nat → Int
+
+def saxpyVectorKernelInvariant
+    (params : SaxpyParams) (hn : params.n ≤ 32)
+    (xs ys : Nat → Int) (data : SaxpyVectorData) : CSL.Assertion :=
+  fun st _ =>
+    ∀ i (hi : i < params.n),
+      ∃ r,
+        saxpyScalarKernelInvariant params (saxpyLaneForIndex hn i hi)
+          (saxpyLaneXOffset params i) (saxpyLaneYOffset params i)
+          (saxpyLaneOutputOffset params i)
+          (data.xBytes i) (data.yBytes i) (data.oldOut i) (data.newOut i)
+          (data.oldX i) (data.oldY i) (data.oldProd i) (data.oldSum i)
+          (xs i) (ys i) (data.prod i) (data.sum i) st r
+
+def saxpyVectorKernelSpec
+    (init : State) (params : SaxpyParams) (hn : params.n ≤ 32)
+    (xs ys : Nat → Int) (resource : Resource) (data : SaxpyVectorData) :
+    KernelSpec :=
+  { init := init
+    resource := resource
+    pre := fun st r => st = init ∧ r = resource
+    invariant := saxpyVectorKernelInvariant params hn xs ys data
+    post := saxpyPost params xs ys }
+
+structure SaxpyVectorProofs
+    (init : State) (params : SaxpyParams) (hn : params.n ≤ 32)
+    (xs ys : Nat → Int) (data : SaxpyVectorData) where
+  laneResource : Nat → Resource
+  hinit :
+    ∀ i (hi : i < params.n),
+      saxpyScalarKernelPre params (saxpyLaneForIndex hn i hi)
+        (saxpyLaneXOffset params i) (saxpyLaneYOffset params i)
+        (saxpyLaneOutputOffset params i)
+        (data.xBytes i) (data.yBytes i) (data.oldOut i)
+        (data.oldX i) (data.oldY i) (data.oldProd i) (data.oldSum i)
+        init (laneResource i)
+  haddrX :
+    ∀ i (hi : i < params.n) st r,
+      saxpyScalarPre (saxpyLaneForIndex hn i hi)
+        (saxpyLaneXOffset params i) (saxpyLaneYOffset params i)
+        (saxpyLaneOutputOffset params i)
+        (data.xBytes i) (data.yBytes i) (data.oldOut i)
+        (data.oldX i) (data.oldY i) (data.oldProd i) (data.oldSum i) st r →
+        ResolvesAddr st { cta := 0, warp := 0, lane := saxpyLaneForIndex hn i hi }
+          { space := .global, ty := .s32, addr := saxpyGlobalLaneAddr params.xBase }
+          (.global (saxpyLaneXOffset params i))
+  haccessX :
+    ∀ i (_hi : i < params.n), AccessOk .global .s32 (.global (saxpyLaneXOffset params i))
+  hwidthX :
+    ∀ i (_hi : i < params.n), Typing.byteWidth? .s32 = some (data.xBytes i).length
+  hdecodeX :
+    ∀ i (_hi : i < params.n), DecodedScalar .s32 (data.xBytes i) (.s32 (xs i))
+  haddrY :
+    ∀ i (hi : i < params.n) st r,
+      (warpAt 0 0 ("entry", 1) [saxpyLaneForIndex hn i hi] ∗
+        saxpyScalarAfterXResources (saxpyLaneForIndex hn i hi)
+          (saxpyLaneXOffset params i) (saxpyLaneYOffset params i)
+          (saxpyLaneOutputOffset params i)
+          (data.xBytes i) (data.yBytes i) (data.oldOut i)
+          (data.oldY i) (data.oldProd i) (data.oldSum i) (xs i)) st r →
+        ResolvesAddr st { cta := 0, warp := 0, lane := saxpyLaneForIndex hn i hi }
+          { space := .global, ty := .s32, addr := saxpyGlobalLaneAddr params.yBase }
+          (.global (saxpyLaneYOffset params i))
+  haccessY :
+    ∀ i (_hi : i < params.n), AccessOk .global .s32 (.global (saxpyLaneYOffset params i))
+  hwidthY :
+    ∀ i (_hi : i < params.n), Typing.byteWidth? .s32 = some (data.yBytes i).length
+  hdecodeY :
+    ∀ i (_hi : i < params.n), DecodedScalar .s32 (data.yBytes i) (.s32 (ys i))
+  hmul :
+    ∀ i (_hi : i < params.n),
+      Helpers.evalBinary? .mul (.s32 params.alpha) (.s32 (xs i)) =
+        some (.s32 (data.prod i))
+  hadd :
+    ∀ i (_hi : i < params.n),
+      Helpers.evalBinary? .add (.s32 (data.prod i)) (.s32 (ys i)) =
+        some (.s32 (data.sum i))
+  haddrOut :
+    ∀ i (hi : i < params.n) st r,
+      (warpAt 0 0 ("entry", 4) [saxpyLaneForIndex hn i hi] ∗
+        saxpyScalarBeforeStoreResources (saxpyLaneForIndex hn i hi)
+          (saxpyLaneXOffset params i) (saxpyLaneYOffset params i)
+          (saxpyLaneOutputOffset params i)
+          (data.xBytes i) (data.yBytes i) (data.oldOut i)
+          (xs i) (ys i) (data.prod i) (data.sum i)) st r →
+        ResolvesAddr st { cta := 0, warp := 0, lane := saxpyLaneForIndex hn i hi }
+          { space := .global, ty := .s32, addr := saxpyGlobalLaneAddr params.outBase }
+          (.global (saxpyLaneOutputOffset params i))
+  hdisjointX :
+    ∀ i (_hi : i < params.n),
+      ByteRangesDisjoint (saxpyLaneXOffset params i) (data.xBytes i).length
+        (saxpyLaneOutputOffset params i) (data.newOut i).length
+  hdisjointY :
+    ∀ i (_hi : i < params.n),
+      ByteRangesDisjoint (saxpyLaneYOffset params i) (data.yBytes i).length
+        (saxpyLaneOutputOffset params i) (data.newOut i).length
+  haccessOut :
+    ∀ i (_hi : i < params.n),
+      AccessOk .global .s32 (.global (saxpyLaneOutputOffset params i))
+  hwidthOut :
+    ∀ i (_hi : i < params.n), Typing.byteWidth? .s32 = some (data.newOut i).length
+  hdecodeOut :
+    ∀ i (_hi : i < params.n), DecodedScalar .s32 (data.newOut i) (.s32 (data.sum i))
+  hencodeOut :
+    ∀ i (_hi : i < params.n), EncodedScalar .s32 (.s32 (data.sum i)) (data.newOut i)
+  hlenOut :
+    ∀ i (_hi : i < params.n), (data.oldOut i).length = (data.newOut i).length
+  hsum :
+    ∀ i (_hi : i < params.n),
+      data.sum i = saxpyExpectedValue params (xs i) (ys i)
+  honly :
+    ∀ i (hi : i < params.n),
+      cfgKernelInvariant (saxpyEnv params) 0 0
+        (saxpyScalarInvariants (saxpyLaneForIndex hn i hi)
+          (saxpyLaneXOffset params i) (saxpyLaneYOffset params i)
+          (saxpyLaneOutputOffset params i)
+          (data.xBytes i) (data.yBytes i) (data.oldOut i) (data.newOut i)
+          (data.oldX i) (data.oldY i) (data.oldProd i) (data.oldSum i)
+          (xs i) (ys i) (data.prod i) (data.sum i))
+        (saxpyScalarPost (saxpyLaneForIndex hn i hi)
+          (saxpyLaneXOffset params i) (saxpyLaneYOffset params i)
+          (saxpyLaneOutputOffset params i)
+          (data.xBytes i) (data.yBytes i) (data.newOut i)
+          (xs i) (ys i) (data.prod i) (data.sum i)) ⊢ₛ
+        OnlyRunnableWarp 0 0
+  hpostNoStep :
+    ∀ i (hi : i < params.n),
+      NoStepBlock 0 0
+        (saxpyScalarPost (saxpyLaneForIndex hn i hi)
+          (saxpyLaneXOffset params i) (saxpyLaneYOffset params i)
+          (saxpyLaneOutputOffset params i)
+          (data.xBytes i) (data.yBytes i) (data.newOut i)
+          (xs i) (ys i) (data.prod i) (data.sum i))
+  hsuffixNoFinal :
+    ∀ i (hi : i < params.n),
+      NoFinal
+        (cfgSuffixInvariant (saxpyEnv params) 0 0
+          (saxpyScalarInvariants (saxpyLaneForIndex hn i hi)
+            (saxpyLaneXOffset params i) (saxpyLaneYOffset params i)
+            (saxpyLaneOutputOffset params i)
+            (data.xBytes i) (data.yBytes i) (data.oldOut i) (data.newOut i)
+            (data.oldX i) (data.oldY i) (data.oldProd i) (data.oldSum i)
+            (xs i) (ys i) (data.prod i) (data.sum i))
+          (saxpyScalarPost (saxpyLaneForIndex hn i hi)
+            (saxpyLaneXOffset params i) (saxpyLaneYOffset params i)
+            (saxpyLaneOutputOffset params i)
+            (data.xBytes i) (data.yBytes i) (data.newOut i)
+            (xs i) (ys i) (data.prod i) (data.sum i)))
+
+private theorem saxpyVectorLaneValid
+    {init : State} {params : SaxpyParams} {hn : params.n ≤ 32}
+    {xs ys : Nat → Int} {data : SaxpyVectorData}
+    (proofs : SaxpyVectorProofs init params hn xs ys data)
+    (i : Nat) (hi : i < params.n) :
+    (saxpyScalarKernelSpec init params (saxpyLaneForIndex hn i hi)
+      (saxpyLaneXOffset params i) (saxpyLaneYOffset params i)
+      (saxpyLaneOutputOffset params i)
+      (data.xBytes i) (data.yBytes i) (data.oldOut i) (data.newOut i)
+      (data.oldX i) (data.oldY i) (data.oldProd i) (data.oldSum i)
+      (xs i) (ys i) (data.prod i) (data.sum i) (proofs.laneResource i)).Valid :=
+  saxpy_scalar_kernel_valid
+    (proofs.hinit i hi)
+    (proofs.haddrX i hi) (proofs.haccessX i hi) (proofs.hwidthX i hi)
+    (proofs.hdecodeX i hi)
+    (proofs.haddrY i hi) (proofs.haccessY i hi) (proofs.hwidthY i hi)
+    (proofs.hdecodeY i hi)
+    (proofs.hmul i hi) (proofs.hadd i hi)
+    (proofs.haddrOut i hi) (proofs.hdisjointX i hi) (proofs.hdisjointY i hi)
+    (proofs.haccessOut i hi) (proofs.hencodeOut i hi) (proofs.hlenOut i hi)
+    (proofs.honly i hi) (proofs.hpostNoStep i hi) (proofs.hsuffixNoFinal i hi)
+
+theorem saxpy_vector_kernel_valid
+    {init : State} {params : SaxpyParams} {hn : params.n ≤ 32}
+    {xs ys : Nat → Int} {resource : Resource} {data : SaxpyVectorData}
+    (proofs : SaxpyVectorProofs init params hn xs ys data) :
+    (saxpyVectorKernelSpec init params hn xs ys resource data).Valid := by
+  refine KernelSpec.Valid.of_parts ?hpre ?hpreInv ?hstep ?hfinal
+  · simp [saxpyVectorKernelSpec]
+  · intro st r hpre
+    rcases hpre with ⟨hst, _hr⟩
+    subst st
+    intro i hi
+    refine ⟨proofs.laneResource i, ?_⟩
+    exact (saxpy_scalar_pre_entails_kernel_invariant
+      (proofs.haddrX i hi) (proofs.haccessX i hi) (proofs.hwidthX i hi)
+      (proofs.hdecodeX i hi)
+      (proofs.haddrY i hi) (proofs.haccessY i hi) (proofs.hwidthY i hi)
+      (proofs.hdecodeY i hi)
+      (proofs.hmul i hi) (proofs.hadd i hi)
+      (proofs.haddrOut i hi) (proofs.hdisjointX i hi) (proofs.hdisjointY i hi)
+      (proofs.haccessOut i hi) (proofs.hencodeOut i hi) (proofs.hlenOut i hi))
+      init (proofs.laneResource i) (proofs.hinit i hi)
+  · intro st r st' hinv hmachine
+    refine ⟨r, CSL.Resource.update_refl r, ?_⟩
+    intro i hi
+    rcases hinv i hi with ⟨rLane, hinvLane⟩
+    have hvalidLane := saxpyVectorLaneValid proofs i hi
+    rcases hvalidLane with ⟨_hpre, _hpreInv, hstepLane, _hfinalLane⟩
+    rcases hstepLane st rLane st' hinvLane hmachine with ⟨rLane', _hupdate, hinvLane'⟩
+    exact ⟨rLane', hinvLane'⟩
+  · intro final r hfinal hinv
+    intro i hi
+    rcases hinv i hi with ⟨rLane, hinvLane⟩
+    have hvalidLane := saxpyVectorLaneValid proofs i hi
+    rcases hvalidLane with ⟨_hpre, _hpreInv, _hstepLane, hfinalLane⟩
+    have hpostLane := hfinalLane final rLane hfinal hinvLane
+    have hread :
+        readGlobalS32? final (saxpyLaneOutputOffset params i) = some (data.sum i) :=
+      saxpyScalarPost_read_output
+        (proofs.haccessOut i hi) (proofs.hwidthOut i hi) (proofs.hdecodeOut i hi)
+        hpostLane
+    rw [← proofs.hsum i hi]
+    exact hread
+
 theorem saxpy_partial_correct_of_valid
     {init : State} {params : SaxpyParams} {xs ys : Nat → Int} {resource : Resource}
     (hvalid : (saxpyKernelSpec init params xs ys resource).Valid) :
@@ -2291,6 +2564,20 @@ theorem saxpy_partial_correct_of_valid
 by
   intro final hterm
   rcases KernelSpec.partial_correct hvalid final hterm with ⟨_, hpost⟩
+  exact hpost
+
+theorem saxpy_vector_partial_correct
+    {init final : State} {params : SaxpyParams} {hn : params.n ≤ 32}
+    {xs ys : Nat → Int} {resource : Resource} {data : SaxpyVectorData}
+    (proofs : SaxpyVectorProofs init params hn xs ys data)
+    (hterm : TerminatesAt init final) :
+    ∀ i, i < params.n →
+      readGlobalS32? final (saxpyLaneOutputOffset params i) =
+        some (saxpyExpectedValue params (xs i) (ys i)) := by
+  have hvalid :
+      (saxpyVectorKernelSpec init params hn xs ys resource data).Valid :=
+    saxpy_vector_kernel_valid proofs
+  rcases KernelSpec.partial_correct hvalid final hterm with ⟨rFinal, hpost⟩
   exact hpost
 
 end Examples
