@@ -23,16 +23,6 @@ inductive LowerError where
 
 abbrev LowerM := Except LowerError
 
-def lowerOperand : Operand → RValue
-  | .reg r => .reg r
-  | .pred p => .pred p
-  | .symbol s => .reg s
-  | .addr base 0 => lowerOperand base
-  | .addr base (Int.ofNat n) => .binop .add (lowerOperand base) (.imm (.u64 (UInt64.ofNat n)))
-  | .addr base (Int.negSucc n) => .binop .sub (lowerOperand base) (.imm (.u64 (UInt64.ofNat (n + 1))))
-  | .imm v => .imm v
-  | .special s => .special s
-
 def lowerParamOperand (info : ParamInfo) : RValue :=
   .imm (.u64 (UInt64.ofNat info.offset))
 
@@ -65,7 +55,10 @@ def lowerOperandChecked? (env : Typing.TypeEnv) : Operand → LowerM RValue
 def operandType? (env : Typing.TypeEnv) : Operand → LowerM ScalarTy
   | .reg r =>
       match env.regs[r]? with
-      | some ty => pure ty
+      | some regTy =>
+          match Typing.RegTy.asScalar? regTy with
+          | some ty => pure ty
+          | none => throw (.unsupportedOp "non-scalar register")
       | none => throw (.unknownReg r)
   | .pred p =>
       match env.preds[p]? with
@@ -178,31 +171,18 @@ def ensureGuard? (env : Typing.TypeEnv) : Option Guard → LowerM Unit
       | some ty => throw (.typeMismatch .pred ty)
       | none => throw (.unknownPred g.pred)
 
-def lowerInstr : Instr → CLean.Instr
-  | .mov _ dst src => .assignReg dst (lowerOperand src)
-  | .unop op _ dst src => .assignReg dst (.unop op (lowerOperand src))
-  | .binop op _ dst lhs rhs => .assignReg dst (.binop op (lowerOperand lhs) (lowerOperand rhs))
-  | .predBinop op dst lhs rhs => .assignPredValue dst (.binop op (lowerOperand lhs) (lowerOperand rhs))
-  | .triop op _ dst a b c => .assignReg dst (.triop op (lowerOperand a) (lowerOperand b) (lowerOperand c))
-  | .setp op _ dst lhs rhs => .assignPred dst { op := op, lhs := lowerOperand lhs, rhs := lowerOperand rhs }
-  | .ld space ty dst addr => .load dst { space := space, ty := ty, addr := lowerOperand addr }
-  | .st space ty addr value => .store { space := space, ty := ty, addr := lowerOperand addr } (lowerOperand value)
-  | .cvta space dst src => .cvta dst space (lowerOperand src)
-  | .isspacep space dst src => .isspacep dst space (lowerOperand src)
-  | .barSync barrierId => .barrierCTA barrierId
-  | .unsupported _ _ _ => .assignReg "__unsupported" (.imm (.u32 0))
-
 def lowerInstrChecked? (env : Typing.TypeEnv) : Instr → LowerM (CLean.Instr × Typing.TypeEnv)
   | .mov ty dst src => do
       expectOperandType env ty src
       let src <- lowerOperandCheckedAs? env ty src
-      pure (.assignReg dst src, { env with regs := env.regs.insert dst ty })
+      pure (.assignReg dst src, { env with regs := env.regs.insert dst (.scalar ty) })
   | .unop op srcTy dst src => do
       expectOperandType env srcTy src
       let src <- lowerOperandCheckedAs? env srcTy src
       match Typing.unarySig? op srcTy with
       | some outTy =>
-          pure (.assignReg dst (.unop op src), { env with regs := env.regs.insert dst outTy })
+          pure (.assignReg dst (.unop op src),
+            { env with regs := env.regs.insert dst (.scalar outTy) })
       | none => throw (.unsupportedOp "unop")
   | .binop op ty dst lhs rhs => do
       expectOperandType env ty lhs
@@ -212,7 +192,7 @@ def lowerInstrChecked? (env : Typing.TypeEnv) : Instr → LowerM (CLean.Instr ×
       match Typing.binarySig? op ty ty with
       | some outTy =>
           pure (.assignReg dst (.binop op lhs rhs),
-            { env with regs := env.regs.insert dst outTy })
+            { env with regs := env.regs.insert dst (.scalar outTy) })
       | none => throw (.unsupportedOp "binop")
   | .predBinop op dst lhs rhs => do
       expectOperandType env .pred lhs
@@ -234,7 +214,7 @@ def lowerInstrChecked? (env : Typing.TypeEnv) : Instr → LowerM (CLean.Instr ×
       match Typing.ternarySig? op ty ty ty with
       | some outTy =>
           pure (.assignReg dst (.triop op a b c),
-            { env with regs := env.regs.insert dst outTy })
+            { env with regs := env.regs.insert dst (.scalar outTy) })
       | none => throw (.unsupportedOp "triop")
   | .setp op ty dst lhs rhs => do
       expectOperandType env ty lhs
@@ -253,7 +233,7 @@ def lowerInstrChecked? (env : Typing.TypeEnv) : Instr → LowerM (CLean.Instr ×
       | .u32 | .u64 | .s64 | .b64 =>
           let addr <- lowerAddressOperandChecked? env space addr
           pure (.load dst { space := space, ty := ty, addr := addr },
-            { env with regs := env.regs.insert dst ty })
+            { env with regs := env.regs.insert dst (.scalar ty) })
       | _ => throw (.unsupportedType addrTy)
   | .st space ty addr value => do
       ensureCodecType ty
@@ -269,7 +249,7 @@ def lowerInstrChecked? (env : Typing.TypeEnv) : Instr → LowerM (CLean.Instr ×
       let srcTy <- addressOperandType? env space src
       ensureCvtaSourceType srcTy
       let src <- lowerAddressOperandChecked? env space src
-      pure (.cvta dst space src, { env with regs := env.regs.insert dst .u64 })
+      pure (.cvta dst space src, { env with regs := env.regs.insert dst (.ptr (some space)) })
   | .isspacep space dst src => do
       let srcTy <- operandType? env src
       -- In the initial checked layer, generic addresses have no ScalarTy, so this accepts integer
@@ -284,19 +264,10 @@ def lowerInstrChecked? (env : Typing.TypeEnv) : Instr → LowerM (CLean.Instr ×
       | some modifier => throw (.unsupportedModifier modifier)
       | none => throw (.unsupportedOp opcode)
 
-def lowerGInstr (gi : GInstr) : CLean.GInstr :=
-  { guard? := gi.guard?, instr := lowerInstr gi.instr }
-
 def lowerGInstrChecked? (env : Typing.TypeEnv) (gi : GInstr) : LowerM (CLean.GInstr × Typing.TypeEnv) := do
   ensureGuard? env gi.guard?
   let (instr, env') <- lowerInstrChecked? env gi.instr
   pure ({ guard? := gi.guard?, instr := instr }, env')
-
-def lowerTerminator : Terminator → CLean.Terminator
-  | .bra label => .br label
-  | .cbra pred false tLabel fLabel => .cbr (.pred pred) tLabel fLabel
-  | .cbra pred true tLabel fLabel => .cbr (.pred pred) fLabel tLabel
-  | .exit => .terminate
 
 def blockLabels (blocks : Array Block) : Std.HashMap BlockLabel Unit :=
   blocks.foldl (fun out block => out.insert block.label ()) {}
@@ -327,11 +298,6 @@ def lowerTerminatorChecked? (labels : Std.HashMap BlockLabel Unit) (env : Typing
       | none => throw (.unknownPred pred)
   | .exit => pure .terminate
 
-def lowerBlock (block : Block) : CLean.Block :=
-  { label := block.label
-    body := block.body.map lowerGInstr
-    term := lowerTerminator block.term }
-
 def lowerGInstrsChecked? (env : Typing.TypeEnv) (body : Array GInstr) :
     LowerM (Array CLean.GInstr × Typing.TypeEnv) := do
   let mut out : Array CLean.GInstr := #[]
@@ -347,9 +313,6 @@ def lowerBlockChecked? (labels : Std.HashMap BlockLabel Unit) (env : Typing.Type
   let (body, env') <- lowerGInstrsChecked? env block.body
   let term <- lowerTerminatorChecked? labels env' block.term
   pure ({ label := block.label, body := body, term := term }, env')
-
-def lowerBlocks (blocks : Array Block) : Std.HashMap BlockLabel CLean.Block :=
-  blocks.foldl (fun out block => out.insert block.label (lowerBlock block)) {}
 
 def alignUp (offset align : Nat) : Nat :=
   if align = 0 then
@@ -407,7 +370,9 @@ def sharedInfoMap (shareds : Array CLean.SharedDecl) : Std.HashMap String CLean.
 def initialTypeEnv (kernel : Kernel) (params : Array ParamInfo := #[])
     (shareds : Array CLean.SharedDecl := #[]) : Typing.TypeEnv :=
   let env : Typing.TypeEnv := { params := paramInfoMap params, shareds := sharedInfoMap shareds }
-  let env := kernel.regs.foldl (fun env decl => { env with regs := env.regs.insert decl.name decl.ty }) env
+  let env := kernel.regs.foldl
+    (fun env decl => { env with regs := env.regs.insert decl.name (.scalar decl.ty) })
+    env
   kernel.preds.foldl (fun env decl => { env with preds := env.preds.insert decl.name .pred }) env
 
 def lowerBlocksChecked? (labels : Std.HashMap BlockLabel Unit) (env : Typing.TypeEnv) (blocks : Array Block) :
@@ -418,13 +383,6 @@ def lowerBlocksChecked? (labels : Std.HashMap BlockLabel Unit) (env : Typing.Typ
     out := out.insert block.label block'
   pure out
 
-def lowerKernelEnv (kernel : Kernel) : KernelEnv :=
-  { entry := kernel.entry
-    gridCtx := kernel.gridCtx
-    params := (lowerParamsChecked? kernel.params).toOption.getD #[]
-    sharedDecls := (lowerSharedsChecked? kernel.shareds).toOption.getD #[]
-    blocks := lowerBlocks kernel.blocks }
-
 def lowerKernelEnvChecked? (kernel : Kernel) : LowerM KernelEnv := do
   let labels := blockLabels kernel.blocks
   requireBlockLabel labels kernel.entry
@@ -434,13 +392,11 @@ def lowerKernelEnvChecked? (kernel : Kernel) : LowerM KernelEnv := do
   pure {
     entry := kernel.entry
     gridCtx := kernel.gridCtx
+    addrLayout := {}
     params := params
     sharedDecls := shareds
     blocks := blocks
   }
-
-def lowerKernelEnvCheckedD (kernel : Kernel) (default : KernelEnv := {}) : KernelEnv :=
-  (lowerKernelEnvChecked? kernel).toOption.getD default
 
 end PTX
 

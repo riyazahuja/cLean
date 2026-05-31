@@ -63,8 +63,25 @@ def valueHasType : Value → ScalarTy → Prop
   | .frag _ _, _ => False
   | _, _ => False
 
+inductive RegTy where
+  | scalar (ty : ScalarTy)
+  | ptr (space? : Option AddrSpace)
+  deriving Repr, DecidableEq, Inhabited
+
+namespace RegTy
+
+def asScalar? : RegTy → Option ScalarTy
+  | .scalar ty => some ty
+  | .ptr _ => some .u64
+
+def isPtr : RegTy → Bool
+  | .ptr _ => true
+  | .scalar _ => false
+
+end RegTy
+
 structure TypeEnv where
-  regs : Std.HashMap RegName ScalarTy := {}
+  regs : Std.HashMap RegName RegTy := {}
   preds : Std.HashMap PredName ScalarTy := {}
   params : Std.HashMap String ParamInfo := {}
   shareds : Std.HashMap String SharedDecl := {}
@@ -165,7 +182,7 @@ def cmpSig? : CmpOp → ScalarTy → ScalarTy → Option ScalarTy
 mutual
   partial def rvalueTypeOf? (env : TypeEnv) : RValue → Option ScalarTy
     | .imm v => valueType? v
-    | .reg r => env.regs[r]?
+    | .reg r => env.regs[r]?.bind RegTy.asScalar?
     | .pred p => env.preds[p]?
     | .special s => specialType? s
     | .unop op a => do
@@ -222,14 +239,16 @@ def aligned? (ty : ScalarTy) (addr : Addr) : Bool :=
   | none => false
 
 def addrSpaceMatches (space : AddrSpace) (addr : Addr) : Prop :=
-  match addr with
-  | .generic s _ => s = space
-  | _ => addr.space = space
+  match space, addr with
+  | .generic, _ => True
+  | _, .generic s _ => s = space
+  | _, _ => addr.space = space
 
 def addrSpaceMatches? (space : AddrSpace) (addr : Addr) : Bool :=
-  match addr with
-  | .generic s _ => s == space
-  | _ => addr.space == space
+  match space, addr with
+  | .generic, _ => true
+  | _, .generic s _ => s == space
+  | _, _ => addr.space == space
 
 def typedAccessPreconditions (space : AddrSpace) (ty : ScalarTy) (addr : Addr) : Prop :=
   scalarCodecSupported? ty = true ∧ (byteWidth? ty).isSome ∧ aligned ty addr ∧ addrSpaceMatches space addr

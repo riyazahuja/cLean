@@ -77,6 +77,17 @@ structure GridCtx where
   blockDim : Dim3
   deriving Repr, DecidableEq, Inhabited
 
+structure GenericWindow where
+  space : AddrSpace
+  base : Nat
+  size : Nat
+  targetBase : Nat := 0
+  deriving Repr, Inhabited
+
+structure AddrLayout where
+  genericWindows : Array GenericWindow := #[]
+  deriving Repr, Inhabited
+
 structure ParamInfo where
   name : String
   ty : ScalarTy

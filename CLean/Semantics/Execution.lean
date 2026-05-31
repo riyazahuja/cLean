@@ -1,4 +1,4 @@
-import CLean.Proof.Lemmas
+import CLean.Semantics.StepSoundness
 
 namespace CLean
 

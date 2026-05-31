@@ -82,6 +82,7 @@ structure CTAState where
 structure KernelEnv where
   entry : String := "entry"
   gridCtx : GridCtx := { gridDim := { x := 1 }, blockDim := { x := 32 } }
+  addrLayout : AddrLayout := {}
   params : Array ParamInfo := #[]
   sharedDecls : Array SharedDecl := #[]
   blocks : Std.HashMap BlockLabel Block := {}
@@ -103,6 +104,28 @@ def getLane? (warp : WarpState) (lane : LaneId) : Option LaneState :=
 
 def setLane (warp : WarpState) (lane : LaneId) (laneState : LaneState) : WarpState :=
   { warp with lanes := warp.lanes.set! lane.val laneState }
+
+theorem getLane?_setLane_same
+    {warp : WarpState} {lane : LaneId} {old new : LaneState}
+    (hget : warp.getLane? lane = some old) :
+    (warp.setLane lane new).getLane? lane = some new := by
+  unfold getLane? at hget ⊢
+  unfold setLane
+  rcases (Array.getElem?_eq_some_iff.mp hget) with ⟨hbound, _⟩
+  simp [Array.getElem?_set_self, hbound]
+
+theorem getLane?_setLane_ne
+    {warp : WarpState} {lane target : LaneId} {old new : LaneState}
+    (hget : warp.getLane? lane = some old)
+    (hne : target ≠ lane) :
+    (warp.setLane lane new).getLane? target = warp.getLane? target := by
+  unfold getLane? at hget ⊢
+  unfold setLane
+  rcases (Array.getElem?_eq_some_iff.mp hget) with ⟨hbound, _⟩
+  have hneVal : lane.val ≠ target.val := by
+    intro hval
+    exact hne (Fin.ext hval.symm)
+  simp [Array.getElem?_set_ne, hbound, hneVal]
 
 def wf? (warp : WarpState) : Bool :=
   warp.lanes.size == 32
@@ -175,6 +198,219 @@ def setLane (st : State) (cta : CTAId) (warp : WarpId) (lane : LaneId) (laneStat
   let warpState <- st.getWarp? cta warp
   let warpState := warpState.setLane lane laneState
   st.setWarp cta warp warpState
+
+theorem getLane?_setLane_same
+    {st st' : State} {cta : CTAId} {warp : WarpId} {lane : LaneId}
+    {old new : LaneState}
+    (hget : st.getLane? cta warp lane = some old)
+    (hset : st.setLane cta warp lane new = some st') :
+    st'.getLane? cta warp lane = some new := by
+  unfold getLane? at hget ⊢
+  unfold setLane setWarp at hset
+  cases hcta : st.getCTA? cta with
+  | none =>
+      simp [getWarp?, hcta] at hget
+  | some ctaState =>
+      cases hwarp : ctaState.warps[warp]? with
+      | none =>
+          simp [getWarp?, hcta, hwarp] at hget
+      | some warpState =>
+          simp [getWarp?, hcta, hwarp] at hget hset
+          rw [← hset]
+          simp [getCTA?, getWarp?, setCTA, hcta]
+          exact WarpState.getLane?_setLane_same hget
+
+theorem getLane?_setLane_ne
+    {st st' : State} {cta : CTAId} {warp : WarpId} {lane target : LaneId}
+    {old new : LaneState}
+    (hget : st.getLane? cta warp lane = some old)
+    (hne : target ≠ lane)
+    (hset : st.setLane cta warp lane new = some st') :
+    st'.getLane? cta warp target = st.getLane? cta warp target := by
+  unfold getLane? at hget ⊢
+  unfold setLane setWarp at hset
+  cases hcta : st.getCTA? cta with
+  | none =>
+      simp [getWarp?, hcta] at hget
+  | some ctaState =>
+      cases hwarp : ctaState.warps[warp]? with
+      | none =>
+          simp [getWarp?, hcta, hwarp] at hget
+      | some warpState =>
+          simp [getWarp?, hcta, hwarp] at hget hset
+          rw [← hset]
+          simp [getCTA?, getWarp?, setCTA, hcta]
+          have hctaRaw : st.ctas[cta]? = some ctaState := by
+            simpa [getCTA?] using hcta
+          simpa [hctaRaw, hwarp] using
+            (WarpState.getLane?_setLane_ne (warp := warpState) (lane := lane)
+              (target := target) (old := old) (new := new) hget hne)
+
+theorem getWarp?_setLane_same
+    {st st' : State} {cta : CTAId} {warp : WarpId} {lane : LaneId}
+    {warpState : WarpState} {laneState : LaneState}
+    (hwarp : st.getWarp? cta warp = some warpState)
+    (hset : st.setLane cta warp lane laneState = some st') :
+    st'.getWarp? cta warp = some (warpState.setLane lane laneState) := by
+  unfold getWarp? at hwarp ⊢
+  unfold setLane setWarp at hset
+  cases hcta : st.getCTA? cta with
+  | none =>
+      simp [hcta] at hwarp
+  | some ctaState =>
+      cases hwarpMap : ctaState.warps[warp]? with
+      | none =>
+          simp [hcta, hwarpMap] at hwarp
+      | some warpState' =>
+          simp [hcta, hwarpMap] at hwarp hset
+          subst warpState'
+          simp [getWarp?, hcta, hwarpMap] at hset
+          rw [← hset]
+          simp [getCTA?, setCTA, hcta, hwarpMap]
+
+theorem getLane?_setLane_nonPc_eq
+    {st st' : State} {cta : CTAId} {warp : WarpId} {lane target : LaneId}
+    {old new targetState : LaneState}
+    (htarget : st.getLane? cta warp target = some targetState)
+    (hget : st.getLane? cta warp lane = some old)
+    (hlocal : new.localMem = old.localMem)
+    (hregs : new.regs = old.regs)
+    (hpreds : new.preds = old.preds)
+    (hset : st.setLane cta warp lane new = some st') :
+    ∃ targetState', st'.getLane? cta warp target = some targetState' ∧
+      targetState'.localMem = targetState.localMem ∧
+      targetState'.regs = targetState.regs ∧
+      targetState'.preds = targetState.preds := by
+  by_cases heq : target = lane
+  · subst target
+    rw [hget] at htarget
+    injection htarget with hsame
+    subst targetState
+    exact ⟨new, getLane?_setLane_same hget hset, hlocal, hregs, hpreds⟩
+  · have htarget' := getLane?_setLane_ne hget heq hset
+    rw [htarget] at htarget'
+    exact ⟨targetState, htarget', rfl, rfl, rfl⟩
+
+theorem getLane?_setLane_localMem_eq
+    {st st' : State} {cta : CTAId} {warp : WarpId} {lane target : LaneId}
+    {old new targetState : LaneState}
+    (htarget : st.getLane? cta warp target = some targetState)
+    (hget : st.getLane? cta warp lane = some old)
+    (hlocal : new.localMem = old.localMem)
+    (hset : st.setLane cta warp lane new = some st') :
+    ∃ targetState', st'.getLane? cta warp target = some targetState' ∧
+      targetState'.localMem = targetState.localMem := by
+  by_cases heq : target = lane
+  · subst target
+    rw [hget] at htarget
+    injection htarget with hsame
+    subst targetState
+    exact ⟨new, getLane?_setLane_same hget hset, hlocal⟩
+  · have htarget' := getLane?_setLane_ne hget heq hset
+    rw [htarget] at htarget'
+    exact ⟨targetState, htarget', rfl⟩
+
+theorem setLane_global_eq
+    {st st' : State} {cta : CTAId} {warp : WarpId} {lane : LaneId}
+    {laneState : LaneState}
+    (hset : st.setLane cta warp lane laneState = some st') :
+    st'.global = st.global := by
+  unfold setLane setWarp at hset
+  cases hcta : st.getCTA? cta with
+  | none =>
+      simp [getWarp?, hcta] at hset
+  | some ctaState =>
+      cases hwarp : ctaState.warps[warp]? with
+      | none =>
+          simp [getWarp?, hcta, hwarp] at hset
+      | some warpState =>
+          simp [getWarp?, hcta, hwarp] at hset
+          rw [← hset]
+          simp [setCTA]
+
+theorem setLane_param_eq
+    {st st' : State} {cta : CTAId} {warp : WarpId} {lane : LaneId}
+    {laneState : LaneState}
+    (hset : st.setLane cta warp lane laneState = some st') :
+    st'.param = st.param := by
+  unfold setLane setWarp at hset
+  cases hcta : st.getCTA? cta with
+  | none =>
+      simp [getWarp?, hcta] at hset
+  | some ctaState =>
+      cases hwarp : ctaState.warps[warp]? with
+      | none =>
+          simp [getWarp?, hcta, hwarp] at hset
+      | some warpState =>
+          simp [getWarp?, hcta, hwarp] at hset
+          rw [← hset]
+          simp [setCTA]
+
+theorem setLane_const_eq
+    {st st' : State} {cta : CTAId} {warp : WarpId} {lane : LaneId}
+    {laneState : LaneState}
+    (hset : st.setLane cta warp lane laneState = some st') :
+    st'.const = st.const := by
+  unfold setLane setWarp at hset
+  cases hcta : st.getCTA? cta with
+  | none =>
+      simp [getWarp?, hcta] at hset
+  | some ctaState =>
+      cases hwarp : ctaState.warps[warp]? with
+      | none =>
+          simp [getWarp?, hcta, hwarp] at hset
+      | some warpState =>
+          simp [getWarp?, hcta, hwarp] at hset
+          rw [← hset]
+          simp [setCTA]
+
+theorem setCTA_kernelEnv_eq
+    {st : State} {cta : CTAId} {ctaState : CTAState} :
+    (st.setCTA cta ctaState).kernelEnv = st.kernelEnv := by
+  rfl
+
+theorem setWarp_kernelEnv_eq
+    {st st' : State} {cta : CTAId} {warp : WarpId} {warpState : WarpState}
+    (hset : st.setWarp cta warp warpState = some st') :
+    st'.kernelEnv = st.kernelEnv := by
+  unfold setWarp at hset
+  cases hcta : st.getCTA? cta with
+  | none =>
+      simp [hcta] at hset
+  | some ctaState =>
+      simp [hcta] at hset
+      rw [← hset]
+      rfl
+
+theorem setLane_kernelEnv_eq
+    {st st' : State} {cta : CTAId} {warp : WarpId} {lane : LaneId}
+    {laneState : LaneState}
+    (hset : st.setLane cta warp lane laneState = some st') :
+    st'.kernelEnv = st.kernelEnv := by
+  unfold setLane at hset
+  cases hwarp : st.getWarp? cta warp with
+  | none =>
+      simp [hwarp] at hset
+  | some warpState =>
+      simp [hwarp] at hset
+      exact setWarp_kernelEnv_eq hset
+
+theorem setLane_getCTA_shared_eq
+    {st st' : State} {cta : CTAId} {warp : WarpId} {lane : LaneId}
+    {laneState : LaneState} {ctaState : CTAState}
+    (hcta : st.getCTA? cta = some ctaState)
+    (hset : st.setLane cta warp lane laneState = some st') :
+    ∃ ctaState', st'.getCTA? cta = some ctaState' ∧ ctaState'.shared = ctaState.shared := by
+  unfold setLane setWarp at hset
+  cases hwarp : ctaState.warps[warp]? with
+  | none =>
+      simp [getWarp?, hcta, hwarp] at hset
+  | some warpState =>
+      simp [getWarp?, hcta, hwarp] at hset
+      rw [← hset]
+      refine ⟨{ ctaState with
+        warps := ctaState.warps.insert warp (warpState.setLane lane laneState) }, ?_, rfl⟩
+      simp [getCTA?, setCTA]
 
 def wf? (st : State) : Bool :=
   st.kernelEnv.wf? && st.ctas.toList.all fun (_, ctaState) => ctaState.wf?
