@@ -135,6 +135,22 @@ def GlobalSlicesUpdateFacts (st : State) :
       GlobalSlicesUpdateFacts st offsets oldRest newRest
   | _, _, _ => False
 
+def ParamSlicesUpdateFacts (st : State) :
+    List Nat → List (List Byte) → Prop
+  | [], [] => True
+  | offset :: offsets, bytes :: rest =>
+      CSL.memoryBytes st.param.bytes offset bytes ∧
+      ParamSlicesUpdateFacts st offsets rest
+  | _, _ => False
+
+def ConstSlicesUpdateFacts (st : State) :
+    List Nat → List (List Byte) → Prop
+  | [], [] => True
+  | offset :: offsets, bytes :: rest =>
+      CSL.memoryBytes st.const.bytes offset bytes ∧
+      ConstSlicesUpdateFacts st offsets rest
+  | _, _ => False
+
 def SharedSlicesUpdateFacts (st : State) (cta : CTAId) :
     List Nat → List (List Byte) → List (List Byte) → Prop
   | [], [], [] => True
@@ -157,6 +173,22 @@ def GlobalMemoryBytesFor (st : State) :
   | offset :: offsets, bytes :: rest =>
       CSL.memoryBytes st.global.bytes offset bytes ∧
       GlobalMemoryBytesFor st offsets rest
+  | _, _ => False
+
+def ParamMemoryBytesFor (st : State) :
+    List Nat → List (List Byte) → Prop
+  | [], [] => True
+  | offset :: offsets, bytes :: rest =>
+      CSL.memoryBytes st.param.bytes offset bytes ∧
+      ParamMemoryBytesFor st offsets rest
+  | _, _ => False
+
+def ConstMemoryBytesFor (st : State) :
+    List Nat → List (List Byte) → Prop
+  | [], [] => True
+  | offset :: offsets, bytes :: rest =>
+      CSL.memoryBytes st.const.bytes offset bytes ∧
+      ConstMemoryBytesFor st offsets rest
   | _, _ => False
 
 def SharedMemoryBytesFor (st : State) (cta : CTAId) :
@@ -238,6 +270,17 @@ def EvalCmpsFor
       EvalCmpsFor st cta warp cmp lanes values
   | _, _ => False
 
+def EvalRValueBoolsFor
+    (st : State) (cta : CTAId) (warp : WarpId) (rhs : RValue) :
+    List LaneId → List Bool → Prop
+  | [], [] => True
+  | lane :: lanes, value :: values =>
+      (∃ raw,
+        EvalRValue st { cta := cta, warp := warp, lane := lane } rhs raw ∧
+          Helpers.valueToBool? raw = some value) ∧
+      EvalRValueBoolsFor st cta warp rhs lanes values
+  | _, _ => False
+
 def EvalCvtaValuesFor
     (st : State) (cta : CTAId) (warp : WarpId) (space : AddrSpace) (src : RValue) :
     List LaneId → List Value → Prop
@@ -269,6 +312,24 @@ def ResolvesGlobalAddrsFor
       ResolvesGlobalAddrsFor st cta warp addr lanes offsets
   | _, _ => False
 
+def ResolvesParamAddrsFor
+    (st : State) (cta : CTAId) (warp : WarpId) (addr : TypedAddr) :
+    List LaneId → List Nat → Prop
+  | [], [] => True
+  | lane :: lanes, offset :: offsets =>
+      ResolvesAddr st { cta := cta, warp := warp, lane := lane } addr (.param offset) ∧
+      ResolvesParamAddrsFor st cta warp addr lanes offsets
+  | _, _ => False
+
+def ResolvesConstAddrsFor
+    (st : State) (cta : CTAId) (warp : WarpId) (addr : TypedAddr) :
+    List LaneId → List Nat → Prop
+  | [], [] => True
+  | lane :: lanes, offset :: offsets =>
+      ResolvesAddr st { cta := cta, warp := warp, lane := lane } addr (.const offset) ∧
+      ResolvesConstAddrsFor st cta warp addr lanes offsets
+  | _, _ => False
+
 def ResolvesSharedAddrsFor
     (st : State) (cta : CTAId) (warp : WarpId) (addr : TypedAddr) :
     List LaneId → List Nat → Prop
@@ -294,6 +355,22 @@ def ReadGlobalValuesFor (st : State) (ty : ScalarTy) :
   | offset :: offsets, value :: values =>
       ReadMemFact st .global ty (.global offset) value ∧
       ReadGlobalValuesFor st ty offsets values
+  | _, _ => False
+
+def ReadParamValuesFor (st : State) (ty : ScalarTy) :
+    List Nat → List Value → Prop
+  | [], [] => True
+  | offset :: offsets, value :: values =>
+      ReadMemFact st .param ty (.param offset) value ∧
+      ReadParamValuesFor st ty offsets values
+  | _, _ => False
+
+def ReadConstValuesFor (st : State) (ty : ScalarTy) :
+    List Nat → List Value → Prop
+  | [], [] => True
+  | offset :: offsets, value :: values =>
+      ReadMemFact st .const ty (.const offset) value ∧
+      ReadConstValuesFor st ty offsets values
   | _, _ => False
 
 def ReadSharedValuesFor (st : State) (cta : CTAId) (ty : ScalarTy) :
@@ -387,6 +464,48 @@ theorem GlobalSlicesUpdateFacts.of_globalSlices
           rcases h with ⟨_rBytes, rRest, _hcomp, _hequiv, hbytes, hrest⟩
           exact ⟨rfl, CSL.globalBytes_memory hbytes, ih hrest⟩
 
+theorem ParamSlicesUpdateFacts.of_paramSlices
+    {st : State} {r : CSL.Resource} {offsets : List Nat}
+    {slices : List (List Byte)}
+    (h : paramSlices offsets slices st r) :
+    ParamSlicesUpdateFacts st offsets slices := by
+  induction offsets generalizing slices r with
+  | nil =>
+      cases slices with
+      | nil =>
+          exact True.intro
+      | cons _ _ =>
+          exact False.elim h.1
+  | cons offset offsets ih =>
+      cases slices with
+      | nil =>
+          exact False.elim h.1
+      | cons bytes rest =>
+          change (CSL.paramBytes offset bytes ∗ paramSlices offsets rest) st r at h
+          rcases h with ⟨_rBytes, rRest, _hcomp, _hequiv, hbytes, hrest⟩
+          exact ⟨CSL.paramBytes_memory hbytes, ih hrest⟩
+
+theorem ConstSlicesUpdateFacts.of_constSlices
+    {st : State} {r : CSL.Resource} {offsets : List Nat}
+    {slices : List (List Byte)}
+    (h : constSlices offsets slices st r) :
+    ConstSlicesUpdateFacts st offsets slices := by
+  induction offsets generalizing slices r with
+  | nil =>
+      cases slices with
+      | nil =>
+          exact True.intro
+      | cons _ _ =>
+          exact False.elim h.1
+  | cons offset offsets ih =>
+      cases slices with
+      | nil =>
+          exact False.elim h.1
+      | cons bytes rest =>
+          change (CSL.constBytes offset bytes ∗ constSlices offsets rest) st r at h
+          rcases h with ⟨_rBytes, rRest, _hcomp, _hequiv, hbytes, hrest⟩
+          exact ⟨CSL.constBytes_memory hbytes, ih hrest⟩
+
 theorem SliceLengthsEq.refl :
     ∀ {slices : List (List Byte)}, SliceLengthsEq slices slices
   | [] => True.intro
@@ -413,6 +532,48 @@ theorem GlobalMemoryBytesFor.of_globalSlices
             (CSL.globalBytes offset perm bytes ∗ globalSlices offsets perm rest) st r at h
           rcases h with ⟨_rBytes, rRest, _hcomp, _hequiv, hbytes, hrest⟩
           exact ⟨CSL.globalBytes_memory hbytes, ih hrest⟩
+
+theorem ParamMemoryBytesFor.of_paramSlices
+    {st : State} {r : CSL.Resource} {offsets : List Nat}
+    {slices : List (List Byte)}
+    (h : paramSlices offsets slices st r) :
+    ParamMemoryBytesFor st offsets slices := by
+  induction offsets generalizing slices r with
+  | nil =>
+      cases slices with
+      | nil =>
+          exact True.intro
+      | cons _ _ =>
+          exact False.elim h.1
+  | cons offset offsets ih =>
+      cases slices with
+      | nil =>
+          exact False.elim h.1
+      | cons bytes rest =>
+          change (CSL.paramBytes offset bytes ∗ paramSlices offsets rest) st r at h
+          rcases h with ⟨_rBytes, rRest, _hcomp, _hequiv, hbytes, hrest⟩
+          exact ⟨CSL.paramBytes_memory hbytes, ih hrest⟩
+
+theorem ConstMemoryBytesFor.of_constSlices
+    {st : State} {r : CSL.Resource} {offsets : List Nat}
+    {slices : List (List Byte)}
+    (h : constSlices offsets slices st r) :
+    ConstMemoryBytesFor st offsets slices := by
+  induction offsets generalizing slices r with
+  | nil =>
+      cases slices with
+      | nil =>
+          exact True.intro
+      | cons _ _ =>
+          exact False.elim h.1
+  | cons offset offsets ih =>
+      cases slices with
+      | nil =>
+          exact False.elim h.1
+      | cons bytes rest =>
+          change (CSL.constBytes offset bytes ∗ constSlices offsets rest) st r at h
+          rcases h with ⟨_rBytes, rRest, _hcomp, _hequiv, hbytes, hrest⟩
+          exact ⟨CSL.constBytes_memory hbytes, ih hrest⟩
 
 theorem GlobalSlicesUpdateFacts.of_memoryBytesFor
     {st : State} {offsets : List Nat} {oldSlices newSlices : List (List Byte)}
@@ -564,6 +725,50 @@ theorem GlobalSlicesUpdateFacts.of_global_eq
               exact ⟨hlen, by
                 rw [hglobal]
                 exact hmem, ih hrest⟩
+
+theorem ParamSlicesUpdateFacts.of_param_eq
+    {st st' : State} {offsets : List Nat} {slices : List (List Byte)}
+    (hparam : st'.param = st.param)
+    (hfacts : ParamSlicesUpdateFacts st offsets slices) :
+    ParamSlicesUpdateFacts st' offsets slices := by
+  induction offsets generalizing slices with
+  | nil =>
+      cases slices with
+      | nil =>
+          exact True.intro
+      | cons _ _ =>
+          cases hfacts
+  | cons offset offsets ih =>
+      cases slices with
+      | nil =>
+          cases hfacts
+      | cons bytes rest =>
+          rcases hfacts with ⟨hmem, hrest⟩
+          exact ⟨by
+            rw [hparam]
+            exact hmem, ih hrest⟩
+
+theorem ConstSlicesUpdateFacts.of_const_eq
+    {st st' : State} {offsets : List Nat} {slices : List (List Byte)}
+    (hconst : st'.const = st.const)
+    (hfacts : ConstSlicesUpdateFacts st offsets slices) :
+    ConstSlicesUpdateFacts st' offsets slices := by
+  induction offsets generalizing slices with
+  | nil =>
+      cases slices with
+      | nil =>
+          exact True.intro
+      | cons _ _ =>
+          cases hfacts
+  | cons offset offsets ih =>
+      cases slices with
+      | nil =>
+          cases hfacts
+      | cons bytes rest =>
+          rcases hfacts with ⟨hmem, hrest⟩
+          exact ⟨by
+            rw [hconst]
+            exact hmem, ih hrest⟩
 
 theorem ReadMemFact.shared_getCTA
     {st : State} {ty : ScalarTy} {cta : CTAId} {offset : Nat} {value : Value}
@@ -874,6 +1079,186 @@ theorem RegsUpdateFacts.of_applyGlobalLoad
               some (Helpers.writeReg laneState dst value)) = some stCore) :
     RegsUpdateFacts stCore cta warp dst lanes values := by
   exact RegsUpdateFacts.of_applyGlobalLoadList hnodup haddrs hreads happly
+
+theorem RegsUpdateFacts.of_applyParamLoadList
+    {stEval st stCore : State} {cta : CTAId} {warp : WarpId}
+    {dst : RegName} {ty : ScalarTy} {addrExpr : RValue}
+    {lanes : List LaneId} {offsets : List Nat} {values : List Value}
+    (hnodup : lanes.Nodup)
+    (haddrs :
+      ResolvesParamAddrsFor stEval cta warp
+        { space := .param, ty := ty, addr := addrExpr } lanes offsets)
+    (hreads : ReadParamValuesFor stEval ty offsets values)
+    (happly :
+      Helpers.applyToLaneIdsList? st cta warp
+        (fun lane laneState =>
+          (Helpers.resolveAddr? stEval cta warp lane
+              { space := .param, ty := ty, addr := addrExpr }).bind fun addr =>
+            (Helpers.readMem? stEval .param ty addr).bind fun value =>
+              some (Helpers.writeReg laneState dst value)) lanes = some stCore) :
+    RegsUpdateFacts stCore cta warp dst lanes values := by
+  induction lanes generalizing st offsets values with
+  | nil =>
+      cases offsets with
+      | nil =>
+          cases values with
+          | nil =>
+              exact True.intro
+          | cons _ _ =>
+              cases hreads
+      | cons _ _ =>
+          cases haddrs
+  | cons lane lanes ih =>
+      cases hnodup with
+      | cons hnotMem hnodupRest =>
+          cases offsets with
+          | nil =>
+              cases haddrs
+          | cons offset offsets =>
+              cases values with
+              | nil =>
+                  cases hreads
+              | cons value values =>
+                  rcases haddrs with ⟨haddr, haddrsRest⟩
+                  rcases hreads with ⟨hread, hreadsRest⟩
+                  simp [Helpers.applyToLaneIdsList?] at happly
+                  cases hget : st.getLane? cta warp lane with
+                  | none =>
+                      simp [hget] at happly
+                  | some laneState =>
+                      unfold ResolvesAddr at haddr
+                      unfold ReadMemFact at hread
+                      simp [hget, haddr, hread] at happly
+                      cases hset :
+                          st.setLane cta warp lane (Helpers.writeReg laneState dst value) with
+                      | none =>
+                          simp [hset] at happly
+                      | some stNext =>
+                          simp [hset] at happly
+                          have hlaneNext :
+                              stNext.getLane? cta warp lane =
+                                some (Helpers.writeReg laneState dst value) :=
+                            State.getLane?_setLane_same hget hset
+                          have hlaneFinal :
+                              stCore.getLane? cta warp lane =
+                                some (Helpers.writeReg laneState dst value) :=
+                            have hnotMemLane : lane ∉ lanes := by
+                              intro hmem
+                              exact (hnotMem lane hmem) rfl
+                            Helpers.applyToLaneIdsList?_getLane_eq_of_not_mem
+                              hnotMemLane hlaneNext happly
+                          exact ⟨⟨Helpers.writeReg laneState dst value, hlaneFinal, by
+                            simp [Helpers.writeReg]⟩,
+                            ih hnodupRest haddrsRest hreadsRest happly⟩
+
+theorem RegsUpdateFacts.of_applyParamLoad
+    {stEval st stCore : State} {cta : CTAId} {warp : WarpId}
+    {dst : RegName} {ty : ScalarTy} {addrExpr : RValue}
+    {lanes : List LaneId} {offsets : List Nat} {values : List Value}
+    (hnodup : lanes.Nodup)
+    (haddrs :
+      ResolvesParamAddrsFor stEval cta warp
+        { space := .param, ty := ty, addr := addrExpr } lanes offsets)
+    (hreads : ReadParamValuesFor stEval ty offsets values)
+    (happly :
+      Helpers.applyToLaneIds? st cta warp lanes
+        (fun lane laneState =>
+          (Helpers.resolveAddr? stEval cta warp lane
+              { space := .param, ty := ty, addr := addrExpr }).bind fun addr =>
+            (Helpers.readMem? stEval .param ty addr).bind fun value =>
+              some (Helpers.writeReg laneState dst value)) = some stCore) :
+    RegsUpdateFacts stCore cta warp dst lanes values := by
+  exact RegsUpdateFacts.of_applyParamLoadList hnodup haddrs hreads happly
+
+theorem RegsUpdateFacts.of_applyConstLoadList
+    {stEval st stCore : State} {cta : CTAId} {warp : WarpId}
+    {dst : RegName} {ty : ScalarTy} {addrExpr : RValue}
+    {lanes : List LaneId} {offsets : List Nat} {values : List Value}
+    (hnodup : lanes.Nodup)
+    (haddrs :
+      ResolvesConstAddrsFor stEval cta warp
+        { space := .const, ty := ty, addr := addrExpr } lanes offsets)
+    (hreads : ReadConstValuesFor stEval ty offsets values)
+    (happly :
+      Helpers.applyToLaneIdsList? st cta warp
+        (fun lane laneState =>
+          (Helpers.resolveAddr? stEval cta warp lane
+              { space := .const, ty := ty, addr := addrExpr }).bind fun addr =>
+            (Helpers.readMem? stEval .const ty addr).bind fun value =>
+              some (Helpers.writeReg laneState dst value)) lanes = some stCore) :
+    RegsUpdateFacts stCore cta warp dst lanes values := by
+  induction lanes generalizing st offsets values with
+  | nil =>
+      cases offsets with
+      | nil =>
+          cases values with
+          | nil =>
+              exact True.intro
+          | cons _ _ =>
+              cases hreads
+      | cons _ _ =>
+          cases haddrs
+  | cons lane lanes ih =>
+      cases hnodup with
+      | cons hnotMem hnodupRest =>
+          cases offsets with
+          | nil =>
+              cases haddrs
+          | cons offset offsets =>
+              cases values with
+              | nil =>
+                  cases hreads
+              | cons value values =>
+                  rcases haddrs with ⟨haddr, haddrsRest⟩
+                  rcases hreads with ⟨hread, hreadsRest⟩
+                  simp [Helpers.applyToLaneIdsList?] at happly
+                  cases hget : st.getLane? cta warp lane with
+                  | none =>
+                      simp [hget] at happly
+                  | some laneState =>
+                      unfold ResolvesAddr at haddr
+                      unfold ReadMemFact at hread
+                      simp [hget, haddr, hread] at happly
+                      cases hset :
+                          st.setLane cta warp lane (Helpers.writeReg laneState dst value) with
+                      | none =>
+                          simp [hset] at happly
+                      | some stNext =>
+                          simp [hset] at happly
+                          have hlaneNext :
+                              stNext.getLane? cta warp lane =
+                                some (Helpers.writeReg laneState dst value) :=
+                            State.getLane?_setLane_same hget hset
+                          have hlaneFinal :
+                              stCore.getLane? cta warp lane =
+                                some (Helpers.writeReg laneState dst value) :=
+                            have hnotMemLane : lane ∉ lanes := by
+                              intro hmem
+                              exact (hnotMem lane hmem) rfl
+                            Helpers.applyToLaneIdsList?_getLane_eq_of_not_mem
+                              hnotMemLane hlaneNext happly
+                          exact ⟨⟨Helpers.writeReg laneState dst value, hlaneFinal, by
+                            simp [Helpers.writeReg]⟩,
+                            ih hnodupRest haddrsRest hreadsRest happly⟩
+
+theorem RegsUpdateFacts.of_applyConstLoad
+    {stEval st stCore : State} {cta : CTAId} {warp : WarpId}
+    {dst : RegName} {ty : ScalarTy} {addrExpr : RValue}
+    {lanes : List LaneId} {offsets : List Nat} {values : List Value}
+    (hnodup : lanes.Nodup)
+    (haddrs :
+      ResolvesConstAddrsFor stEval cta warp
+        { space := .const, ty := ty, addr := addrExpr } lanes offsets)
+    (hreads : ReadConstValuesFor stEval ty offsets values)
+    (happly :
+      Helpers.applyToLaneIds? st cta warp lanes
+        (fun lane laneState =>
+          (Helpers.resolveAddr? stEval cta warp lane
+              { space := .const, ty := ty, addr := addrExpr }).bind fun addr =>
+            (Helpers.readMem? stEval .const ty addr).bind fun value =>
+              some (Helpers.writeReg laneState dst value)) = some stCore) :
+    RegsUpdateFacts stCore cta warp dst lanes values := by
+  exact RegsUpdateFacts.of_applyConstLoadList hnodup haddrs hreads happly
 
 theorem RegsUpdateFacts.of_applySharedLoadList
     {stEval st stCore : State} {cta : CTAId} {warp : WarpId}
@@ -1218,6 +1603,76 @@ theorem PredsUpdateFacts.of_applyAssignPred
             some (Helpers.writePred laneState dst b)) = some stCore) :
     PredsUpdateFacts stCore cta warp dst lanes values := by
   exact PredsUpdateFacts.of_applyAssignPredList hnodup hevals happly
+
+theorem PredsUpdateFacts.of_applyAssignPredValueList
+    {stEval st stCore : State} {cta : CTAId} {warp : WarpId}
+    {dst : PredName} {rhs : RValue} {lanes : List LaneId} {values : List Bool}
+    (hnodup : lanes.Nodup)
+    (hevals : EvalRValueBoolsFor stEval cta warp rhs lanes values)
+    (happly :
+      Helpers.applyToLaneIdsList? st cta warp
+        (fun lane laneState =>
+          (Helpers.evalRValue? stEval cta warp lane rhs).bind fun value =>
+            (Helpers.valueToBool? value).bind fun b =>
+              some (Helpers.writePred laneState dst b)) lanes = some stCore) :
+    PredsUpdateFacts stCore cta warp dst lanes values := by
+  induction lanes generalizing st values with
+  | nil =>
+      cases values with
+      | nil =>
+          exact True.intro
+      | cons value values =>
+          cases hevals
+  | cons lane lanes ih =>
+      cases hnodup with
+      | cons hnotMem hnodupRest =>
+          cases values with
+          | nil =>
+              cases hevals
+          | cons value values =>
+              rcases hevals with ⟨⟨raw, heval, hbool⟩, hevalsRest⟩
+              simp [Helpers.applyToLaneIdsList?] at happly
+              cases hget : st.getLane? cta warp lane with
+              | none =>
+                  simp [hget] at happly
+              | some laneState =>
+                  unfold EvalRValue at heval
+                  simp [hget, heval, hbool] at happly
+                  cases hset :
+                      st.setLane cta warp lane (Helpers.writePred laneState dst value) with
+                  | none =>
+                      simp [hset] at happly
+                  | some stNext =>
+                      simp [hset] at happly
+                      have hlaneNext :
+                          stNext.getLane? cta warp lane =
+                            some (Helpers.writePred laneState dst value) :=
+                        State.getLane?_setLane_same hget hset
+                      have hlaneFinal :
+                          stCore.getLane? cta warp lane =
+                            some (Helpers.writePred laneState dst value) :=
+                        have hnotMemLane : lane ∉ lanes := by
+                          intro hmem
+                          exact (hnotMem lane hmem) rfl
+                        Helpers.applyToLaneIdsList?_getLane_eq_of_not_mem
+                          hnotMemLane hlaneNext happly
+                      exact ⟨⟨Helpers.writePred laneState dst value, hlaneFinal, by
+                        simp [Helpers.writePred]⟩,
+                        ih hnodupRest hevalsRest happly⟩
+
+theorem PredsUpdateFacts.of_applyAssignPredValue
+    {stEval st stCore : State} {cta : CTAId} {warp : WarpId}
+    {dst : PredName} {rhs : RValue} {lanes : List LaneId} {values : List Bool}
+    (hnodup : lanes.Nodup)
+    (hevals : EvalRValueBoolsFor stEval cta warp rhs lanes values)
+    (happly :
+      Helpers.applyToLaneIds? st cta warp lanes
+        (fun lane laneState =>
+          (Helpers.evalRValue? stEval cta warp lane rhs).bind fun value =>
+            (Helpers.valueToBool? value).bind fun b =>
+              some (Helpers.writePred laneState dst b)) = some stCore) :
+    PredsUpdateFacts stCore cta warp dst lanes values := by
+  exact PredsUpdateFacts.of_applyAssignPredValueList hnodup hevals happly
 
 theorem PredsUpdateFacts.of_applyIsspacepList
     {stEval st stCore : State} {cta : CTAId} {warp : WarpId}
@@ -3251,6 +3706,29 @@ theorem StateResourceUpdate.paramBytes {st₀ st₁ : State}
           (offset := offset) hmem.1)
         (ih (offset := offset + 1) hmem.2)
 
+theorem StateResourceUpdate.paramSlices {st₀ st₁ : State}
+    {offsets : List Nat} {slices : List (List Byte)}
+    (hfacts : ParamSlicesUpdateFacts st₁ offsets slices) :
+    StateResourceUpdate st₀ st₁
+      (paramSlices offsets slices)
+      (paramSlices offsets slices) := by
+  induction offsets generalizing slices with
+  | nil =>
+      cases slices with
+      | nil =>
+          exact StateResourceUpdate.emp
+      | cons _ _ =>
+          cases hfacts
+  | cons offset offsets ih =>
+      cases slices with
+      | nil =>
+          cases hfacts
+      | cons bytes rest =>
+          rcases hfacts with ⟨hmem, hrest⟩
+          exact StateResourceUpdate.sep
+            (StateResourceUpdate.paramBytes hmem)
+            (ih hrest)
+
 theorem StateResourceUpdate.constByte {st₀ st₁ : State}
     {offset : Nat} {value : Byte}
     (hmem : CSL.memoryByte st₁.const.bytes offset value) :
@@ -3278,6 +3756,29 @@ theorem StateResourceUpdate.constBytes {st₀ st₁ : State}
         (StateResourceUpdate.constByte (st₀ := st₀) (st₁ := st₁)
           (offset := offset) hmem.1)
         (ih (offset := offset + 1) hmem.2)
+
+theorem StateResourceUpdate.constSlices {st₀ st₁ : State}
+    {offsets : List Nat} {slices : List (List Byte)}
+    (hfacts : ConstSlicesUpdateFacts st₁ offsets slices) :
+    StateResourceUpdate st₀ st₁
+      (constSlices offsets slices)
+      (constSlices offsets slices) := by
+  induction offsets generalizing slices with
+  | nil =>
+      cases slices with
+      | nil =>
+          exact StateResourceUpdate.emp
+      | cons _ _ =>
+          cases hfacts
+  | cons offset offsets ih =>
+      cases slices with
+      | nil =>
+          cases hfacts
+      | cons bytes rest =>
+          rcases hfacts with ⟨hmem, hrest⟩
+          exact StateResourceUpdate.sep
+            (StateResourceUpdate.constBytes hmem)
+            (ih hrest)
 
 theorem wpInstr_of_spec
     {cta : CTAId} {warp : WarpId} {gi : GInstr} {pre post : CSL.Assertion}
@@ -3956,6 +4457,21 @@ theorem wp_cbr_lanes_warpAt_stableFrame
       wpTerminator cta warp (.cbr cond tLabel fLabel)
         (warpAt cta warp dest lanes ∗ frame) :=
   wpTerminator_of_spec (cbrSpec_lanes_warpAt_stableFrame hdest hframe)
+
+theorem CbrBranchControl.of_wp_warpAt
+    {cta : CTAId} {warp : WarpId} {cond : RValue}
+    {tLabel fLabel target : BlockLabel} {lanes : List LaneId}
+    {pre frame : CSL.Assertion}
+    (hwp :
+      pre ⊢ₛ
+        wpTerminator cta warp (.cbr cond tLabel fLabel)
+          (warpAt cta warp (target, 0) lanes ∗ frame)) :
+    CbrBranchControl cta warp cond tLabel fLabel target pre := by
+  intro st st' r hpre hstep
+  rcases hwp st r hpre st' hstep with ⟨_r', _hupdate, hpost⟩
+  rcases hpost with ⟨rCtrl, _rFrame, _hcomp, _hequiv, hctrl, _hframe⟩
+  rcases warpAt_state hctrl with ⟨warpState, hwarp, hlock, hrpc, _hpart⟩
+  exact ⟨warpState, hwarp, hlock, hrpc⟩
 
 theorem wp_terminate_single_warpAt
     {cta : CTAId} {warp : WarpId} {pc : PC} {lane : LaneId} :
@@ -6957,6 +7473,115 @@ theorem assignPredValueSpec_single_warpAt_stableFrame
     intro _st _st' _r rFrame _hpre hframeSt hstep
     exact hframe _st _st' rFrame hstep hframeSt)
 
+theorem assignPredValueSpec_lanes_warpAt
+    {cta : CTAId} {warp : WarpId} {pc : PC} {dst : PredName}
+    {rhs : RValue} {lanes : List LaneId} {oldValues newValues : List Bool}
+    (hevals :
+      ∀ st r,
+        (warpAt cta warp pc lanes ∗ predsFor cta warp lanes dst oldValues) st r →
+          EvalRValueBoolsFor st cta warp rhs lanes newValues) :
+    InstrSpec cta warp { guard? := none, instr := .assignPredValue dst rhs }
+      (warpAt cta warp pc lanes ∗ predsFor cta warp lanes dst oldValues)
+      (warpAt cta warp (pc.1, pc.2 + 1) lanes ∗
+        predsFor cta warp lanes dst newValues) := by
+  intro st r st' hpre hstep
+  have hevals' := hevals st r hpre
+  rcases hpre with ⟨rCtrl, rPreds, hcomp, hequiv, hctrl, hpreds⟩
+  rcases warpAt_state hctrl with ⟨warpState, hwarp, hlock, hrpc, hpart⟩
+  have hlanesStart : Helpers.runnableLaneIds warpState = lanes :=
+    Helpers.runnableLaneIds_eq_of_lockstep_participants_none hlock hpart
+  have hnodup : lanes.Nodup := by
+    rw [← hlanesStart]
+    exact Helpers.runnableLaneIds_nodup warpState
+  have hlockBool : Helpers.lockstepRunnable? warpState = true :=
+    (Helpers.lockstepRunnable_iff_bool warpState).1 hlock
+  have hpartOpt : Helpers.participatingRunnableLaneIds? warpState none = some lanes :=
+    (Helpers.participatingRunnable_iff_bool warpState none lanes).1 hpart
+  unfold Helpers.stepInstr? at hstep
+  simp [hwarp, hlockBool, hpartOpt] at hstep
+  cases hcore :
+      Helpers.applyToLaneIds? st cta warp lanes
+        (fun lane laneState =>
+          (Helpers.evalRValue? st cta warp lane rhs).bind fun value =>
+            (Helpers.valueToBool? value).bind fun b =>
+              some (Helpers.writePred laneState dst b)) with
+  | none =>
+      rw [hcore] at hstep
+      simp at hstep
+  | some stCore =>
+      rw [hcore] at hstep
+      simp at hstep
+      have hfactsCore : PredsUpdateFacts stCore cta warp dst lanes newValues :=
+        PredsUpdateFacts.of_applyAssignPredValue hnodup hevals' hcore
+      have hfactsFinal : PredsUpdateFacts st' cta warp dst lanes newValues :=
+        PredsUpdateFacts.of_advance hfactsCore hstep
+      rcases StateResourceUpdate.predsFor hfactsFinal rPreds hpreds with
+        ⟨rPreds', hupdatePreds, hpreds'⟩
+      rcases Helpers.applyToLaneIds?_warp_control_eq
+          (hpres := by
+            intro lane old new hf
+            cases heval : Helpers.evalRValue? st cta warp lane rhs with
+            | none =>
+                simp [heval] at hf
+            | some raw =>
+                cases hbool : Helpers.valueToBool? raw with
+                | none =>
+                    simp [heval, hbool] at hf
+                | some b =>
+                    simp [heval, hbool] at hf
+                    subst new
+                    simp [Helpers.writePred])
+          hwarp hlock hrpc hcore with
+        ⟨warpCore, hwarpCore, hlockCore, hrpcCore⟩
+      rcases Helpers.applyToLaneIds?_runnableLaneIds_eq
+          (hpres := by
+            intro lane old new hf
+            cases heval : Helpers.evalRValue? st cta warp lane rhs with
+            | none =>
+                simp [heval] at hf
+            | some raw =>
+                cases hbool : Helpers.valueToBool? raw with
+                | none =>
+                    simp [heval, hbool] at hf
+                | some b =>
+                    simp [heval, hbool] at hf
+                    subst new
+                    simp [Helpers.writePred])
+          hwarp hcore with
+        ⟨warpCoreRun, hwarpCoreRun, hrunCore⟩
+      have hwarpCoreEq : warpCoreRun = warpCore := by
+        apply Option.some.inj
+        rw [← hwarpCoreRun]
+        exact hwarpCore
+      subst warpCoreRun
+      rcases Helpers.advanceRunnablePcs?_warp_control hwarpCore hlockCore hrpcCore hstep with
+        ⟨warpFinal, hwarpFinal, hlockFinal, hrpcFinal⟩
+      rcases Helpers.advanceRunnablePcs?_runnableLaneIds_eq hwarpCore hlockCore hrpcCore hstep with
+        ⟨warpFinalRun, hwarpFinalRun, hrunFinalCore⟩
+      have hwarpFinalEq : warpFinalRun = warpFinal := by
+        apply Option.some.inj
+        rw [← hwarpFinalRun]
+        exact hwarpFinal
+      subst warpFinalRun
+      have hrunFinal : Helpers.runnableLaneIds warpFinal = lanes := by
+        rw [hrunFinalCore, hrunCore, hlanesStart]
+      have hpartFinal : Helpers.ParticipatingRunnable warpFinal none lanes := by
+        unfold Helpers.ParticipatingRunnable
+        rw [Helpers.participatingRunnable_none_eq_runnableLaneIds_of_lockstep
+          hlockFinal hrpcFinal]
+        rw [hrunFinal]
+      have hctrlFinal :
+          warpAt cta warp (pc.1, pc.2 + 1) lanes st' CSL.Resource.empty :=
+        ⟨⟨warpFinal, hwarpFinal, hlockFinal, hrpcFinal, hpartFinal⟩, rfl⟩
+      have hemp : CSL.emp st rCtrl := stateProp_emp hctrl
+      subst rCtrl
+      refine ⟨CSL.Resource.compose CSL.Resource.empty rPreds', ?_, ?_⟩
+      · exact CSL.Resource.update_trans (CSL.Resource.update_of_equiv hequiv)
+          (CSL.Resource.update_compose (CSL.Resource.update_refl _) hupdatePreds)
+      · exact ⟨CSL.Resource.empty, rPreds',
+          by simp [CSL.Resource.canCompose, CSL.Resource.empty],
+          CSL.Resource.equiv_refl _, hctrlFinal, hpreds'⟩
+
 theorem loadSpec_of_computed
     {cta : CTAId} {warp : WarpId} {guard? : Option Guard} {dst : RegName}
     {src : TypedAddr} {st₀ st₁ : State} {pre post : CSL.Assertion}
@@ -7690,7 +8315,7 @@ theorem globalStorePreservesReadReg_single_warpAt
     (hstep :
       Helpers.stepInstr? st cta warp
         { guard? := none,
-          instr := .store { space := .global, ty := ty, addr := addrExpr } valueExpr } =
+                  instr := .store { space := .global, ty := ty, addr := addrExpr } valueExpr } =
         some st') :
     CSL.reg cta warp lane src srcValue st' rSrc := by
   rcases warpAt_state hctrl with ⟨warpState, hwarp, hlock, _hrpc, hpart⟩
@@ -7711,6 +8336,43 @@ theorem globalStorePreservesReadReg_single_warpAt
   rcases Helpers.advanceRunnablePcs?_lane_nonPc_eq hlaneCore hstep with
     ⟨laneStateFinal, hlaneFinal, _hlocal, hregs, _hpreds⟩
   exact ⟨hsrcOwns, laneStateFinal, hlaneFinal, by simpa [hregs] using hsrcRead⟩
+
+theorem globalStorePreservesPred_single_warpAt
+    {cta : CTAId} {warp : WarpId} {pc : PC} {pred : PredName}
+    {ty : ScalarTy} {addrExpr valueExpr : RValue} {lane : LaneId}
+    {offset : Nat} {value : Value} {predValue : Bool}
+    {st stCore st' : State} {rCtrl rPred : CSL.Resource}
+    (hctrl : warpAt cta warp pc [lane] st rCtrl)
+    (hpred : CSL.pred cta warp lane pred predValue st rPred)
+    (haddr :
+      ResolvesAddr st { cta := cta, warp := warp, lane := lane }
+        { space := .global, ty := ty, addr := addrExpr } (.global offset))
+    (heval : EvalRValue st { cta := cta, warp := warp, lane := lane } valueExpr value)
+    (hwrite : WriteMemFact st .global ty (.global offset) value stCore)
+    (hstep :
+      Helpers.stepInstr? st cta warp
+        { guard? := none,
+          instr := .store { space := .global, ty := ty, addr := addrExpr } valueExpr } =
+        some st') :
+    CSL.pred cta warp lane pred predValue st' rPred := by
+  rcases warpAt_state hctrl with ⟨warpState, hwarp, hlock, _hrpc, hpart⟩
+  rcases hpred with ⟨hpredOwns, laneState, hlane, hpredRead⟩
+  have hlockBool : Helpers.lockstepRunnable? warpState = true :=
+    (Helpers.lockstepRunnable_iff_bool warpState).1 hlock
+  have hpartOpt : Helpers.participatingRunnableLaneIds? warpState none = some [lane] :=
+    (Helpers.participatingRunnable_iff_bool warpState none [lane]).1 hpart
+  unfold Helpers.stepInstr? at hstep
+  simp [hwarp, hlockBool, hpartOpt] at hstep
+  unfold ResolvesAddr at haddr
+  unfold EvalRValue at heval
+  unfold WriteMemFact at hwrite
+  simp [Helpers.stepStoreLanes?, haddr, heval, hwrite] at hstep
+  have hlaneCore : stCore.getLane? cta warp lane = some laneState := by
+    rw [WriteMemFact.global_getLane_eq (by exact hwrite) cta warp lane]
+    exact hlane
+  rcases Helpers.advanceRunnablePcs?_lane_nonPc_eq hlaneCore hstep with
+    ⟨laneStateFinal, hlaneFinal, _hlocal, _hregs, hpreds⟩
+  exact ⟨hpredOwns, laneStateFinal, hlaneFinal, by simpa [hpreds] using hpredRead⟩
 
 theorem globalStoreBytesSpec_single_warpAt_readReg
     {cta : CTAId} {warp : WarpId} {pc : PC} {src : RegName}
@@ -9106,6 +9768,308 @@ theorem globalLoadBytesRegSpec_lanes_warpAt
                 simp [haddr] at hf
             | some addr =>
                 cases hread : Helpers.readMem? st .global ty addr with
+                | none =>
+                    simp [haddr, hread] at hf
+                | some value =>
+                    simp [haddr, hread] at hf
+                    subst new
+                    simp [Helpers.writeReg])
+          hwarp hcore with
+        ⟨warpCoreRun, hwarpCoreRun, hrunCore⟩
+      have hwarpCoreEq : warpCoreRun = warpCore := by
+        apply Option.some.inj
+        rw [← hwarpCoreRun]
+        exact hwarpCore
+      subst warpCoreRun
+      rcases Helpers.advanceRunnablePcs?_warp_control hwarpCore hlockCore hrpcCore hstep with
+        ⟨warpFinal, hwarpFinal, hlockFinal, hrpcFinal⟩
+      rcases Helpers.advanceRunnablePcs?_runnableLaneIds_eq hwarpCore hlockCore hrpcCore hstep with
+        ⟨warpFinalRun, hwarpFinalRun, hrunFinalCore⟩
+      have hwarpFinalEq : warpFinalRun = warpFinal := by
+        apply Option.some.inj
+        rw [← hwarpFinalRun]
+        exact hwarpFinal
+      subst warpFinalRun
+      have hrunFinal : Helpers.runnableLaneIds warpFinal = lanes := by
+        rw [hrunFinalCore, hrunCore, hlanesStart]
+      have hpartFinal : Helpers.ParticipatingRunnable warpFinal none lanes := by
+        unfold Helpers.ParticipatingRunnable
+        rw [Helpers.participatingRunnable_none_eq_runnableLaneIds_of_lockstep
+          hlockFinal hrpcFinal]
+        rw [hrunFinal]
+      have hctrlFinal :
+          warpAt cta warp (pc.1, pc.2 + 1) lanes st' CSL.Resource.empty :=
+        ⟨⟨warpFinal, hwarpFinal, hlockFinal, hrpcFinal, hpartFinal⟩, rfl⟩
+      have hemp : CSL.emp st rCtrl := stateProp_emp hctrl
+      subst rCtrl
+      have hupdateRest :
+          CSL.Resource.Update rRest (CSL.Resource.compose rMem' rRegs') :=
+        CSL.Resource.update_trans (CSL.Resource.update_of_equiv hequivRest)
+          (CSL.Resource.update_compose hupdateMem hupdateRegs)
+      refine ⟨CSL.Resource.compose CSL.Resource.empty
+          (CSL.Resource.compose rMem' rRegs'), ?_, ?_⟩
+      · exact CSL.Resource.update_trans (CSL.Resource.update_of_equiv hequiv)
+          (CSL.Resource.update_compose (CSL.Resource.update_refl _) hupdateRest)
+      · exact ⟨CSL.Resource.empty, CSL.Resource.compose rMem' rRegs',
+          by simp [CSL.Resource.canCompose, CSL.Resource.empty],
+          CSL.Resource.equiv_refl _, hctrlFinal,
+          ⟨rMem', rRegs',
+            CSL.Resource.canCompose_update_right hupdateRegs
+              (CSL.Resource.canCompose_update_left hupdateMem hcompRest),
+            CSL.Resource.equiv_refl _, hbytes', hregs'⟩⟩
+
+theorem paramLoadBytesRegSpec_lanes_warpAt
+    {cta : CTAId} {warp : WarpId} {pc : PC} {dst : RegName}
+    {ty : ScalarTy} {addrExpr : RValue}
+    {lanes : List LaneId} {offsets : List Nat} {byteSlices : List (List Byte)}
+    {oldValues newValues : List Value}
+    (haddrs :
+      ∀ st r,
+        (warpAt cta warp pc lanes ∗
+          (paramSlices offsets byteSlices ∗
+            regsFor cta warp lanes dst oldValues)) st r →
+          ResolvesParamAddrsFor st cta warp
+            { space := .param, ty := ty, addr := addrExpr } lanes offsets)
+    (hreads :
+      ∀ st r,
+        (warpAt cta warp pc lanes ∗
+          (paramSlices offsets byteSlices ∗
+            regsFor cta warp lanes dst oldValues)) st r →
+          ReadParamValuesFor st ty offsets newValues) :
+    InstrSpec cta warp
+      { guard? := none, instr := .load dst { space := .param, ty := ty, addr := addrExpr } }
+      (warpAt cta warp pc lanes ∗
+        (paramSlices offsets byteSlices ∗
+          regsFor cta warp lanes dst oldValues))
+      (warpAt cta warp (pc.1, pc.2 + 1) lanes ∗
+        (paramSlices offsets byteSlices ∗
+          regsFor cta warp lanes dst newValues)) := by
+  intro st r st' hpre hstep
+  have haddrs' := haddrs st r hpre
+  have hreads' := hreads st r hpre
+  rcases hpre with ⟨rCtrl, rRest, hcomp, hequiv, hctrl, hrest⟩
+  rcases hrest with ⟨rMem, rRegs, hcompRest, hequivRest, hbytes, hregs⟩
+  rcases warpAt_state hctrl with ⟨warpState, hwarp, hlock, hrpc, hpart⟩
+  have hlanesStart : Helpers.runnableLaneIds warpState = lanes :=
+    Helpers.runnableLaneIds_eq_of_lockstep_participants_none hlock hpart
+  have hnodup : lanes.Nodup := by
+    rw [← hlanesStart]
+    exact Helpers.runnableLaneIds_nodup warpState
+  have hlockBool : Helpers.lockstepRunnable? warpState = true :=
+    (Helpers.lockstepRunnable_iff_bool warpState).1 hlock
+  have hpartOpt : Helpers.participatingRunnableLaneIds? warpState none = some lanes :=
+    (Helpers.participatingRunnable_iff_bool warpState none lanes).1 hpart
+  unfold Helpers.stepInstr? at hstep
+  simp [hwarp, hlockBool, hpartOpt] at hstep
+  cases hcore :
+      Helpers.applyToLaneIds? st cta warp lanes
+        (fun lane laneState =>
+          (Helpers.resolveAddr? st cta warp lane
+              { space := .param, ty := ty, addr := addrExpr }).bind fun addr =>
+            (Helpers.readMem? st .param ty addr).bind fun value =>
+              some (Helpers.writeReg laneState dst value)) with
+  | none =>
+      rw [hcore] at hstep
+      simp at hstep
+  | some stCore =>
+      rw [hcore] at hstep
+      simp at hstep
+      have hfactsCore : RegsUpdateFacts stCore cta warp dst lanes newValues :=
+        RegsUpdateFacts.of_applyParamLoad hnodup haddrs' hreads' hcore
+      have hfactsFinal : RegsUpdateFacts st' cta warp dst lanes newValues :=
+        RegsUpdateFacts.of_advance hfactsCore hstep
+      rcases StateResourceUpdate.regsFor hfactsFinal rRegs hregs with
+        ⟨rRegs', hupdateRegs, hregs'⟩
+      have hparamCore : stCore.param = st.param :=
+        Helpers.applyToLaneIds?_param_eq hcore
+      have hparamFinal : st'.param = stCore.param :=
+        Helpers.advanceRunnablePcs?_param_eq hstep
+      have hparam : st'.param = st.param :=
+        hparamFinal.trans hparamCore
+      have hsliceFacts : ParamSlicesUpdateFacts st' offsets byteSlices :=
+        ParamSlicesUpdateFacts.of_param_eq hparam
+          (ParamSlicesUpdateFacts.of_paramSlices hbytes)
+      rcases StateResourceUpdate.paramSlices hsliceFacts rMem hbytes with
+        ⟨rMem', hupdateMem, hbytes'⟩
+      rcases Helpers.applyToLaneIds?_warp_control_eq
+          (hpres := by
+            intro lane old new hf
+            cases haddr :
+                Helpers.resolveAddr? st cta warp lane
+                  { space := .param, ty := ty, addr := addrExpr } with
+            | none =>
+                simp [haddr] at hf
+            | some addr =>
+                cases hread : Helpers.readMem? st .param ty addr with
+                | none =>
+                    simp [haddr, hread] at hf
+                | some value =>
+                    simp [haddr, hread] at hf
+                    subst new
+                    simp [Helpers.writeReg])
+          hwarp hlock hrpc hcore with
+        ⟨warpCore, hwarpCore, hlockCore, hrpcCore⟩
+      rcases Helpers.applyToLaneIds?_runnableLaneIds_eq
+          (hpres := by
+            intro lane old new hf
+            cases haddr :
+                Helpers.resolveAddr? st cta warp lane
+                  { space := .param, ty := ty, addr := addrExpr } with
+            | none =>
+                simp [haddr] at hf
+            | some addr =>
+                cases hread : Helpers.readMem? st .param ty addr with
+                | none =>
+                    simp [haddr, hread] at hf
+                | some value =>
+                    simp [haddr, hread] at hf
+                    subst new
+                    simp [Helpers.writeReg])
+          hwarp hcore with
+        ⟨warpCoreRun, hwarpCoreRun, hrunCore⟩
+      have hwarpCoreEq : warpCoreRun = warpCore := by
+        apply Option.some.inj
+        rw [← hwarpCoreRun]
+        exact hwarpCore
+      subst warpCoreRun
+      rcases Helpers.advanceRunnablePcs?_warp_control hwarpCore hlockCore hrpcCore hstep with
+        ⟨warpFinal, hwarpFinal, hlockFinal, hrpcFinal⟩
+      rcases Helpers.advanceRunnablePcs?_runnableLaneIds_eq hwarpCore hlockCore hrpcCore hstep with
+        ⟨warpFinalRun, hwarpFinalRun, hrunFinalCore⟩
+      have hwarpFinalEq : warpFinalRun = warpFinal := by
+        apply Option.some.inj
+        rw [← hwarpFinalRun]
+        exact hwarpFinal
+      subst warpFinalRun
+      have hrunFinal : Helpers.runnableLaneIds warpFinal = lanes := by
+        rw [hrunFinalCore, hrunCore, hlanesStart]
+      have hpartFinal : Helpers.ParticipatingRunnable warpFinal none lanes := by
+        unfold Helpers.ParticipatingRunnable
+        rw [Helpers.participatingRunnable_none_eq_runnableLaneIds_of_lockstep
+          hlockFinal hrpcFinal]
+        rw [hrunFinal]
+      have hctrlFinal :
+          warpAt cta warp (pc.1, pc.2 + 1) lanes st' CSL.Resource.empty :=
+        ⟨⟨warpFinal, hwarpFinal, hlockFinal, hrpcFinal, hpartFinal⟩, rfl⟩
+      have hemp : CSL.emp st rCtrl := stateProp_emp hctrl
+      subst rCtrl
+      have hupdateRest :
+          CSL.Resource.Update rRest (CSL.Resource.compose rMem' rRegs') :=
+        CSL.Resource.update_trans (CSL.Resource.update_of_equiv hequivRest)
+          (CSL.Resource.update_compose hupdateMem hupdateRegs)
+      refine ⟨CSL.Resource.compose CSL.Resource.empty
+          (CSL.Resource.compose rMem' rRegs'), ?_, ?_⟩
+      · exact CSL.Resource.update_trans (CSL.Resource.update_of_equiv hequiv)
+          (CSL.Resource.update_compose (CSL.Resource.update_refl _) hupdateRest)
+      · exact ⟨CSL.Resource.empty, CSL.Resource.compose rMem' rRegs',
+          by simp [CSL.Resource.canCompose, CSL.Resource.empty],
+          CSL.Resource.equiv_refl _, hctrlFinal,
+          ⟨rMem', rRegs',
+            CSL.Resource.canCompose_update_right hupdateRegs
+              (CSL.Resource.canCompose_update_left hupdateMem hcompRest),
+            CSL.Resource.equiv_refl _, hbytes', hregs'⟩⟩
+
+theorem constLoadBytesRegSpec_lanes_warpAt
+    {cta : CTAId} {warp : WarpId} {pc : PC} {dst : RegName}
+    {ty : ScalarTy} {addrExpr : RValue}
+    {lanes : List LaneId} {offsets : List Nat} {byteSlices : List (List Byte)}
+    {oldValues newValues : List Value}
+    (haddrs :
+      ∀ st r,
+        (warpAt cta warp pc lanes ∗
+          (constSlices offsets byteSlices ∗
+            regsFor cta warp lanes dst oldValues)) st r →
+          ResolvesConstAddrsFor st cta warp
+            { space := .const, ty := ty, addr := addrExpr } lanes offsets)
+    (hreads :
+      ∀ st r,
+        (warpAt cta warp pc lanes ∗
+          (constSlices offsets byteSlices ∗
+            regsFor cta warp lanes dst oldValues)) st r →
+          ReadConstValuesFor st ty offsets newValues) :
+    InstrSpec cta warp
+      { guard? := none, instr := .load dst { space := .const, ty := ty, addr := addrExpr } }
+      (warpAt cta warp pc lanes ∗
+        (constSlices offsets byteSlices ∗
+          regsFor cta warp lanes dst oldValues))
+      (warpAt cta warp (pc.1, pc.2 + 1) lanes ∗
+        (constSlices offsets byteSlices ∗
+          regsFor cta warp lanes dst newValues)) := by
+  intro st r st' hpre hstep
+  have haddrs' := haddrs st r hpre
+  have hreads' := hreads st r hpre
+  rcases hpre with ⟨rCtrl, rRest, hcomp, hequiv, hctrl, hrest⟩
+  rcases hrest with ⟨rMem, rRegs, hcompRest, hequivRest, hbytes, hregs⟩
+  rcases warpAt_state hctrl with ⟨warpState, hwarp, hlock, hrpc, hpart⟩
+  have hlanesStart : Helpers.runnableLaneIds warpState = lanes :=
+    Helpers.runnableLaneIds_eq_of_lockstep_participants_none hlock hpart
+  have hnodup : lanes.Nodup := by
+    rw [← hlanesStart]
+    exact Helpers.runnableLaneIds_nodup warpState
+  have hlockBool : Helpers.lockstepRunnable? warpState = true :=
+    (Helpers.lockstepRunnable_iff_bool warpState).1 hlock
+  have hpartOpt : Helpers.participatingRunnableLaneIds? warpState none = some lanes :=
+    (Helpers.participatingRunnable_iff_bool warpState none lanes).1 hpart
+  unfold Helpers.stepInstr? at hstep
+  simp [hwarp, hlockBool, hpartOpt] at hstep
+  cases hcore :
+      Helpers.applyToLaneIds? st cta warp lanes
+        (fun lane laneState =>
+          (Helpers.resolveAddr? st cta warp lane
+              { space := .const, ty := ty, addr := addrExpr }).bind fun addr =>
+            (Helpers.readMem? st .const ty addr).bind fun value =>
+              some (Helpers.writeReg laneState dst value)) with
+  | none =>
+      rw [hcore] at hstep
+      simp at hstep
+  | some stCore =>
+      rw [hcore] at hstep
+      simp at hstep
+      have hfactsCore : RegsUpdateFacts stCore cta warp dst lanes newValues :=
+        RegsUpdateFacts.of_applyConstLoad hnodup haddrs' hreads' hcore
+      have hfactsFinal : RegsUpdateFacts st' cta warp dst lanes newValues :=
+        RegsUpdateFacts.of_advance hfactsCore hstep
+      rcases StateResourceUpdate.regsFor hfactsFinal rRegs hregs with
+        ⟨rRegs', hupdateRegs, hregs'⟩
+      have hconstCore : stCore.const = st.const :=
+        Helpers.applyToLaneIds?_const_eq hcore
+      have hconstFinal : st'.const = stCore.const :=
+        Helpers.advanceRunnablePcs?_const_eq hstep
+      have hconst : st'.const = st.const :=
+        hconstFinal.trans hconstCore
+      have hsliceFacts : ConstSlicesUpdateFacts st' offsets byteSlices :=
+        ConstSlicesUpdateFacts.of_const_eq hconst
+          (ConstSlicesUpdateFacts.of_constSlices hbytes)
+      rcases StateResourceUpdate.constSlices hsliceFacts rMem hbytes with
+        ⟨rMem', hupdateMem, hbytes'⟩
+      rcases Helpers.applyToLaneIds?_warp_control_eq
+          (hpres := by
+            intro lane old new hf
+            cases haddr :
+                Helpers.resolveAddr? st cta warp lane
+                  { space := .const, ty := ty, addr := addrExpr } with
+            | none =>
+                simp [haddr] at hf
+            | some addr =>
+                cases hread : Helpers.readMem? st .const ty addr with
+                | none =>
+                    simp [haddr, hread] at hf
+                | some value =>
+                    simp [haddr, hread] at hf
+                    subst new
+                    simp [Helpers.writeReg])
+          hwarp hlock hrpc hcore with
+        ⟨warpCore, hwarpCore, hlockCore, hrpcCore⟩
+      rcases Helpers.applyToLaneIds?_runnableLaneIds_eq
+          (hpres := by
+            intro lane old new hf
+            cases haddr :
+                Helpers.resolveAddr? st cta warp lane
+                  { space := .const, ty := ty, addr := addrExpr } with
+            | none =>
+                simp [haddr] at hf
+            | some addr =>
+                cases hread : Helpers.readMem? st .const ty addr with
                 | none =>
                     simp [haddr, hread] at hf
                 | some value =>
@@ -12267,6 +13231,53 @@ theorem wp_assignPredValue_single_warpAt_stableFrame
           (CSL.pred cta warp lane dst new ∗ frame)) :=
   wpInstr_of_spec (assignPredValueSpec_single_warpAt_stableFrame heval hbool hframe)
 
+theorem wp_assignPredValue_lanes_warpAt
+    {cta : CTAId} {warp : WarpId} {pc : PC} {dst : PredName}
+    {rhs : RValue} {lanes : List LaneId} {oldValues newValues : List Bool}
+    (hevals :
+      ∀ st r,
+        (warpAt cta warp pc lanes ∗ predsFor cta warp lanes dst oldValues) st r →
+          EvalRValueBoolsFor st cta warp rhs lanes newValues) :
+    (warpAt cta warp pc lanes ∗ predsFor cta warp lanes dst oldValues) ⊢ₛ
+      wpInstr cta warp { guard? := none, instr := .assignPredValue dst rhs }
+        (warpAt cta warp (pc.1, pc.2 + 1) lanes ∗
+          predsFor cta warp lanes dst newValues) :=
+  wpInstr_of_spec (assignPredValueSpec_lanes_warpAt hevals)
+
+theorem wp_assignPredValue_lanes_warpAt_frame
+    {cta : CTAId} {warp : WarpId} {pc : PC} {dst : PredName}
+    {rhs : RValue} {lanes : List LaneId} {oldValues newValues : List Bool}
+    {frame : CSL.Assertion}
+    (hevals :
+      ∀ st r,
+        (warpAt cta warp pc lanes ∗ predsFor cta warp lanes dst oldValues) st r →
+          EvalRValueBoolsFor st cta warp rhs lanes newValues)
+    (hframe :
+      CSL.StableUnder
+        (InstrStep cta warp { guard? := none, instr := .assignPredValue dst rhs }) frame) :
+    ((warpAt cta warp pc lanes ∗ predsFor cta warp lanes dst oldValues) ∗ frame) ⊢ₛ
+      wpInstr cta warp { guard? := none, instr := .assignPredValue dst rhs }
+        ((warpAt cta warp (pc.1, pc.2 + 1) lanes ∗
+          predsFor cta warp lanes dst newValues) ∗ frame) :=
+  wpInstr_frame_of_entails (wp_assignPredValue_lanes_warpAt hevals) hframe
+
+theorem wp_assignPredValue_lanes_warpAt_stableFrame
+    {cta : CTAId} {warp : WarpId} {pc : PC} {dst : PredName}
+    {rhs : RValue} {lanes : List LaneId} {oldValues newValues : List Bool}
+    {frame : CSL.Assertion}
+    (hevals :
+      ∀ st r,
+        (warpAt cta warp pc lanes ∗ predsFor cta warp lanes dst oldValues) st r →
+          EvalRValueBoolsFor st cta warp rhs lanes newValues)
+    (hframe :
+      CSL.StableUnder
+        (InstrStep cta warp { guard? := none, instr := .assignPredValue dst rhs }) frame) :
+    ((warpAt cta warp pc lanes ∗ predsFor cta warp lanes dst oldValues) ∗ frame) ⊢ₛ
+      wpInstr cta warp { guard? := none, instr := .assignPredValue dst rhs }
+        ((warpAt cta warp (pc.1, pc.2 + 1) lanes ∗
+          predsFor cta warp lanes dst newValues) ∗ frame) :=
+  wp_assignPredValue_lanes_warpAt_frame hevals hframe
+
 theorem wp_globalStoreBytes_single_warpAt
     {cta : CTAId} {warp : WarpId} {pc : PC}
     {ty : ScalarTy} {addrExpr valueExpr : RValue} {lane : LaneId}
@@ -13784,6 +14795,34 @@ theorem wp_paramLoadBytesReg_single_warpAt
           (CSL.paramBytes offset bytes ∗ CSL.reg cta warp lane dst value)) :=
   wpInstr_of_spec (paramLoadBytesRegSpec_single_warpAt haddr hread)
 
+theorem wp_paramLoadBytesReg_lanes_warpAt
+    {cta : CTAId} {warp : WarpId} {pc : PC} {dst : RegName}
+    {ty : ScalarTy} {addrExpr : RValue}
+    {lanes : List LaneId} {offsets : List Nat} {byteSlices : List (List Byte)}
+    {oldValues newValues : List Value}
+    (haddrs :
+      ∀ st r,
+        (warpAt cta warp pc lanes ∗
+          (paramSlices offsets byteSlices ∗
+            regsFor cta warp lanes dst oldValues)) st r →
+          ResolvesParamAddrsFor st cta warp
+            { space := .param, ty := ty, addr := addrExpr } lanes offsets)
+    (hreads :
+      ∀ st r,
+        (warpAt cta warp pc lanes ∗
+          (paramSlices offsets byteSlices ∗
+            regsFor cta warp lanes dst oldValues)) st r →
+          ReadParamValuesFor st ty offsets newValues) :
+    (warpAt cta warp pc lanes ∗
+      (paramSlices offsets byteSlices ∗
+        regsFor cta warp lanes dst oldValues)) ⊢ₛ
+      wpInstr cta warp
+        { guard? := none, instr := .load dst { space := .param, ty := ty, addr := addrExpr } }
+        (warpAt cta warp (pc.1, pc.2 + 1) lanes ∗
+          (paramSlices offsets byteSlices ∗
+            regsFor cta warp lanes dst newValues)) :=
+  wpInstr_of_spec (paramLoadBytesRegSpec_lanes_warpAt haddrs hreads)
+
 theorem wp_constLoadBytesReg_single_warpAt
     {cta : CTAId} {warp : WarpId} {pc : PC} {dst : RegName}
     {ty : ScalarTy} {addrExpr : RValue} {lane : LaneId}
@@ -13806,6 +14845,34 @@ theorem wp_constLoadBytesReg_single_warpAt
         (warpAt cta warp (pc.1, pc.2 + 1) [lane] ∗
           (CSL.constBytes offset bytes ∗ CSL.reg cta warp lane dst value)) :=
   wpInstr_of_spec (constLoadBytesRegSpec_single_warpAt haddr hread)
+
+theorem wp_constLoadBytesReg_lanes_warpAt
+    {cta : CTAId} {warp : WarpId} {pc : PC} {dst : RegName}
+    {ty : ScalarTy} {addrExpr : RValue}
+    {lanes : List LaneId} {offsets : List Nat} {byteSlices : List (List Byte)}
+    {oldValues newValues : List Value}
+    (haddrs :
+      ∀ st r,
+        (warpAt cta warp pc lanes ∗
+          (constSlices offsets byteSlices ∗
+            regsFor cta warp lanes dst oldValues)) st r →
+          ResolvesConstAddrsFor st cta warp
+            { space := .const, ty := ty, addr := addrExpr } lanes offsets)
+    (hreads :
+      ∀ st r,
+        (warpAt cta warp pc lanes ∗
+          (constSlices offsets byteSlices ∗
+            regsFor cta warp lanes dst oldValues)) st r →
+          ReadConstValuesFor st ty offsets newValues) :
+    (warpAt cta warp pc lanes ∗
+      (constSlices offsets byteSlices ∗
+        regsFor cta warp lanes dst oldValues)) ⊢ₛ
+      wpInstr cta warp
+        { guard? := none, instr := .load dst { space := .const, ty := ty, addr := addrExpr } }
+        (warpAt cta warp (pc.1, pc.2 + 1) lanes ∗
+          (constSlices offsets byteSlices ∗
+            regsFor cta warp lanes dst newValues)) :=
+  wpInstr_of_spec (constLoadBytesRegSpec_lanes_warpAt haddrs hreads)
 
 theorem wp_cvta_single_warpAt
     {cta : CTAId} {warp : WarpId} {pc : PC} {dst : RegName}
@@ -14092,6 +15159,40 @@ theorem InstrSpec.frame
       (CSL.Resource.update_compose_right hupdate)
   · exact ⟨r₁', r₂, CSL.Resource.canCompose_update_left hupdate hcomp,
       CSL.Resource.equiv_refl _, hpost, hframe st st' r₂ hstep hframeSt⟩
+
+theorem assignPredValueSpec_lanes_warpAt_frame
+    {cta : CTAId} {warp : WarpId} {pc : PC} {dst : PredName}
+    {rhs : RValue} {lanes : List LaneId} {oldValues newValues : List Bool}
+    {frame : CSL.Assertion}
+    (hevals :
+      ∀ st r,
+        (warpAt cta warp pc lanes ∗ predsFor cta warp lanes dst oldValues) st r →
+          EvalRValueBoolsFor st cta warp rhs lanes newValues)
+    (hframe :
+      CSL.StableUnder
+        (InstrStep cta warp { guard? := none, instr := .assignPredValue dst rhs }) frame) :
+    InstrSpec cta warp { guard? := none, instr := .assignPredValue dst rhs }
+      ((warpAt cta warp pc lanes ∗ predsFor cta warp lanes dst oldValues) ∗ frame)
+      ((warpAt cta warp (pc.1, pc.2 + 1) lanes ∗
+        predsFor cta warp lanes dst newValues) ∗ frame) :=
+  InstrSpec.frame (assignPredValueSpec_lanes_warpAt hevals) hframe
+
+theorem assignPredValueSpec_lanes_warpAt_stableFrame
+    {cta : CTAId} {warp : WarpId} {pc : PC} {dst : PredName}
+    {rhs : RValue} {lanes : List LaneId} {oldValues newValues : List Bool}
+    {frame : CSL.Assertion}
+    (hevals :
+      ∀ st r,
+        (warpAt cta warp pc lanes ∗ predsFor cta warp lanes dst oldValues) st r →
+          EvalRValueBoolsFor st cta warp rhs lanes newValues)
+    (hframe :
+      CSL.StableUnder
+        (InstrStep cta warp { guard? := none, instr := .assignPredValue dst rhs }) frame) :
+    InstrSpec cta warp { guard? := none, instr := .assignPredValue dst rhs }
+      ((warpAt cta warp pc lanes ∗ predsFor cta warp lanes dst oldValues) ∗ frame)
+      ((warpAt cta warp (pc.1, pc.2 + 1) lanes ∗
+        predsFor cta warp lanes dst newValues) ∗ frame) :=
+  assignPredValueSpec_lanes_warpAt_frame hevals hframe
 
 theorem InstrSpec.statePropFrame
     {cta : CTAId} {warp : WarpId} {gi : GInstr}

@@ -10,7 +10,7 @@ namespace Helpers
 private def intAbs (x : Int) : Int :=
   Int.ofNat x.natAbs
 
-private def normalizeSigned (bits : Nat) (x : Int) : Int :=
+def normalizeSigned (bits : Nat) (x : Int) : Int :=
   let signBit := 2 ^ (bits - 1)
   let modulus := 2 ^ bits
   let n := Int.toNat (x % Int.ofNat modulus)

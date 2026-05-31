@@ -252,12 +252,12 @@ example
 example
     {env : KernelEnv} {cta : CTAId} {warp : WarpId}
     {invariants : InvariantMap} {post : CSL.Assertion}
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgSuffixInvariant env cta warp invariants post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hterm : TermStepPreservesCFG env cta warp invariants post) :
     StepPreserves (cfgSuffixInvariant env cta warp invariants post) :=
-  StepPreserves.of_cfgSuffixInvariant honly hbody hterm
+  StepPreserves.of_cfgSuffixInvariant hselect hbody hterm
 
 example
     {spec : KernelSpec} {env : KernelEnv} {cta : CTAId} {warp : WarpId}
@@ -267,13 +267,13 @@ example
     (hpre : spec.pre spec.init spec.resource)
     (hpreInv :
       spec.pre ⊢ₛ cfgSuffixInvariant env cta warp invariants spec.post)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgSuffixInvariant env cta warp invariants spec.post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hterm : TermStepPreservesCFG env cta warp invariants spec.post)
     (hfinal : Finalizes (cfgSuffixInvariant env cta warp invariants spec.post) spec.post) :
     spec.Valid :=
-  KernelSpec.Valid.of_cfg_controls hinvariant hpre hpreInv honly hbody hterm hfinal
+  KernelSpec.Valid.of_cfg_controls hinvariant hpre hpreInv hselect hbody hterm hfinal
 
 example
     {st : State} {r : CSL.Resource} {pc : PC} {lanes : List LaneId}
@@ -1478,10 +1478,10 @@ example
 
 example
     {inv : CSL.Assertion}
-    (honly : ∀ {st st' : State}, StepMachine st st' → StepWarp st 0 0 st')
+    (hselect : StepMachineSelects inv 0 0)
     (hpres : StepWarpPreserves 0 0 inv) :
     StepPreserves inv :=
-  StepPreserves.of_stepWarpPreserves honly hpres
+  StepPreserves.of_stepWarpPreserves hselect hpres
 
 example
     {body : Array GInstr} {idx : Nat} {gi : GInstr}
@@ -1641,64 +1641,66 @@ example
 example
     {env : KernelEnv} {cta : CTAId} {warp : WarpId}
     {invariants : InvariantMap} {post : CSL.Assertion}
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hterm : TermStepPreservesKernel env cta warp invariants post)
     (hpost : StepBlockPreserves cta warp post) :
     StepPreserves (cfgKernelInvariant env cta warp invariants post) :=
-  StepPreserves.of_cfgKernelInvariant honly hbody hterm hpost
+  StepPreserves.of_cfgKernelInvariant hselect hbody hterm hpost
 
 example
     {env : KernelEnv} {cta : CTAId} {warp : WarpId} {choices : CbrChoiceMap}
     {invariants : InvariantMap} {post : CSL.Assertion}
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariantChoice env cta warp choices invariants post)
+        cta warp)
     (hbody : BodyStepControl env cta warp)
     (hterm : TermStepPreservesKernelChoice env cta warp choices invariants post)
     (hpost : StepBlockPreserves cta warp post) :
     StepPreserves (cfgKernelInvariantChoice env cta warp choices invariants post) :=
-  StepPreserves.of_cfgKernelInvariantChoice honly hbody hterm hpost
+  StepPreserves.of_cfgKernelInvariantChoice hselect hbody hterm hpost
 
 example
     {env : KernelEnv} {cta : CTAId} {warp : WarpId}
     {pre post : CSL.Assertion} {invariants : InvariantMap}
     (hvc : kernelVCs env cta warp pre post invariants)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hbr : BrTermControl env cta warp)
     (hcbr : CbrTermControl env cta warp)
     (hpost : StepBlockPreserves cta warp post) :
     StepPreserves (cfgKernelInvariant env cta warp invariants post) :=
-  StepPreserves.of_kernelVCs hvc honly hbody hbr hcbr hpost
+  StepPreserves.of_kernelVCs hvc hselect hbody hbr hcbr hpost
 
 example
     {env : KernelEnv} {cta : CTAId} {warp : WarpId} {choices : CbrChoiceMap}
     {pre post : CSL.Assertion} {invariants : InvariantMap}
     (hvc : kernelVCsChoice env cta warp choices pre post invariants)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariantChoice env cta warp choices invariants post)
+        cta warp)
     (hbody : BodyStepControl env cta warp)
     (hbr : BrTermControl env cta warp)
     (hcbr : CbrChoiceTermControl env cta warp choices)
     (hpost : StepBlockPreserves cta warp post) :
     StepPreserves (cfgKernelInvariantChoice env cta warp choices invariants post) :=
-  StepPreserves.of_choiceKernelVCs hvc honly hbody hbr hcbr hpost
+  StepPreserves.of_choiceKernelVCs hvc hselect hbody hbr hcbr hpost
 
 example
     {env : KernelEnv} {cta : CTAId} {warp : WarpId}
     {pre post : CSL.Assertion} {invariants : InvariantMap}
     (hvc : kernelVCs env cta warp pre post invariants)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (htargets : CFGTerminatorTargetsExist env)
     (hbr : BrSemanticControl env cta warp)
     (hcbr : CbrSemanticControl env cta warp)
     (hpost : StepBlockPreserves cta warp post) :
     StepPreserves (cfgKernelInvariant env cta warp invariants post) :=
-  StepPreserves.of_kernelVCs_targets hvc honly hbody htargets hbr hcbr hpost
+  StepPreserves.of_kernelVCs_targets hvc hselect hbody htargets hbr hcbr hpost
 
 example
     {env : KernelEnv} {cta : CTAId} {warp : WarpId}
@@ -1750,15 +1752,15 @@ example
     (hvc : kernelVCs env cta warp spec.pre spec.post invariants)
     (hentryReady : EntryReady env cta warp spec.pre)
     (hpre : spec.pre spec.init spec.resource)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants spec.post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hterm : TermStepPreservesKernel env cta warp invariants spec.post)
     (hpost : StepBlockPreserves cta warp spec.post)
     (hfinal : Finalizes (cfgKernelInvariant env cta warp invariants spec.post) spec.post) :
     spec.Valid :=
   KernelSpec.Valid.of_kernelVCs
-    hinvariant hvc hentryReady hpre honly hbody hterm hpost hfinal
+    hinvariant hvc hentryReady hpre hselect hbody hterm hpost hfinal
 
 example
     {spec : KernelSpec} {env : KernelEnv} {cta : CTAId} {warp : WarpId}
@@ -1768,8 +1770,9 @@ example
     (hvc : kernelVCsChoice env cta warp choices spec.pre spec.post invariants)
     (hentryReady : EntryReady env cta warp spec.pre)
     (hpre : spec.pre spec.init spec.resource)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariantChoice env cta warp choices invariants spec.post)
+        cta warp)
     (hbody : BodyStepControl env cta warp)
     (hbr : BrTermControl env cta warp)
     (hcbr : CbrChoiceTermControl env cta warp choices)
@@ -1779,7 +1782,7 @@ example
         spec.post) :
     spec.Valid :=
   KernelSpec.Valid.of_choiceKernelVCs
-    hinvariant hvc hentryReady hpre honly hbody hbr hcbr hpost hfinal
+    hinvariant hvc hentryReady hpre hselect hbody hbr hcbr hpost hfinal
 
 example
     {spec : KernelSpec} {env : KernelEnv} {cta : CTAId} {warp : WarpId}
@@ -1789,8 +1792,8 @@ example
     (hvc : kernelVCs env cta warp spec.pre spec.post invariants)
     (hentryReady : EntryReady env cta warp spec.pre)
     (hpre : spec.pre spec.init spec.resource)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants spec.post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (htargets : CFGTerminatorTargetsExist env)
     (hbr : BrSemanticControl env cta warp)
@@ -1799,7 +1802,7 @@ example
     (hfinal : Finalizes (cfgKernelInvariant env cta warp invariants spec.post) spec.post) :
     spec.Valid :=
   KernelSpec.Valid.of_kernelVCs_targets
-    hinvariant hvc hentryReady hpre honly hbody htargets hbr hcbr hpost hfinal
+    hinvariant hvc hentryReady hpre hselect hbody htargets hbr hcbr hpost hfinal
 
 example
     {spec : KernelSpec} {env : KernelEnv} {cta : CTAId} {warp : WarpId}
@@ -1809,8 +1812,8 @@ example
     (hpreEntry : spec.pre ⊢ₛ invariants env.entry)
     (hentryReady : EntryReady env cta warp spec.pre)
     (hpre : spec.pre spec.init spec.resource)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants spec.post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hblocks :
       ∀ label block,
@@ -1823,7 +1826,8 @@ example
     (hfinal : Finalizes (cfgKernelInvariant env cta warp invariants spec.post) spec.post) :
     spec.Valid :=
   KernelSpec.Valid.of_entry_blockVCs_targets
-    hinvariant hpreEntry hentryReady hpre honly hbody hblocks htargets hbr hcbr hpost hfinal
+    hinvariant hpreEntry hentryReady hpre hselect hbody hblocks htargets hbr hcbr hpost
+    hfinal
 
 example
     {spec : KernelSpec} {env : KernelEnv} {cta : CTAId} {warp : WarpId}
@@ -1833,8 +1837,8 @@ example
     (hpreEntry : spec.pre ⊢ₛ invariants env.entry)
     (hentryReady : EntryReady env cta warp spec.pre)
     (hpre : spec.pre spec.init spec.resource)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants spec.post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hblocks :
       ∀ label block,
@@ -1847,7 +1851,7 @@ example
     (hsuffixNoFinal : NoFinal (cfgSuffixInvariant env cta warp invariants spec.post)) :
     spec.Valid :=
   KernelSpec.Valid.of_entry_blockVCs_targets_closed
-    hinvariant hpreEntry hentryReady hpre honly hbody hblocks htargets hbr hcbr
+    hinvariant hpreEntry hentryReady hpre hselect hbody hblocks htargets hbr hcbr
     hpostNoStep hsuffixNoFinal
 
 example

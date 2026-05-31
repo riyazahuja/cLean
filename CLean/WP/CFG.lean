@@ -108,6 +108,27 @@ def StepPreserves (inv : CSL.Assertion) : Prop :=
   ∀ st r st', inv st r → StepMachine st st' →
     ∃ r', CSL.Resource.Update r r' ∧ inv st' r'
 
+def StepMachineSelects
+    (inv : CSL.Assertion) (cta : CTAId) (warp : WarpId) : Prop :=
+  ∀ st r st', inv st r → StepMachine st st' → StepWarp st cta warp st'
+
+def OnlyRunnableWarp (cta : CTAId) (warp : WarpId) : CSL.Assertion :=
+  fun st _ => ∀ st', StepMachine st st' → StepWarp st cta warp st'
+
+theorem OnlyRunnableWarp.stepMachineSelects
+    {cta : CTAId} {warp : WarpId} {inv : CSL.Assertion} :
+    StepMachineSelects (OnlyRunnableWarp cta warp ∗ inv) cta warp := by
+  intro st r st' hinv hstep
+  rcases hinv with ⟨_rOnly, _rInv, _hcomp, _hequiv, hselect, _hinv⟩
+  exact hselect st' hstep
+
+theorem StepMachineSelects.of_entails_onlyRunnableWarp
+    {cta : CTAId} {warp : WarpId} {inv : CSL.Assertion}
+    (honly : inv ⊢ₛ OnlyRunnableWarp cta warp) :
+    StepMachineSelects inv cta warp := by
+  intro st r st' hinv hstep
+  exact honly st r hinv st' hstep
+
 def StepWarpPreserves (cta : CTAId) (warp : WarpId) (inv : CSL.Assertion) : Prop :=
   ∀ st r st', inv st r → StepWarp st cta warp st' →
     ∃ r', CSL.Resource.Update r r' ∧ inv st' r'
@@ -140,12 +161,11 @@ theorem StepWarpPreserves.of_stepBlockPreserves
 
 theorem StepPreserves.of_stepWarpPreserves
     {cta : CTAId} {warp : WarpId} {inv : CSL.Assertion}
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect : StepMachineSelects inv cta warp)
     (hpres : StepWarpPreserves cta warp inv) :
     StepPreserves inv := by
   intro st r st' hinv hstep
-  exact hpres st r st' hinv (honly hstep)
+  exact hpres st r st' hinv (hselect st r st' hinv hstep)
 
 def Finalizes (inv post : CSL.Assertion) : Prop :=
   ∀ final r, MachineFinal final → inv final r → post final r
@@ -189,6 +209,81 @@ def blockVC
     (cta : CTAId) (warp : WarpId) (invariants : InvariantMap) (post : CSL.Assertion)
     (label : BlockLabel) (block : Block) : Prop :=
   invariants label ⊢ₛ blockEntryWP cta warp invariants post block
+
+def CbrBranchControl
+    (cta : CTAId) (warp : WarpId) (cond : RValue)
+    (tLabel fLabel target : BlockLabel) (pre : CSL.Assertion) : Prop :=
+  ∀ {st st' : State} {r : CSL.Resource},
+    pre st r →
+    Helpers.stepTerminator? st cta warp (.cbr cond tLabel fLabel) = some st' →
+      ∃ warpState',
+        st'.getWarp? cta warp = some warpState' ∧
+          Helpers.lockstepRunnable warpState' ∧
+          Helpers.RunnablePc warpState' (target, 0)
+
+inductive TerminatorVC
+    (cta : CTAId) (warp : WarpId)
+    (invariants : InvariantMap) (post : CSL.Assertion) :
+    BlockLabel → Terminator → CSL.Assertion → Prop where
+  | br {label target : BlockLabel} {pre : CSL.Assertion} :
+      pre ⊢ₛ wpTerminator cta warp (.br target) (invariants target) →
+      TerminatorVC cta warp invariants post label (.br target) pre
+  | cbr
+      {label : BlockLabel} {cond : RValue} {t f : BlockLabel}
+      {pre truePre falsePre : CSL.Assertion} :
+      pre ⊢ₛ (truePre ∨ₛ falsePre) →
+      CbrBranchControl cta warp cond t f t truePre →
+      CbrBranchControl cta warp cond t f f falsePre →
+      truePre ⊢ₛ wpTerminator cta warp (.cbr cond t f) (invariants t) →
+      falsePre ⊢ₛ wpTerminator cta warp (.cbr cond t f) (invariants f) →
+      TerminatorVC cta warp invariants post label (.cbr cond t f) pre
+  | terminate {label : BlockLabel} {pre : CSL.Assertion} :
+      pre ⊢ₛ wpTerminator cta warp .terminate post →
+      TerminatorVC cta warp invariants post label .terminate pre
+
+def blockVC'
+    (cta : CTAId) (warp : WarpId) (invariants : InvariantMap) (post : CSL.Assertion)
+    (label : BlockLabel) (block : Block) : Prop :=
+  ∃ termPre,
+    invariants label ⊢ₛ wpInstrs cta warp block.body termPre ∧
+    TerminatorVC cta warp invariants post label block.term termPre
+
+def kernelVCs'
+    (env : KernelEnv) (cta : CTAId) (warp : WarpId)
+    (pre post : CSL.Assertion) (invariants : InvariantMap) : Prop :=
+  pre ⊢ₛ invariants env.entry ∧
+    (∀ label block,
+      env.blocks[label]? = some block → blockVC' cta warp invariants post label block) ∧
+    (∀ label, Finalizes (invariants label) post)
+
+def blockSuffixWP'
+    (cta : CTAId) (warp : WarpId) (termPre : CSL.Assertion)
+    (block : Block) (idx : Nat) : CSL.Assertion :=
+  wpInstrList cta warp (block.body.toList.drop idx) termPre
+
+def blockEntryWP'
+    (cta : CTAId) (warp : WarpId) (termPre : CSL.Assertion) (block : Block) :
+    CSL.Assertion :=
+  blockSuffixWP' cta warp termPre block 0
+
+def cfgSuffixInvariant'
+    (env : KernelEnv) (cta : CTAId) (warp : WarpId)
+    (invariants : InvariantMap) (post : CSL.Assertion) : CSL.Assertion :=
+  fun st r =>
+    ∃ warpState pc block termPre,
+      st.kernelEnv = env ∧
+        st.getWarp? cta warp = some warpState ∧
+        Helpers.lockstepRunnable warpState ∧
+        Helpers.RunnablePc warpState pc ∧
+        env.blocks[pc.1]? = some block ∧
+        blockSuffixWP' cta warp termPre block pc.2 st r ∧
+        TerminatorVC cta warp invariants post pc.1 block.term termPre
+
+def cfgKernelInvariant'
+    (env : KernelEnv) (cta : CTAId) (warp : WarpId)
+    (invariants : InvariantMap) (post : CSL.Assertion) : CSL.Assertion :=
+  fun st r =>
+    cfgSuffixInvariant' env cta warp invariants post st r ∨ post st r
 
 abbrev CbrChoiceMap := BlockLabel → Option Bool
 
@@ -295,6 +390,125 @@ theorem blockVCChoice.of_wpConcreteBlock
   intro st r hinv
   simpa [blockEntryWPChoice, blockSuffixWPChoice, wpConcreteBlock, wpInstrs]
     using hwp st r hinv
+
+theorem TerminatorVC.br_wp
+    {cta : CTAId} {warp : WarpId} {invariants : InvariantMap}
+    {post : CSL.Assertion} {label target : BlockLabel} {pre : CSL.Assertion}
+    (hvc : TerminatorVC cta warp invariants post label (.br target) pre) :
+    pre ⊢ₛ wpTerminator cta warp (.br target) (invariants target) := by
+  cases hvc with
+  | br hwp => exact hwp
+
+theorem TerminatorVC.cbr_wp_or
+    {cta : CTAId} {warp : WarpId} {invariants : InvariantMap}
+    {post : CSL.Assertion} {label : BlockLabel} {cond : RValue}
+    {t f : BlockLabel} {pre : CSL.Assertion}
+    (hvc : TerminatorVC cta warp invariants post label (.cbr cond t f) pre) :
+    pre ⊢ₛ
+      (wpTerminator cta warp (.cbr cond t f) (invariants t) ∨ₛ
+        wpTerminator cta warp (.cbr cond t f) (invariants f)) := by
+  cases hvc with
+  | cbr hsplit _htrueControl _hfalseControl htrue hfalse =>
+      intro st r hpre
+      rcases hsplit st r hpre with hpreTrue | hpreFalse
+      · exact Or.inl (htrue st r hpreTrue)
+      · exact Or.inr (hfalse st r hpreFalse)
+
+theorem TerminatorVC.terminate_wp
+    {cta : CTAId} {warp : WarpId} {invariants : InvariantMap}
+    {post : CSL.Assertion} {label : BlockLabel} {pre : CSL.Assertion}
+    (hvc : TerminatorVC cta warp invariants post label .terminate pre) :
+    pre ⊢ₛ wpTerminator cta warp .terminate post := by
+  cases hvc with
+  | terminate hwp => exact hwp
+
+theorem blockVC'.entry_instrs
+    {cta : CTAId} {warp : WarpId} {invariants : InvariantMap}
+    {post : CSL.Assertion} {label : BlockLabel} {block : Block}
+    (hvc : blockVC' cta warp invariants post label block) :
+    ∃ termPre,
+      invariants label ⊢ₛ wpInstrs cta warp block.body termPre ∧
+      TerminatorVC cta warp invariants post label block.term termPre :=
+  hvc
+
+theorem blockVC'.entry_suffix
+    {cta : CTAId} {warp : WarpId} {invariants : InvariantMap}
+    {label : BlockLabel} {block : Block} {termPre : CSL.Assertion}
+    (hbody : invariants label ⊢ₛ wpInstrs cta warp block.body termPre) :
+    invariants label ⊢ₛ blockSuffixWP' cta warp termPre block 0 := by
+  simpa [blockSuffixWP', wpInstrs] using hbody
+
+theorem blockSuffixWP'.body_step_of_drop
+    {cta : CTAId} {warp : WarpId} {termPre : CSL.Assertion}
+    {block : Block} {idx : Nat}
+    {gi : GInstr} {rest : List GInstr} {st st' : State} {r : CSL.Resource}
+    (hdrop : block.body.toList.drop idx = gi :: rest)
+    (hwp : blockSuffixWP' cta warp termPre block idx st r)
+    (hstep : Helpers.stepInstr? st cta warp gi = some st') :
+    ∃ r', CSL.Resource.Update r r' ∧ wpInstrList cta warp rest termPre st' r' := by
+  have hwp' : wpInstr cta warp gi (wpInstrList cta warp rest termPre) st r := by
+    simpa [blockSuffixWP', hdrop] using hwp
+  exact hwp' st' hstep
+
+theorem blockSuffixWP'.term_pre_of_drop
+    {cta : CTAId} {warp : WarpId} {termPre : CSL.Assertion}
+    {block : Block} {idx : Nat} {st : State} {r : CSL.Resource}
+    (hdrop : block.body.toList.drop idx = [])
+    (hwp : blockSuffixWP' cta warp termPre block idx st r) :
+    termPre st r := by
+  simpa [blockSuffixWP', hdrop] using hwp
+
+theorem cfgSuffixInvariant'.body_step_of_suffix
+    {env : KernelEnv} {cta : CTAId} {warp : WarpId}
+    {invariants : InvariantMap} {post : CSL.Assertion}
+    {st st' : State} {r : CSL.Resource} {pc : PC} {block : Block}
+    {termPre : CSL.Assertion} {gi : GInstr} {rest : List GInstr}
+    (hwp : blockSuffixWP' cta warp termPre block pc.2 st r)
+    (htermVC : TerminatorVC cta warp invariants post pc.1 block.term termPre)
+    (hdrop : block.body.toList.drop pc.2 = gi :: rest)
+    (hblock : env.blocks[pc.1]? = some block)
+    (hstep : Helpers.stepInstr? st cta warp gi = some st')
+    (hcontrol :
+      ∃ warpState',
+        st'.kernelEnv = env ∧
+          st'.getWarp? cta warp = some warpState' ∧
+          Helpers.lockstepRunnable warpState' ∧
+          Helpers.RunnablePc warpState' (pc.1, pc.2 + 1)) :
+    ∃ r', CSL.Resource.Update r r' ∧
+      cfgSuffixInvariant' env cta warp invariants post st' r' := by
+  rcases blockSuffixWP'.body_step_of_drop hdrop hwp hstep with
+    ⟨r', hupdate, hwpRest⟩
+  rcases hcontrol with ⟨warpState', henv', hwarp', hlock', hrpc'⟩
+  have hdropNext : block.body.toList.drop (pc.2 + 1) = rest :=
+    Array.toList_drop_succ_eq_tail_of_drop_eq_cons hdrop
+  have hwpNext : blockSuffixWP' cta warp termPre block (pc.2 + 1) st' r' := by
+    simpa [blockSuffixWP', hdropNext] using hwpRest
+  exact ⟨r', hupdate,
+    ⟨warpState', (pc.1, pc.2 + 1), block, termPre, henv', hwarp', hlock', hrpc',
+      hblock, hwpNext, htermVC⟩⟩
+
+theorem cfgSuffixInvariant'.of_target_invariant
+    {env : KernelEnv} {cta : CTAId} {warp : WarpId}
+    {invariants : InvariantMap} {post : CSL.Assertion}
+    {st : State} {r : CSL.Resource} {target : BlockLabel} {targetBlock : Block}
+    (hblocks :
+      ∀ label block,
+        env.blocks[label]? = some block → blockVC' cta warp invariants post label block)
+    (hblockTarget : env.blocks[target]? = some targetBlock)
+    (hinvTarget : invariants target st r)
+    (hcontrol :
+      ∃ warpState,
+        st.kernelEnv = env ∧
+          st.getWarp? cta warp = some warpState ∧
+          Helpers.lockstepRunnable warpState ∧
+          Helpers.RunnablePc warpState (target, 0)) :
+    cfgSuffixInvariant' env cta warp invariants post st r := by
+  rcases hblocks target targetBlock hblockTarget with ⟨targetPre, hbody, htermVC⟩
+  rcases hcontrol with ⟨warpState, henv, hwarp, hlock, hrpc⟩
+  have hentry : blockSuffixWP' cta warp targetPre targetBlock 0 st r :=
+    blockVC'.entry_suffix (invariants := invariants) hbody st r hinvTarget
+  exact ⟨warpState, (target, 0), targetBlock, targetPre, henv, hwarp, hlock, hrpc,
+    hblockTarget, hentry, htermVC⟩
 
 theorem blockSuffixWP.body_step_of_drop
     {cta : CTAId} {warp : WarpId} {invariants : InvariantMap}
@@ -694,6 +908,23 @@ def TermStepPreservesKernel
       ∃ r', CSL.Resource.Update r r' ∧
         cfgKernelInvariant env cta warp invariants post st' r'
 
+def TermStepPreservesKernel'
+    (env : KernelEnv) (cta : CTAId) (warp : WarpId)
+    (invariants : InvariantMap) (post : CSL.Assertion) : Prop :=
+  ∀ {st st' : State} {r : CSL.Resource} {warpState : WarpState}
+    {pc : PC} {block : Block} {termPre : CSL.Assertion},
+    st.kernelEnv = env →
+    st.getWarp? cta warp = some warpState →
+    Helpers.lockstepRunnable warpState →
+    Helpers.RunnablePc warpState pc →
+    env.blocks[pc.1]? = some block →
+    block.body[pc.2]? = none →
+    blockSuffixWP' cta warp termPre block pc.2 st r →
+    TerminatorVC cta warp invariants post pc.1 block.term termPre →
+    Helpers.stepTerminator? st cta warp block.term = some st' →
+      ∃ r', CSL.Resource.Update r r' ∧
+        cfgKernelInvariant' env cta warp invariants post st' r'
+
 def TermStepPreservesKernelChoice
     (env : KernelEnv) (cta : CTAId) (warp : WarpId) (choices : CbrChoiceMap)
     (invariants : InvariantMap) (post : CSL.Assertion) : Prop :=
@@ -870,6 +1101,86 @@ theorem CbrTermControl.of_targets_semantic
     exact Or.inl ⟨trueBlock, warpState', htrueBlock, henv', hwarp', hlock', hrpc'⟩
   · rcases hfalse with ⟨warpState', henv', hwarp', hlock', hrpc'⟩
     exact Or.inr ⟨falseBlock, warpState', hfalseBlock, henv', hwarp', hlock', hrpc'⟩
+
+theorem TermStepPreservesKernel'.of_blockVCs
+    {env : KernelEnv} {cta : CTAId} {warp : WarpId}
+    {invariants : InvariantMap} {post : CSL.Assertion}
+    (hblocks :
+      ∀ label block,
+        env.blocks[label]? = some block → blockVC' cta warp invariants post label block)
+    (hbr : BrTermControl env cta warp)
+    (htargets : CFGTerminatorTargetsExist env) :
+    TermStepPreservesKernel' env cta warp invariants post := by
+  intro st st' r warpState pc block termPre
+    henv hwarp hlock hrpc hblock hdone hwp htermVC hstep
+  have hdrop : block.body.toList.drop pc.2 = [] :=
+    Array.toList_drop_eq_nil_of_getElem?_none hdone
+  have hpreTerm : termPre st r :=
+    blockSuffixWP'.term_pre_of_drop hdrop hwp
+  cases htermEq : block.term with
+  | br target =>
+      have htermVCBr :
+          TerminatorVC cta warp invariants post pc.1 (.br target) termPre := by
+        simpa [htermEq] using htermVC
+      rcases hbr henv hwarp hlock hrpc hblock htermEq hstep with
+        ⟨targetBlock, warpState', htarget, henv', hwarp', hlock', hrpc'⟩
+      have hstepBr :
+          Helpers.stepTerminator? st cta warp (.br target) = some st' := by
+        simpa [htermEq] using hstep
+      have hwpTerm :
+          wpTerminator cta warp (.br target) (invariants target) st r :=
+        TerminatorVC.br_wp htermVCBr st r hpreTerm
+      rcases hwpTerm st' hstepBr with ⟨r', hupdate, hinvTarget⟩
+      exact ⟨r', hupdate, Or.inl <|
+        cfgSuffixInvariant'.of_target_invariant hblocks htarget hinvTarget
+          ⟨warpState', henv', hwarp', hlock', hrpc'⟩⟩
+  | cbr cond tLabel fLabel =>
+      have htermVCCbr :
+          TerminatorVC cta warp invariants post pc.1
+            (.cbr cond tLabel fLabel) termPre := by
+        simpa [htermEq] using htermVC
+      have hstepCbr :
+          Helpers.stepTerminator? st cta warp (.cbr cond tLabel fLabel) = some st' := by
+        simpa [htermEq] using hstep
+      cases htermVCCbr with
+      | cbr hsplit htrueControl hfalseControl htrue hfalse =>
+          have htargetsBlock := htargets hblock
+          rw [htermEq] at htargetsBlock
+          rcases htargetsBlock with ⟨⟨trueBlock, htrueBlock⟩, falseBlock, hfalseBlock⟩
+          have henv' : st'.kernelEnv = env :=
+            (Helpers.stepTerminator?_kernelEnv_eq hstep).trans henv
+          rcases hsplit st r hpreTerm with hpreTrue | hpreFalse
+          · rcases htrueControl hpreTrue hstepCbr with
+              ⟨warpState', hwarp', hlock', hrpc'⟩
+            have hwpTerm :
+                wpTerminator cta warp (.cbr cond tLabel fLabel) (invariants tLabel)
+                  st r :=
+              htrue st r hpreTrue
+            rcases hwpTerm st' hstepCbr with ⟨r', hupdate, hinvTarget⟩
+            exact ⟨r', hupdate, Or.inl <|
+              cfgSuffixInvariant'.of_target_invariant hblocks htrueBlock hinvTarget
+                ⟨warpState', henv', hwarp', hlock', hrpc'⟩⟩
+          · rcases hfalseControl hpreFalse hstepCbr with
+              ⟨warpState', hwarp', hlock', hrpc'⟩
+            have hwpTerm :
+                wpTerminator cta warp (.cbr cond tLabel fLabel) (invariants fLabel)
+                  st r :=
+              hfalse st r hpreFalse
+            rcases hwpTerm st' hstepCbr with ⟨r', hupdate, hinvTarget⟩
+            exact ⟨r', hupdate, Or.inl <|
+              cfgSuffixInvariant'.of_target_invariant hblocks hfalseBlock hinvTarget
+                ⟨warpState', henv', hwarp', hlock', hrpc'⟩⟩
+  | terminate =>
+      have htermVCTerm :
+          TerminatorVC cta warp invariants post pc.1 .terminate termPre := by
+        simpa [htermEq] using htermVC
+      have hstepTerm :
+          Helpers.stepTerminator? st cta warp .terminate = some st' := by
+        simpa [htermEq] using hstep
+      have hwpTerm : wpTerminator cta warp .terminate post st r :=
+        TerminatorVC.terminate_wp htermVCTerm st r hpreTerm
+      rcases hwpTerm st' hstepTerm with ⟨r', hupdate, hpost⟩
+      exact ⟨r', hupdate, Or.inr hpost⟩
 
 theorem TermStepPreservesKernel.of_blockVCs
     {env : KernelEnv} {cta : CTAId} {warp : WarpId}
@@ -1166,6 +1477,70 @@ theorem StepBlockPreserves.of_cfgKernelInvariant
   · rcases hpost st r st' hpostSt hstep with ⟨r', hupdate, hpost'⟩
     exact ⟨r', hupdate, Or.inr hpost'⟩
 
+theorem StepBlockPreserves.of_cfgKernelInvariant'
+    {env : KernelEnv} {cta : CTAId} {warp : WarpId}
+    {invariants : InvariantMap} {post : CSL.Assertion}
+    (hbody : BodyStepControl env cta warp)
+    (hterm : TermStepPreservesKernel' env cta warp invariants post)
+    (hpost : StepBlockPreserves cta warp post) :
+    StepBlockPreserves cta warp (cfgKernelInvariant' env cta warp invariants post) := by
+  intro st r st' hinv hstep
+  rcases hinv with hinv | hpostSt
+  · rcases hinv with
+      ⟨warpStateInv, pcInv, blockInv, termPre, henv, hwarpInv, hlockInv, hrpcInv,
+        hblockInv, hwp, htermVC⟩
+    cases hstep with
+    | body hwf hwarp hwfWarp hlock hrpc hblock hgi hinstr =>
+        rename_i warpState pc block gi
+        have hwarpEq : warpState = warpStateInv :=
+          Option.some.inj (by
+            rw [← hwarp]
+            exact hwarpInv)
+        subst warpState
+        have hpcEq : pc = pcInv :=
+          Option.some.inj (by
+            change Helpers.currentRunnablePc? warpStateInv = some pc at hrpc
+            change Helpers.currentRunnablePc? warpStateInv = some pcInv at hrpcInv
+            rw [← hrpc]
+            exact hrpcInv)
+        subst pc
+        have hblockEnv : env.blocks[pcInv.1]? = some block := henv ▸ hblock
+        have hblockEq : block = blockInv :=
+          Option.some.inj (by
+            rw [← hblockEnv]
+            exact hblockInv)
+        subst block
+        rcases Array.toList_drop_eq_cons_of_getElem?_some hgi with ⟨rest, hdrop⟩
+        cases hinstr with
+        | mk hwfInstr hwarpInstr hwfWarpInstr hlockInstr hpart hrun =>
+            rcases cfgSuffixInvariant'.body_step_of_suffix hwp htermVC hdrop hblockInv hrun
+                (hbody henv hwarpInv hlockInv hrpcInv hblockInv hgi hrun) with
+              ⟨r', hupdate, hinv'⟩
+            exact ⟨r', hupdate, Or.inl hinv'⟩
+    | term hwf hwarp hwfWarp hlock hrpc hblock hbodyDone hrun =>
+        rename_i warpState pc block
+        have hwarpEq : warpState = warpStateInv :=
+          Option.some.inj (by
+            rw [← hwarp]
+            exact hwarpInv)
+        subst warpState
+        have hpcEq : pc = pcInv :=
+          Option.some.inj (by
+            change Helpers.currentRunnablePc? warpStateInv = some pc at hrpc
+            change Helpers.currentRunnablePc? warpStateInv = some pcInv at hrpcInv
+            rw [← hrpc]
+            exact hrpcInv)
+        subst pc
+        have hblockEnv : env.blocks[pcInv.1]? = some block := henv ▸ hblock
+        have hblockEq : block = blockInv :=
+          Option.some.inj (by
+            rw [← hblockEnv]
+            exact hblockInv)
+        subst block
+        exact hterm henv hwarpInv hlockInv hrpcInv hblockInv hbodyDone hwp htermVC hrun
+  · rcases hpost st r st' hpostSt hstep with ⟨r', hupdate, hpost'⟩
+    exact ⟨r', hupdate, Or.inr hpost'⟩
+
 theorem StepBlockPreserves.of_cfgKernelInvariantChoice
     {env : KernelEnv} {cta : CTAId} {warp : WarpId} {choices : CbrChoiceMap}
     {invariants : InvariantMap} {post : CSL.Assertion}
@@ -1233,38 +1608,52 @@ theorem StepBlockPreserves.of_cfgKernelInvariantChoice
 theorem StepPreserves.of_cfgSuffixInvariant
     {env : KernelEnv} {cta : CTAId} {warp : WarpId}
     {invariants : InvariantMap} {post : CSL.Assertion}
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgSuffixInvariant env cta warp invariants post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hterm : TermStepPreservesCFG env cta warp invariants post) :
     StepPreserves (cfgSuffixInvariant env cta warp invariants post) :=
-  StepPreserves.of_stepWarpPreserves honly <|
+  StepPreserves.of_stepWarpPreserves hselect <|
     StepWarpPreserves.of_stepBlockPreserves <|
       StepBlockPreserves.of_cfgSuffixInvariant hbody hterm
 
 theorem StepPreserves.of_cfgKernelInvariant
     {env : KernelEnv} {cta : CTAId} {warp : WarpId}
     {invariants : InvariantMap} {post : CSL.Assertion}
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hterm : TermStepPreservesKernel env cta warp invariants post)
     (hpost : StepBlockPreserves cta warp post) :
     StepPreserves (cfgKernelInvariant env cta warp invariants post) :=
-  StepPreserves.of_stepWarpPreserves honly <|
+  StepPreserves.of_stepWarpPreserves hselect <|
     StepWarpPreserves.of_stepBlockPreserves <|
       StepBlockPreserves.of_cfgKernelInvariant hbody hterm hpost
+
+theorem StepPreserves.of_cfgKernelInvariant'
+    {env : KernelEnv} {cta : CTAId} {warp : WarpId}
+    {invariants : InvariantMap} {post : CSL.Assertion}
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant' env cta warp invariants post) cta warp)
+    (hbody : BodyStepControl env cta warp)
+    (hterm : TermStepPreservesKernel' env cta warp invariants post)
+    (hpost : StepBlockPreserves cta warp post) :
+    StepPreserves (cfgKernelInvariant' env cta warp invariants post) :=
+  StepPreserves.of_stepWarpPreserves hselect <|
+    StepWarpPreserves.of_stepBlockPreserves <|
+      StepBlockPreserves.of_cfgKernelInvariant' hbody hterm hpost
 
 theorem StepPreserves.of_cfgKernelInvariantChoice
     {env : KernelEnv} {cta : CTAId} {warp : WarpId} {choices : CbrChoiceMap}
     {invariants : InvariantMap} {post : CSL.Assertion}
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariantChoice env cta warp choices invariants post)
+        cta warp)
     (hbody : BodyStepControl env cta warp)
     (hterm : TermStepPreservesKernelChoice env cta warp choices invariants post)
     (hpost : StepBlockPreserves cta warp post) :
     StepPreserves (cfgKernelInvariantChoice env cta warp choices invariants post) :=
-  StepPreserves.of_stepWarpPreserves honly <|
+  StepPreserves.of_stepWarpPreserves hselect <|
     StepWarpPreserves.of_stepBlockPreserves <|
       StepBlockPreserves.of_cfgKernelInvariantChoice hbody hterm hpost
 
@@ -1295,6 +1684,16 @@ theorem TermStepPreservesKernel.of_kernelVCs
   rcases hvc with ⟨_hpreEntry, hblocks, _hfinal⟩
   exact TermStepPreservesKernel.of_blockVCs hblocks hbr hcbr
 
+theorem TermStepPreservesKernel'.of_kernelVCs'
+    {env : KernelEnv} {cta : CTAId} {warp : WarpId}
+    {pre post : CSL.Assertion} {invariants : InvariantMap}
+    (hvc : kernelVCs' env cta warp pre post invariants)
+    (hbr : BrTermControl env cta warp)
+    (htargets : CFGTerminatorTargetsExist env) :
+    TermStepPreservesKernel' env cta warp invariants post := by
+  rcases hvc with ⟨_hpreEntry, hblocks, _hfinal⟩
+  exact TermStepPreservesKernel'.of_blockVCs hblocks hbr htargets
+
 theorem TermStepPreservesKernelChoice.of_kernelVCs
     {env : KernelEnv} {cta : CTAId} {warp : WarpId}
     {choices : CbrChoiceMap} {pre post : CSL.Assertion} {invariants : InvariantMap}
@@ -1321,29 +1720,43 @@ theorem StepPreserves.of_kernelVCs
     {env : KernelEnv} {cta : CTAId} {warp : WarpId}
     {pre post : CSL.Assertion} {invariants : InvariantMap}
     (hvc : kernelVCs env cta warp pre post invariants)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hbr : BrTermControl env cta warp)
     (hcbr : CbrTermControl env cta warp)
     (hpost : StepBlockPreserves cta warp post) :
     StepPreserves (cfgKernelInvariant env cta warp invariants post) :=
-  StepPreserves.of_cfgKernelInvariant honly hbody
+  StepPreserves.of_cfgKernelInvariant hselect hbody
     (TermStepPreservesKernel.of_kernelVCs hvc hbr hcbr) hpost
+
+theorem StepPreserves.of_kernelVCs'
+    {env : KernelEnv} {cta : CTAId} {warp : WarpId}
+    {pre post : CSL.Assertion} {invariants : InvariantMap}
+    (hvc : kernelVCs' env cta warp pre post invariants)
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant' env cta warp invariants post) cta warp)
+    (hbody : BodyStepControl env cta warp)
+    (hbr : BrTermControl env cta warp)
+    (htargets : CFGTerminatorTargetsExist env)
+    (hpost : StepBlockPreserves cta warp post) :
+    StepPreserves (cfgKernelInvariant' env cta warp invariants post) :=
+  StepPreserves.of_cfgKernelInvariant' hselect hbody
+    (TermStepPreservesKernel'.of_kernelVCs' hvc hbr htargets) hpost
 
 theorem StepPreserves.of_kernelVCs_targets
     {env : KernelEnv} {cta : CTAId} {warp : WarpId}
     {pre post : CSL.Assertion} {invariants : InvariantMap}
     (hvc : kernelVCs env cta warp pre post invariants)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (htargets : CFGTerminatorTargetsExist env)
     (hbr : BrSemanticControl env cta warp)
     (hcbr : CbrSemanticControl env cta warp)
     (hpost : StepBlockPreserves cta warp post) :
     StepPreserves (cfgKernelInvariant env cta warp invariants post) :=
-  StepPreserves.of_kernelVCs hvc honly hbody
+  StepPreserves.of_kernelVCs hvc hselect hbody
     (BrTermControl.of_targets_semantic htargets hbr)
     (CbrTermControl.of_targets_semantic htargets hcbr)
     hpost
@@ -1352,14 +1765,15 @@ theorem StepPreserves.of_choiceKernelVCs
     {env : KernelEnv} {cta : CTAId} {warp : WarpId}
     {choices : CbrChoiceMap} {pre post : CSL.Assertion} {invariants : InvariantMap}
     (hvc : kernelVCsChoice env cta warp choices pre post invariants)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariantChoice env cta warp choices invariants post)
+        cta warp)
     (hbody : BodyStepControl env cta warp)
     (hbr : BrTermControl env cta warp)
     (hcbr : CbrChoiceTermControl env cta warp choices)
     (hpost : StepBlockPreserves cta warp post) :
     StepPreserves (cfgKernelInvariantChoice env cta warp choices invariants post) :=
-  StepPreserves.of_cfgKernelInvariantChoice honly hbody
+  StepPreserves.of_cfgKernelInvariantChoice hselect hbody
     (TermStepPreservesKernelChoice.of_kernelVCs hvc hbr hcbr) hpost
 
 def EntryReady
@@ -1391,6 +1805,26 @@ theorem cfgSuffixInvariant.of_entry
     blockVC.entry_suffix (hblocks env.entry block hentry) st r hinvEntry
   exact ⟨warpState, (env.entry, 0), block, henv, hwarp, hlock, hrpc, hentry, hentryWP⟩
 
+theorem cfgSuffixInvariant'.of_entry
+    {env : KernelEnv} {cta : CTAId} {warp : WarpId}
+    {pre post : CSL.Assertion} {invariants : InvariantMap}
+    {st : State} {r : CSL.Resource} {warpState : WarpState} {block : Block}
+    (hvc : kernelVCs' env cta warp pre post invariants)
+    (henv : st.kernelEnv = env)
+    (hwarp : st.getWarp? cta warp = some warpState)
+    (hlock : Helpers.lockstepRunnable warpState)
+    (hrpc : Helpers.RunnablePc warpState (env.entry, 0))
+    (hentry : env.blocks[env.entry]? = some block)
+    (hpre : pre st r) :
+    cfgSuffixInvariant' env cta warp invariants post st r := by
+  rcases hvc with ⟨hpreEntry, hblocks, _hfinal⟩
+  rcases hblocks env.entry block hentry with ⟨termPre, hbody, htermVC⟩
+  have hinvEntry : invariants env.entry st r := hpreEntry st r hpre
+  have hentryWP : blockSuffixWP' cta warp termPre block 0 st r :=
+    blockVC'.entry_suffix (invariants := invariants) hbody st r hinvEntry
+  exact ⟨warpState, (env.entry, 0), block, termPre, henv, hwarp, hlock, hrpc,
+    hentry, hentryWP, htermVC⟩
+
 theorem cfgKernelInvariant.of_entry
     {env : KernelEnv} {cta : CTAId} {warp : WarpId}
     {pre post : CSL.Assertion} {invariants : InvariantMap}
@@ -1404,6 +1838,20 @@ theorem cfgKernelInvariant.of_entry
     (hpre : pre st r) :
     cfgKernelInvariant env cta warp invariants post st r :=
   Or.inl <| cfgSuffixInvariant.of_entry hvc henv hwarp hlock hrpc hentry hpre
+
+theorem cfgKernelInvariant'.of_entry
+    {env : KernelEnv} {cta : CTAId} {warp : WarpId}
+    {pre post : CSL.Assertion} {invariants : InvariantMap}
+    {st : State} {r : CSL.Resource} {warpState : WarpState} {block : Block}
+    (hvc : kernelVCs' env cta warp pre post invariants)
+    (henv : st.kernelEnv = env)
+    (hwarp : st.getWarp? cta warp = some warpState)
+    (hlock : Helpers.lockstepRunnable warpState)
+    (hrpc : Helpers.RunnablePc warpState (env.entry, 0))
+    (hentry : env.blocks[env.entry]? = some block)
+    (hpre : pre st r) :
+    cfgKernelInvariant' env cta warp invariants post st r :=
+  Or.inl <| cfgSuffixInvariant'.of_entry hvc henv hwarp hlock hrpc hentry hpre
 
 theorem cfgKernelInvariantChoice.of_entry
     {env : KernelEnv} {cta : CTAId} {warp : WarpId} {choices : CbrChoiceMap}
@@ -1447,8 +1895,8 @@ theorem KernelSpec.Valid.of_cfg_controls
     (hpre : spec.pre spec.init spec.resource)
     (hpreInv :
       spec.pre ⊢ₛ cfgSuffixInvariant env cta warp invariants spec.post)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgSuffixInvariant env cta warp invariants spec.post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hterm : TermStepPreservesCFG env cta warp invariants spec.post)
     (hfinal : Finalizes (cfgSuffixInvariant env cta warp invariants spec.post) spec.post) :
@@ -1458,7 +1906,7 @@ theorem KernelSpec.Valid.of_cfg_controls
     rw [hinvariant]
     exact hpreInv st r hpreSt
   · rw [hinvariant]
-    exact StepPreserves.of_cfgSuffixInvariant honly hbody hterm
+    exact StepPreserves.of_cfgSuffixInvariant hselect hbody hterm
   · rw [hinvariant]
     exact hfinal
 
@@ -1470,8 +1918,8 @@ theorem KernelSpec.Valid.of_cfg_kernel_controls
     (hpre : spec.pre spec.init spec.resource)
     (hpreInv :
       spec.pre ⊢ₛ cfgKernelInvariant env cta warp invariants spec.post)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants spec.post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hterm : TermStepPreservesKernel env cta warp invariants spec.post)
     (hpost : StepBlockPreserves cta warp spec.post)
@@ -1482,7 +1930,32 @@ theorem KernelSpec.Valid.of_cfg_kernel_controls
     rw [hinvariant]
     exact hpreInv st r hpreSt
   · rw [hinvariant]
-    exact StepPreserves.of_cfgKernelInvariant honly hbody hterm hpost
+    exact StepPreserves.of_cfgKernelInvariant hselect hbody hterm hpost
+  · rw [hinvariant]
+    exact hfinal
+
+theorem KernelSpec.Valid.of_cfg_kernel_controls'
+    {spec : KernelSpec} {env : KernelEnv} {cta : CTAId} {warp : WarpId}
+    {invariants : InvariantMap}
+    (hinvariant :
+      spec.invariant = cfgKernelInvariant' env cta warp invariants spec.post)
+    (hpre : spec.pre spec.init spec.resource)
+    (hpreInv :
+      spec.pre ⊢ₛ cfgKernelInvariant' env cta warp invariants spec.post)
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant' env cta warp invariants spec.post)
+        cta warp)
+    (hbody : BodyStepControl env cta warp)
+    (hterm : TermStepPreservesKernel' env cta warp invariants spec.post)
+    (hpost : StepBlockPreserves cta warp spec.post)
+    (hfinal : Finalizes (cfgKernelInvariant' env cta warp invariants spec.post) spec.post) :
+    spec.Valid := by
+  refine KernelSpec.Valid.of_parts hpre ?_ ?_ ?_
+  · intro st r hpreSt
+    rw [hinvariant]
+    exact hpreInv st r hpreSt
+  · rw [hinvariant]
+    exact StepPreserves.of_cfgKernelInvariant' hselect hbody hterm hpost
   · rw [hinvariant]
     exact hfinal
 
@@ -1494,8 +1967,9 @@ theorem KernelSpec.Valid.of_cfg_kernel_choice_controls
     (hpre : spec.pre spec.init spec.resource)
     (hpreInv :
       spec.pre ⊢ₛ cfgKernelInvariantChoice env cta warp choices invariants spec.post)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariantChoice env cta warp choices invariants spec.post)
+        cta warp)
     (hbody : BodyStepControl env cta warp)
     (hterm : TermStepPreservesKernelChoice env cta warp choices invariants spec.post)
     (hpost : StepBlockPreserves cta warp spec.post)
@@ -1508,7 +1982,7 @@ theorem KernelSpec.Valid.of_cfg_kernel_choice_controls
     rw [hinvariant]
     exact hpreInv st r hpreSt
   · rw [hinvariant]
-    exact StepPreserves.of_cfgKernelInvariantChoice honly hbody hterm hpost
+    exact StepPreserves.of_cfgKernelInvariantChoice hselect hbody hterm hpost
   · rw [hinvariant]
     exact hfinal
 
@@ -1520,8 +1994,8 @@ theorem KernelSpec.Valid.of_entry_blockVCs
     (hpreEntry : spec.pre ⊢ₛ invariants env.entry)
     (hentryReady : EntryReady env cta warp spec.pre)
     (hpre : spec.pre spec.init spec.resource)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants spec.post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hblocks :
       ∀ label block,
@@ -1546,9 +2020,51 @@ theorem KernelSpec.Valid.of_entry_blockVCs
       exact Or.inl
         ⟨warpState, (env.entry, 0), block, henv, hwarp, hlock, hrpc, hentry,
           hentryWP⟩)
-    honly
+    hselect
     hbody
     (TermStepPreservesKernel.of_blockVCs hblocks hbr hcbr)
+    hpost
+    hfinal
+
+theorem KernelSpec.Valid.of_entry_blockVCs'
+    {spec : KernelSpec} {env : KernelEnv} {cta : CTAId} {warp : WarpId}
+    {invariants : InvariantMap}
+    (hinvariant :
+      spec.invariant = cfgKernelInvariant' env cta warp invariants spec.post)
+    (hpreEntry : spec.pre ⊢ₛ invariants env.entry)
+    (hentryReady : EntryReady env cta warp spec.pre)
+    (hpre : spec.pre spec.init spec.resource)
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant' env cta warp invariants spec.post)
+        cta warp)
+    (hbody : BodyStepControl env cta warp)
+    (hblocks :
+      ∀ label block,
+        env.blocks[label]? = some block →
+          blockVC' cta warp invariants spec.post label block)
+    (hbr : BrTermControl env cta warp)
+    (htargets : CFGTerminatorTargetsExist env)
+    (hpost : StepBlockPreserves cta warp spec.post)
+    (hfinal : Finalizes (cfgKernelInvariant' env cta warp invariants spec.post) spec.post) :
+    spec.Valid :=
+  KernelSpec.Valid.of_cfg_kernel_controls'
+    hinvariant
+    hpre
+    (by
+      intro st r hpreSt
+      rcases hentryReady hpreSt with
+        ⟨warpState, block, henv, hwarp, hlock, hrpc, hentry⟩
+      have hinvEntry : invariants env.entry st r := hpreEntry st r hpreSt
+      rcases hblocks env.entry block hentry with ⟨termPre, hbodyEntry, htermVC⟩
+      have hentryWP :
+          blockSuffixWP' cta warp termPre block 0 st r :=
+        blockVC'.entry_suffix (invariants := invariants) hbodyEntry st r hinvEntry
+      exact Or.inl
+        ⟨warpState, (env.entry, 0), block, termPre, henv, hwarp, hlock, hrpc,
+          hentry, hentryWP, htermVC⟩)
+    hselect
+    hbody
+    (TermStepPreservesKernel'.of_blockVCs hblocks hbr htargets)
     hpost
     hfinal
 
@@ -1560,8 +2076,8 @@ theorem KernelSpec.Valid.of_entry_blockVCs_targets
     (hpreEntry : spec.pre ⊢ₛ invariants env.entry)
     (hentryReady : EntryReady env cta warp spec.pre)
     (hpre : spec.pre spec.init spec.resource)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants spec.post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hblocks :
       ∀ label block,
@@ -1578,7 +2094,7 @@ theorem KernelSpec.Valid.of_entry_blockVCs_targets
     hpreEntry
     hentryReady
     hpre
-    honly
+    hselect
     hbody
     hblocks
     (BrTermControl.of_targets_semantic htargets hbr)
@@ -1594,8 +2110,8 @@ theorem KernelSpec.Valid.of_entry_blockVCs_closed
     (hpreEntry : spec.pre ⊢ₛ invariants env.entry)
     (hentryReady : EntryReady env cta warp spec.pre)
     (hpre : spec.pre spec.init spec.resource)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants spec.post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hblocks :
       ∀ label block,
@@ -1611,11 +2127,49 @@ theorem KernelSpec.Valid.of_entry_blockVCs_closed
     hpreEntry
     hentryReady
     hpre
-    honly
+    hselect
     hbody
     hblocks
     hbr
     hcbr
+    (StepBlockPreserves.of_no_step hpostNoStep)
+    (by
+      intro final r hfinal hinv
+      rcases hinv with hsuffix | hpost
+      · exact False.elim (hsuffixNoFinal final r hfinal hsuffix)
+      · exact hpost)
+
+theorem KernelSpec.Valid.of_entry_blockVCs'_closed
+    {spec : KernelSpec} {env : KernelEnv} {cta : CTAId} {warp : WarpId}
+    {invariants : InvariantMap}
+    (hinvariant :
+      spec.invariant = cfgKernelInvariant' env cta warp invariants spec.post)
+    (hpreEntry : spec.pre ⊢ₛ invariants env.entry)
+    (hentryReady : EntryReady env cta warp spec.pre)
+    (hpre : spec.pre spec.init spec.resource)
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant' env cta warp invariants spec.post)
+        cta warp)
+    (hbody : BodyStepControl env cta warp)
+    (hblocks :
+      ∀ label block,
+        env.blocks[label]? = some block →
+          blockVC' cta warp invariants spec.post label block)
+    (hbr : BrTermControl env cta warp)
+    (htargets : CFGTerminatorTargetsExist env)
+    (hpostNoStep : NoStepBlock cta warp spec.post)
+    (hsuffixNoFinal : NoFinal (cfgSuffixInvariant' env cta warp invariants spec.post)) :
+    spec.Valid :=
+  KernelSpec.Valid.of_entry_blockVCs'
+    hinvariant
+    hpreEntry
+    hentryReady
+    hpre
+    hselect
+    hbody
+    hblocks
+    hbr
+    htargets
     (StepBlockPreserves.of_no_step hpostNoStep)
     (by
       intro final r hfinal hinv
@@ -1631,8 +2185,8 @@ theorem KernelSpec.Valid.of_entry_blockVCs_targets_closed
     (hpreEntry : spec.pre ⊢ₛ invariants env.entry)
     (hentryReady : EntryReady env cta warp spec.pre)
     (hpre : spec.pre spec.init spec.resource)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants spec.post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hblocks :
       ∀ label block,
@@ -1649,7 +2203,7 @@ theorem KernelSpec.Valid.of_entry_blockVCs_targets_closed
     hpreEntry
     hentryReady
     hpre
-    honly
+    hselect
     hbody
     hblocks
     (BrTermControl.of_targets_semantic htargets hbr)
@@ -1665,8 +2219,8 @@ theorem KernelSpec.Valid.of_kernelVCs
     (hvc : kernelVCs env cta warp spec.pre spec.post invariants)
     (hentryReady : EntryReady env cta warp spec.pre)
     (hpre : spec.pre spec.init spec.resource)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants spec.post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (hterm : TermStepPreservesKernel env cta warp invariants spec.post)
     (hpost : StepBlockPreserves cta warp spec.post)
@@ -1680,7 +2234,37 @@ theorem KernelSpec.Valid.of_kernelVCs
       rcases hentryReady hpreSt with
         ⟨warpState, block, henv, hwarp, hlock, hrpc, hentry⟩
       exact cfgKernelInvariant.of_entry hvc henv hwarp hlock hrpc hentry hpreSt)
-    honly
+    hselect
+    hbody
+    hterm
+    hpost
+    hfinal
+
+theorem KernelSpec.Valid.of_kernelVCs'
+    {spec : KernelSpec} {env : KernelEnv} {cta : CTAId} {warp : WarpId}
+    {invariants : InvariantMap}
+    (hinvariant :
+      spec.invariant = cfgKernelInvariant' env cta warp invariants spec.post)
+    (hvc : kernelVCs' env cta warp spec.pre spec.post invariants)
+    (hentryReady : EntryReady env cta warp spec.pre)
+    (hpre : spec.pre spec.init spec.resource)
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant' env cta warp invariants spec.post)
+        cta warp)
+    (hbody : BodyStepControl env cta warp)
+    (hterm : TermStepPreservesKernel' env cta warp invariants spec.post)
+    (hpost : StepBlockPreserves cta warp spec.post)
+    (hfinal : Finalizes (cfgKernelInvariant' env cta warp invariants spec.post) spec.post) :
+    spec.Valid :=
+  KernelSpec.Valid.of_cfg_kernel_controls'
+    hinvariant
+    hpre
+    (by
+      intro st r hpreSt
+      rcases hentryReady hpreSt with
+        ⟨warpState, block, henv, hwarp, hlock, hrpc, hentry⟩
+      exact cfgKernelInvariant'.of_entry hvc henv hwarp hlock hrpc hentry hpreSt)
+    hselect
     hbody
     hterm
     hpost
@@ -1694,8 +2278,8 @@ theorem KernelSpec.Valid.of_kernelVCs_targets
     (hvc : kernelVCs env cta warp spec.pre spec.post invariants)
     (hentryReady : EntryReady env cta warp spec.pre)
     (hpre : spec.pre spec.init spec.resource)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariant env cta warp invariants spec.post) cta warp)
     (hbody : BodyStepControl env cta warp)
     (htargets : CFGTerminatorTargetsExist env)
     (hbr : BrSemanticControl env cta warp)
@@ -1708,7 +2292,7 @@ theorem KernelSpec.Valid.of_kernelVCs_targets
     hvc
     hentryReady
     hpre
-    honly
+    hselect
     hbody
     (TermStepPreservesKernel.of_kernelVCs_targets hvc htargets hbr hcbr)
     hpost
@@ -1722,8 +2306,9 @@ theorem KernelSpec.Valid.of_choiceKernelVCs
     (hvc : kernelVCsChoice env cta warp choices spec.pre spec.post invariants)
     (hentryReady : EntryReady env cta warp spec.pre)
     (hpre : spec.pre spec.init spec.resource)
-    (honly :
-      ∀ {st st' : State}, StepMachine st st' → StepWarp st cta warp st')
+    (hselect :
+      StepMachineSelects (cfgKernelInvariantChoice env cta warp choices invariants spec.post)
+        cta warp)
     (hbody : BodyStepControl env cta warp)
     (hbr : BrTermControl env cta warp)
     (hcbr : CbrChoiceTermControl env cta warp choices)
@@ -1740,7 +2325,7 @@ theorem KernelSpec.Valid.of_choiceKernelVCs
       rcases hentryReady hpreSt with
         ⟨warpState, block, henv, hwarp, hlock, hrpc, hentry⟩
       exact cfgKernelInvariantChoice.of_entry hvc henv hwarp hlock hrpc hentry hpreSt)
-    honly
+    hselect
     hbody
     (TermStepPreservesKernelChoice.of_kernelVCs hvc hbr hcbr)
     hpost
@@ -1751,6 +2336,16 @@ theorem Finalizes.of_cfgKernelInvariant
     {invariants : InvariantMap} {post : CSL.Assertion}
     (hsuffix : Finalizes (cfgSuffixInvariant env cta warp invariants post) post) :
     Finalizes (cfgKernelInvariant env cta warp invariants post) post := by
+  intro final r hfinal hinv
+  rcases hinv with hsuffixInv | hpost
+  · exact hsuffix final r hfinal hsuffixInv
+  · exact hpost
+
+theorem Finalizes.of_cfgKernelInvariant'
+    {env : KernelEnv} {cta : CTAId} {warp : WarpId}
+    {invariants : InvariantMap} {post : CSL.Assertion}
+    (hsuffix : Finalizes (cfgSuffixInvariant' env cta warp invariants post) post) :
+    Finalizes (cfgKernelInvariant' env cta warp invariants post) post := by
   intro final r hfinal hinv
   rcases hinv with hsuffixInv | hpost
   · exact hsuffix final r hfinal hsuffixInv

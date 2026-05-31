@@ -1,4 +1,6 @@
 import CLean.PTX.Bridge
+import CLean.Examples.Loop
+import CLean.Examples.MatmulLoop
 
 namespace CLean
 namespace Examples

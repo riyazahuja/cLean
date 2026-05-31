@@ -2221,7 +2221,12 @@ theorem saxpy_scalar_kernel_valid
     (haccessOut : AccessOk .global .s32 (.global outOffset))
     (hencodeOut : EncodedScalar .s32 (.s32 sum) newOut)
     (hlenOut : oldOut.length = newOut.length)
-    (honly : ∀ {st st' : State}, StepMachine st st' → StepWarp st 0 0 st')
+    (honly :
+      cfgKernelInvariant (saxpyEnv params) 0 0
+        (saxpyScalarInvariants lane xOffset yOffset outOffset xBytes yBytes oldOut newOut
+          oldX oldY oldProd oldSum x y prod sum)
+        (saxpyScalarPost lane xOffset yOffset outOffset xBytes yBytes newOut x y prod sum) ⊢ₛ
+        OnlyRunnableWarp 0 0)
     (hpostNoStep :
       NoStepBlock 0 0
         (saxpyScalarPost lane xOffset yOffset outOffset xBytes yBytes newOut x y prod sum))
@@ -2253,7 +2258,7 @@ theorem saxpy_scalar_kernel_valid
       exact ⟨warpState, saxpyBlock params, henv, hwarp, hlock,
         by simpa [saxpyEnv] using hrpc, by simp [saxpyEnv]⟩)
     (hpre := hinit)
-    (honly := honly)
+    (hselect := StepMachineSelects.of_entails_onlyRunnableWarp honly)
     (hbody := BodyStepControl.of_ordinary_cfg_semantics (saxpy_body_ordinary params))
     (hblocks :=
       saxpy_scalar_block_vcs

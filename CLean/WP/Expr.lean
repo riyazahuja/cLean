@@ -89,6 +89,78 @@ theorem eval_cmp_of_eq
     EvalCmp st ctx cmp value :=
   h
 
+namespace EvalRValue
+
+theorem binop_add_s32
+    {st : State} {ctx : LaneCtx} {lhs rhs : RValue} {a b : Int}
+    (hlhs : EvalRValue st ctx lhs (.s32 a))
+    (hrhs : EvalRValue st ctx rhs (.s32 b)) :
+    EvalRValue st ctx (.binop .add lhs rhs)
+      (.s32 (Helpers.normalizeSigned 32 (a + b))) :=
+  eval_binop_of_eval hlhs hrhs rfl
+
+theorem binop_mul_s32
+    {st : State} {ctx : LaneCtx} {lhs rhs : RValue} {a b : Int}
+    (hlhs : EvalRValue st ctx lhs (.s32 a))
+    (hrhs : EvalRValue st ctx rhs (.s32 b)) :
+    EvalRValue st ctx (.binop .mul lhs rhs)
+      (.s32 (Helpers.normalizeSigned 32 (a * b))) :=
+  eval_binop_of_eval hlhs hrhs rfl
+
+theorem binop_add_gaddr_u64
+    {st : State} {ctx : LaneCtx} {lhs rhs : RValue} {space : AddrSpace}
+    {offset : Nat} {delta : UInt64}
+    (hlhs : EvalRValue st ctx lhs (.gaddr space offset))
+    (hrhs : EvalRValue st ctx rhs (.u64 delta)) :
+    EvalRValue st ctx (.binop .add lhs rhs) (.gaddr space (offset + delta.toNat)) :=
+  eval_binop_of_eval hlhs hrhs rfl
+
+end EvalRValue
+
+namespace EvalCmp
+
+theorem lt_u64
+    {st : State} {ctx : LaneCtx} {lhs rhs : RValue} {a b : UInt64}
+    (hlhs : EvalRValue st ctx lhs (.u64 a))
+    (hrhs : EvalRValue st ctx rhs (.u64 b)) :
+    EvalCmp st ctx { op := .lt, lhs := lhs, rhs := rhs } (decide (a < b)) := by
+  unfold EvalRValue at hlhs hrhs
+  unfold CLean.WP.EvalCmp Helpers.evalCmp?
+  rw [hlhs, hrhs]
+  rfl
+
+theorem ge_u64
+    {st : State} {ctx : LaneCtx} {lhs rhs : RValue} {a b : UInt64}
+    (hlhs : EvalRValue st ctx lhs (.u64 a))
+    (hrhs : EvalRValue st ctx rhs (.u64 b)) :
+    EvalCmp st ctx { op := .ge, lhs := lhs, rhs := rhs } (decide (a ≥ b)) := by
+  unfold EvalRValue at hlhs hrhs
+  unfold CLean.WP.EvalCmp Helpers.evalCmp?
+  rw [hlhs, hrhs]
+  rfl
+
+theorem lt_s32
+    {st : State} {ctx : LaneCtx} {lhs rhs : RValue} {a b : Int}
+    (hlhs : EvalRValue st ctx lhs (.s32 a))
+    (hrhs : EvalRValue st ctx rhs (.s32 b)) :
+    EvalCmp st ctx { op := .lt, lhs := lhs, rhs := rhs } (decide (a < b)) := by
+  unfold EvalRValue at hlhs hrhs
+  unfold CLean.WP.EvalCmp Helpers.evalCmp?
+  rw [hlhs, hrhs]
+  rfl
+
+theorem ge_s32
+    {st : State} {ctx : LaneCtx} {lhs rhs : RValue} {a b : Int}
+    (hlhs : EvalRValue st ctx lhs (.s32 a))
+    (hrhs : EvalRValue st ctx rhs (.s32 b)) :
+    EvalCmp st ctx { op := .ge, lhs := lhs, rhs := rhs } (decide (a ≥ b)) := by
+  unfold EvalRValue at hlhs hrhs
+  unfold CLean.WP.EvalCmp Helpers.evalCmp?
+  rw [hlhs, hrhs]
+  rfl
+
+end EvalCmp
+
 theorem resolves_addr_of_eq
     {st : State} {ctx : LaneCtx} {addr : TypedAddr} {resolved : Addr}
     (h : Helpers.resolveAddr? st ctx.cta ctx.warp ctx.lane addr = some resolved) :

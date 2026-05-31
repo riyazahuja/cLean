@@ -339,6 +339,18 @@ def globalSlices : List Nat → CSL.BytePerm → List (List Byte) → CSL.Assert
       CSL.globalBytes offset perm bytes ∗ globalSlices offsets perm rest
   | _, _, _ => CSL.pure False
 
+def paramSlices : List Nat → List (List Byte) → CSL.Assertion
+  | [], [] => CSL.emp
+  | offset :: offsets, bytes :: rest =>
+      CSL.paramBytes offset bytes ∗ paramSlices offsets rest
+  | _, _ => CSL.pure False
+
+def constSlices : List Nat → List (List Byte) → CSL.Assertion
+  | [], [] => CSL.emp
+  | offset :: offsets, bytes :: rest =>
+      CSL.constBytes offset bytes ∗ constSlices offsets rest
+  | _, _ => CSL.pure False
+
 def sharedSlices (cta : CTAId) :
     List Nat → CSL.BytePerm → List (List Byte) → CSL.Assertion
   | [], _, [] => CSL.emp
@@ -364,6 +376,14 @@ def localSlices (cta : CTAId) (warp : WarpId) :
 
 @[simp] theorem globalSlices_nil (perm : CSL.BytePerm) :
     globalSlices [] perm [] = CSL.emp :=
+  rfl
+
+@[simp] theorem paramSlices_nil :
+    paramSlices [] [] = CSL.emp :=
+  rfl
+
+@[simp] theorem constSlices_nil :
+    constSlices [] [] = CSL.emp :=
   rfl
 
 @[simp] theorem sharedSlices_nil (cta : CTAId) (perm : CSL.BytePerm) :

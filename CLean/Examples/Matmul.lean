@@ -1631,7 +1631,12 @@ theorem matmul_cell_scalar_kernel_valid
     (haccessC : AccessOk .global .s32 (.global (matmulCellOffset params)))
     (hencodeC : EncodedScalar .s32 (.s32 acc) newOut)
     (hlenC : oldOut.length = newOut.length)
-    (honly : ∀ {st st' : State}, StepMachine st st' → StepWarp st 0 0 st')
+    (honly :
+      cfgKernelInvariant (matmulCellEnv params) 0 0
+        (matmulCellScalarInvariants params lane aBytes bBytes oldOut newOut oldA oldB
+          oldAcc a0 b0 acc)
+        (matmulCellScalarPost params lane aBytes bBytes newOut a0 b0 acc) ⊢ₛ
+        OnlyRunnableWarp 0 0)
     (hpostNoStep :
       NoStepBlock 0 0
         (matmulCellScalarPost params lane aBytes bBytes newOut a0 b0 acc))
@@ -1664,7 +1669,7 @@ theorem matmul_cell_scalar_kernel_valid
       exact ⟨warpState, matmulCellBlock params, henv, hwarp, hlock,
         by simpa [matmulCellEnv] using hrpc, by simp [matmulCellEnv]⟩)
     (hpre := hinit)
-    (honly := honly)
+    (hselect := StepMachineSelects.of_entails_onlyRunnableWarp honly)
     (hbody := BodyStepControl.of_ordinary_cfg_semantics (matmul_cell_body_ordinary params))
     (hblocks :=
       matmul_cell_scalar_block_vcs

@@ -14,6 +14,9 @@ def pure (p : Prop) : Assertion :=
 def entails (p q : Assertion) : Prop :=
   ∀ st r, p st r → q st r
 
+def or (p q : Assertion) : Assertion :=
+  fun st r => p st r ∨ q st r
+
 def resourceUpdate (p q : Assertion) : Prop :=
   ∀ st r, p st r → ∃ r', Resource.Update r r' ∧ q st r'
 
@@ -26,6 +29,7 @@ def sep (p q : Assertion) : Assertion :=
       q st r₂
 
 infixr:55 " ∗ " => sep
+infixr:50 " ∨ₛ " => or
 infix:50 " ⊢ₛ " => entails
 
 def owns (key : ResourceKey) (cell : Cell) : Assertion :=
@@ -432,6 +436,14 @@ theorem sep_swap_bc (a b c : Assertion) :
     (a ∗ (b ∗ c)) ⊢ₛ (a ∗ (c ∗ b)) :=
   sep_mono (entails_refl a) (sep_comm b c)
 
+theorem sep_rotate_three_last_to_front (a b c : Assertion) :
+    (a ∗ (b ∗ c)) ⊢ₛ (c ∗ (a ∗ b)) :=
+  entails_trans (sep_assoc_rev a b c) (sep_comm (a ∗ b) c)
+
+theorem sep_rotate_three_front_to_last (a b c : Assertion) :
+    (c ∗ (a ∗ b)) ⊢ₛ (a ∗ (b ∗ c)) :=
+  entails_trans (sep_comm c (a ∗ b)) (sep_assoc a b c)
+
 def sepList : List Assertion → Assertion
   | [] => emp
   | p :: [] => p
@@ -490,6 +502,30 @@ theorem sepList_perm {xs ys : List Assertion} (hperm : xs.Perm ys) :
   | trans _ _ ih₁ ih₂ =>
       exact entails_trans ih₁ ih₂
 
+theorem sepList_append_cons
+    (a : Assertion) (xs : List Assertion) (b : Assertion) (ys : List Assertion) :
+    (sepList (a :: xs) ∗ sepList (b :: ys)) ⊢ₛ
+      sepList ((a :: xs) ++ (b :: ys)) := by
+  induction xs generalizing a with
+  | nil =>
+      exact entails_refl _
+  | cons x xs ih =>
+      simpa [sepList, List.cons_append] using
+        entails_trans (sep_assoc a (sepList (x :: xs)) (sepList (b :: ys)))
+          (sep_mono (entails_refl a) (ih x))
+
+theorem sepList_append_cons_rev
+    (a : Assertion) (xs : List Assertion) (b : Assertion) (ys : List Assertion) :
+    sepList ((a :: xs) ++ (b :: ys)) ⊢ₛ
+      (sepList (a :: xs) ∗ sepList (b :: ys)) := by
+  induction xs generalizing a with
+  | nil =>
+      exact entails_refl _
+  | cons x xs ih =>
+      simpa [sepList, List.cons_append] using
+        entails_trans (sep_mono (entails_refl a) (ih x))
+          (sep_assoc_rev a (sepList (x :: xs)) (sepList (b :: ys)))
+
 theorem sep_pair_cons_to_sepList (a b c : Assertion) (rest : List Assertion) :
     ((a ∗ b) ∗ sepList (c :: rest)) ⊢ₛ sepList (a :: b :: c :: rest) :=
   sep_assoc a b (sepList (c :: rest))
@@ -517,6 +553,44 @@ theorem sepList_perm_to_sep_pair_cons
     (hperm : source.Perm (x :: y :: z :: rest')) :
     sepList source ⊢ₛ ((x ∗ y) ∗ sepList (z :: rest')) :=
   entails_trans (sepList_perm hperm) (sepList_to_sep_pair_cons x y z rest')
+
+theorem sepList_perm_to_cons
+    (source : List Assertion) (x y : Assertion) (rest : List Assertion)
+    (hperm : source.Perm (x :: y :: rest)) :
+    sepList source ⊢ₛ (x ∗ sepList (y :: rest)) := by
+  simpa [sepList] using sepList_perm hperm
+
+theorem sep_cons_perm_to_sepList
+    (x y : Assertion) (rest target : List Assertion)
+    (hperm : (x :: y :: rest).Perm target) :
+    (x ∗ sepList (y :: rest)) ⊢ₛ sepList target := by
+  simpa [sepList] using sepList_perm hperm
+
+theorem sepList_perm_frame_to_cons
+    (source : List Assertion) (x y : Assertion) (rest : List Assertion)
+    (frame : Assertion)
+    (hperm : source.Perm (x :: y :: rest)) :
+    (sepList source ∗ frame) ⊢ₛ (x ∗ (sepList (y :: rest) ∗ frame)) := by
+  exact entails_trans
+    (sep_mono (sepList_perm hperm) (entails_refl frame))
+    (by simpa [sepList] using sep_assoc x (sepList (y :: rest)) frame)
+
+theorem sep_cons_frame_to_sepList_perm
+    (x y : Assertion) (rest target : List Assertion) (frame : Assertion)
+    (hperm : (x :: y :: rest).Perm target) :
+    (x ∗ (sepList (y :: rest) ∗ frame)) ⊢ₛ (sepList target ∗ frame) := by
+  exact entails_trans
+    (by simpa [sepList] using sep_assoc_rev x (sepList (y :: rest)) frame)
+    (sep_mono (sepList_perm hperm) (entails_refl frame))
+
+theorem sep_cons_frame_perm_to_cons
+    (x y x' y' : Assertion) (rest rest' : List Assertion) (frame : Assertion)
+    (hperm : (x :: y :: rest).Perm (x' :: y' :: rest')) :
+    (x ∗ (sepList (y :: rest) ∗ frame)) ⊢ₛ
+      (x' ∗ (sepList (y' :: rest') ∗ frame)) := by
+  exact entails_trans
+    (sep_cons_frame_to_sepList_perm x y rest (x' :: y' :: rest') frame hperm)
+    (sepList_perm_frame_to_cons (x' :: y' :: rest') x' y' rest' frame (List.Perm.refl _))
 
 theorem sep_permute_acdb (a b c d : Assertion) :
     (a ∗ (b ∗ (c ∗ d))) ⊢ₛ (c ∗ (a ∗ (d ∗ b))) :=
