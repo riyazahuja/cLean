@@ -35,7 +35,7 @@ def runParser (p : Parser α) (input : String) : Except ParseError α :=
   | .error it err =>
       let offset := it.i.byteIdx
       let (line, column) := lineColumnFromOffset input offset
-      .error { offset := offset, line := line, column := column, message := err }
+      .error { offset := offset, line := line, column := column, message := toString err }
 
 def whitespace : Parser Unit :=
   Std.Internal.Parsec.String.ws

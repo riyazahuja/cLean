@@ -1,0 +1,2732 @@
+USER:
+cool, so what have you changed in this repo since last time we spoke, whats the status of the repo, what's good, wahts still a todo? Audit the whole design and etc and lmk what you think is going on and how everything looks?
+
+================================================================================
+
+ASSISTANT:
+I’ll verify the current tree and recent commits first, then I’ll give you a design-level read: what changed, what’s green, what I trust, and what still looks unfinished or too conditional.
+
+================================================================================
+
+ASSISTANT:
+The tree is clean on `wc_calc_refactor`. I’m doing one final no-op build/axiom pass from the committed state so the status I report is current, not just from before the commit.
+
+================================================================================
+
+ASSISTANT:
+One audit issue already popped out: `docs/wp-core-slice.md` still said vector SAXPY was outside the completed set, which became stale after the last commit. I’m correcting that doc drift now.
+
+================================================================================
+
+ASSISTANT:
+The docs are now consistent with the SAXPY vector theorem. I’m committing that small audit fix separately so the repo stays clean.
+
+================================================================================
+
+ASSISTANT:
+Repo is clean on `wc_calc_refactor`. Latest commits are:
+
+- `0ef8866` Update core slice docs for SAXPY vector
+- `c8458a7` Add SAXPY vector correctness wrapper
+- `c1446cd` Complete core WP loop proof layer
+
+Since the previous green checkpoint, I added the SAXPY vector lift and then fixed the docs to reflect it. The new theorem is [saxpy_vector_kernel_valid](/data/user_data/riyaza/cLean/CLean/Examples/Saxpy.lean:2517), with [saxpy_vector_partial_correct](/data/user_data/riyaza/cLean/CLean/Examples/Saxpy.lean:2569) giving the expected `∀ i, i < n` final read shape. I also added [saxpyScalarPost_read_output](/data/user_data/riyaza/cLean/CLean/Examples/Saxpy.lean:2283) to extract the actual global-memory postcondition from the scalar CSL post, and included SAXPY in [Checked.lean](/data/user_data/riyaza/cLean/CLean/Examples/Checked.lean:4).
+
+**Current Status**
+Everything is green:
+
+- `lake build CLean`
+- `lake build CLean.Examples.Checked`
+- `rg -n "sorry|axiom|unsafe" CLean` has no matches
+- Axiom checks for `KernelSpec.partial_correct`, `kernel_wp_sound`, loop, global loop, matmul loop, and SAXPY vector theorems are only `[propext, Classical.choice, Quot.sound]`
+
+The core WP substrate is now in a much better state. The important structural pieces are in place: invariant-relative warp selection via [StepMachineSelects](/data/user_data/riyaza/cLean/CLean/WP/CFG.lean:111), branch-sensitive terminator VCs via [TerminatorVC](/data/user_data/riyaza/cLean/CLean/WP/CFG.lean:224), `kernelVCs'`, lane-list `assignPredValue`, param/const load rules, and real loop examples. The checked examples now cover arithmetic loops, global-memory loops, fixed-size matmul inner loop, and SAXPY vector correctness.
+
+**What Looks Good**
+The design direction is right. The old global “machine always steps warp 0/0” assumption is gone from the API and replaced with invariant-relative control. That is the correct abstraction boundary for a single-warp proof mode.
+
+The `cbr` fix is also the right shape. Branch-sensitive VCs avoid forcing both target invariants after one conditional branch, which is essential for real loops.
+
+The examples are doing real work now. [loop_sum_kernel_valid](/data/user_data/riyaza/cLean/CLean/Examples/Loop.lean:1162), [global_sum_loop_kernel_valid](/data/user_data/riyaza/cLean/CLean/Examples/Loop.lean:3929), and [matmul_cell_loop_kernel_valid](/data/user_data/riyaza/cLean/CLean/Examples/MatmulLoop.lean:4267) are actual `KernelSpec.Valid` proofs, not wrappers around external validity assumptions.
+
+**What Still Needs Work**
+The matmul and loop examples are still fixed-size proofs, mainly `n = 3`, not fully parametric loop proofs. That is acceptable as a substrate gate, but the next quality jump is generalizing those patterns.
+
+The SAXPY vector theorem is a sound vector lift from per-lane scalar validity, but it is not yet the cleanest final design. It uses a `SaxpyVectorProofs` bundle and per-lane resources, then proves a pure vector postcondition. Good milestone, but the stronger version would prove the vector kernel from one combined lane-list resource/invariant.
+
+The proof code is large. `Loop.lean` and `MatmulLoop.lean` prove the point, but they also show the next abstraction layer is overdue: reusable block/loop proof combinators, resource-shape helpers, and less hand-managed CSL permutation.
+
+My read: the scalar/memory/CFG WP layer is now legitimately usable for ordinary PTX-like kernels. It is not yet ergonomic, and it is not a whole-IR story. Barriers, atomics, warp ops, MMA, multi-warp interference, and parametric matmul remain future work.
+
+<oai-mem-citation>
+<citation_entries>
+MEMORY.md:31-37|note=[used Lean validation command guidance]
+MEMORY.md:1-14|note=[used Saxpy related prior context pointer]
+</citation_entries>
+<rollout_ids>
+019e2f3c-c5b3-7a43-8f4d-7d59a6617986
+</rollout_ids>
+</oai-mem-citation>
+
+================================================================================
+
+USER:
+So i'm still a bit confused on the proofs im seeing here. THe statements i'm seeing are even pretty complicated: i was imagining the statement of these functional correctness theorems to basically have a def of a ptx program (i.e. saxpy as a ptx program is defined in our IR or whatever) and then the "correctness theorem" just looks like given some preconditions, running ptx then satisfies the following postconditions. Then the proof of this essentially would just unfold the set of minimal preconditions that would imply the postcondition on saxpy and then we prove the real init precondition implies these are true. Right? But i'm not seeing that here, why?
+
+Also, how do loops work here? Like do we as users need to specify and prove loop invariants, or like what's going on there. Speak at a more mathematical/theoretical level grounded in our implementation, as how the actual wp-calculus and program verification theory is being implemented here.
+
+================================================================================
+
+ASSISTANT:
+I’ll ground this in the actual definitions rather than hand-waving. I’m going to pull the core WP/KernalSpec definitions and the SAXPY theorem shape, then I’ll explain why the current proof statements look heavier than the ideal top-level correctness theorem you have in mind.
+
+================================================================================
+
+ASSISTANT:
+Yes, your mental model is basically right. The mismatch is that the repo currently exposes too much of the proof substrate in theorem statements.
+
+The clean theorem you want should look roughly like:
+
+```lean
+def saxpyProgram : KernelEnv := ...
+
+theorem saxpy_correct
+    (hpre : SaxpyPre init params xs ys)
+    (hrun : TerminatesAt init final) :
+    ∀ i, i < params.n →
+      readZ final i = some (alpha * xs i + ys i)
+```
+
+That is the right user-facing shape. We are not fully there because the current examples are closer to “backend proof certificates” than polished functional-correctness APIs.
+
+**What Exists**
+The actual verification stack is standard WP/Hoare-style verification.
+
+At the bottom, assertions are separation-logic assertions over states and resources:
+
+```lean
+CSL.Assertion = State → Resource → Prop
+```
+
+A kernel spec is valid when four things hold, in [CFG.lean](/data/user_data/riyaza/cLean/CLean/WP/CFG.lean:1876):
+
+```lean
+pre init resource
+pre ⊢ invariant
+StepPreserves invariant
+Finalizes invariant post
+```
+
+Then [KernelSpec.partial_correct](/data/user_data/riyaza/cLean/CLean/WP/CFG.lean:2383) says: if the spec is valid and execution terminates, the postcondition holds.
+
+So mathematically:
+
+```text
+pre(init) ∧ Valid(spec) ∧ init ⇝* final ∧ final cannot step
+-----------------------------------------------------------
+post(final)
+```
+
+That part is clean.
+
+**Where The Complexity Comes From**
+For straight-line code, the WP is exactly the usual recursive WP. See [wpInstrList](/data/user_data/riyaza/cLean/CLean/WP/Block.lean:11):
+
+```lean
+wpInstrList [] post = post
+wpInstrList (i :: rest) post = wpInstr i (wpInstrList rest post)
+```
+
+So yes: “unfold the program backwards, compute/prove the minimal precondition, then prove the real initial precondition entails it” is exactly the intended theory.
+
+But the current examples expose the raw ingredients needed to prove that entailment:
+
+- memory bytes for each load/store
+- `DecodedScalar` and `EncodedScalar`
+- address-resolution facts
+- byte-range disjointness
+- register ownership
+- scheduler/single-warp control
+- loop/block invariants
+- per-lane resources
+
+Those are not the final mathematical API. They are the backend facts that a nicer `SaxpyPre` or `ArrayS32` abstraction should hide.
+
+SAXPY shows this clearly. The clean postcondition exists as [saxpyPost](/data/user_data/riyaza/cLean/CLean/Examples/Saxpy.lean:2321):
+
+```lean
+∀ i, i < params.n →
+  readGlobalS32? st (saxpyLaneOutputOffset params i) =
+    some (saxpyExpectedValue params (xs i) (ys i))
+```
+
+But [saxpy_vector_partial_correct](/data/user_data/riyaza/cLean/CLean/Examples/Saxpy.lean:2569) still takes `SaxpyVectorProofs`, which is basically a bundle saying “for every lane, all the byte/register/address/resource facts needed by the scalar WP proof hold.” That is why it feels too complicated.
+
+The next abstraction should be:
+
+```lean
+SaxpyConcretePre init params xs ys oldZ
+  ⊢ facts needed by SaxpyVectorProofs
+```
+
+Then the final theorem stops mentioning `SaxpyVectorProofs`.
+
+**How Loops Work**
+Loops require user-supplied invariants. That is not accidental; it is the normal deductive-verification story.
+
+For acyclic code, WP can just recurse backwards. For loops, the true weakest precondition is a fixed point. In practice, Hoare/WP systems ask for an invariant and then prove it is preserved.
+
+In this repo, the invariant is:
+
+```lean
+InvariantMap := BlockLabel → CSL.Assertion
+```
+
+So every CFG block label gets an assertion. In [Loop.lean](/data/user_data/riyaza/cLean/CLean/Examples/Loop.lean:355), for example:
+
+```lean
+loop:
+  ∃ i p, i ≤ n ∧ pc = loop ∧ acc = sum(0..i)
+body:
+  ∃ i, i < n ∧ pc = body ∧ acc = sum(0..i)
+exit:
+  pc = exit ∧ i = n ∧ acc = sum(0..n)
+```
+
+The block VC shape is [blockVC'](/data/user_data/riyaza/cLean/CLean/WP/CFG.lean:244):
+
+```lean
+invariants label ⊢ wpInstrs body termPre
+TerminatorVC ... termPre
+```
+
+For `br loop`, you prove the backedge re-establishes `invariants "loop"`.
+
+For `cbr`, [TerminatorVC.cbr](/data/user_data/riyaza/cLean/CLean/WP/CFG.lean:224) splits the proof:
+
+```text
+termPre entails truePre OR falsePre
+truePre  proves branch-to-true-target invariant
+falsePre proves branch-to-false-target invariant
+```
+
+That is the branch-sensitive fix. Without it, a conditional branch would have to prove both target invariants at once, which is too strong for real loops.
+
+**Design Audit**
+The theory is sound and basically the right one: small-step semantics, separation-logic assertions, instruction WP rules, CFG invariants, and partial-correctness soundness.
+
+The current weakness is presentation. Theorems still look like internal VC proof plumbing instead of user-facing correctness theorems.
+
+The important missing layer is a spec frontend:
+
+- define high-level memory predicates like `GlobalArrayS32`
+- define `SaxpyPre`, `MatmulPre`, etc.
+- prove those imply the byte/resource/address facts
+- package single-warp mode so `OnlyRunnableWarp` is not exposed
+- let users provide loop invariants, but not low-level terminator VCs
+- generate or normalize the block VCs from the IR
+
+So: the implementation is doing the right verification-theory thing, but the examples are currently closer to “proof kernel acceptance tests” than the final pleasant API.
+
+<oai-mem-citation>
+<citation_entries>
+MEMORY.md:34-45|note=[used prior repo proof-stack and roadmap context]
+MEMORY.md:24-30|note=[used supported-slice and core-proof scoping context]
+</citation_entries>
+<rollout_ids>
+019e71cc-d5bd-7cf0-97b6-11833f09b760
+</rollout_ids>
+</oai-mem-citation>
+
+================================================================================
+
+USER:
+are we actually using a concurrent seperation logic (probably first order) and a partial commutative monoid here? If so, how?
+
+================================================================================
+
+ASSISTANT:
+I’ll check the CSL resource definitions directly, because the answer depends on whether `Resource` is merely a map of permissions or whether the code actually proves/uses PCM laws and separating conjunction over it.
+
+================================================================================
+
+ASSISTANT:
+The resource layer confirms it: there is a PCM-style resource model and separating conjunction, but “concurrent” is only partially realized today. I’ll explain the exact split: what is mathematically there, what the WP rules use, and what is not yet a full CSL concurrency rule.
+
+================================================================================
+
+ASSISTANT:
+Yes. The repo is using a shallowly embedded separation logic over a PCM-like resource algebra.
+
+But with two caveats:
+
+1. It is not packaged as a generic `PCM` typeclass.
+2. It is not yet a full concurrent separation logic with a polished parallel/concurrency rule. It has the resource/separating/frame machinery needed for CSL, and some concurrency-oriented resource keys, but current checked proofs mostly use it in single-warp mode.
+
+The resource algebra is in [Resource.lean](/data/user_data/riyaza/cLean/CLean/CSL/Resource.lean:121).
+
+Carrier:
+
+```lean
+structure Resource where
+  entries : List Entry
+```
+
+Unit:
+
+```lean
+def empty : Resource
+```
+
+Composition:
+
+```lean
+def compose (a b : Resource) : Resource :=
+  { entries := a.entries ++ b.entries }
+```
+
+Partiality:
+
+```lean
+def canCompose (a b : Resource) : Prop :=
+  ∀ ea ∈ a.entries, ∀ eb ∈ b.entries, Entry.compatible ea eb
+```
+
+So composition is implemented as a total append operation plus a definedness predicate. That is a standard way to encode a partial commutative monoid in Lean.
+
+Commutativity is not definitional equality because list append is ordered. Instead the code has equivalence:
+
+```lean
+def Equiv (a b : Resource) : Prop :=
+  ∀ entry, entry ∈ a.entries ↔ entry ∈ b.entries
+```
+
+and proves:
+
+```lean
+compose_comm_equiv :
+  Equiv (compose a b) (compose b a)
+```
+
+So mathematically it is a PCM up to `Resource.Equiv`.
+
+The compatibility model is here: [Resource.lean](/data/user_data/riyaza/cLean/CLean/CSL/Resource.lean:43).
+
+Same-key resources are compatible only for read/read byte cells:
+
+```lean
+Cell.compatible
+| .byte .read _, .byte .read _ => True
+| _, _ => False
+```
+
+Different keys are always compatible. That means:
+
+- two reads of the same byte may coexist
+- writes are exclusive
+- registers, predicates, tokens, fragments are exclusive
+- barrier/warp/atomic/MMA-ish tokens are already represented as resource keys, even if not fully used by core examples
+
+The separation logic layer is in [Assertion.lean](/data/user_data/riyaza/cLean/CLean/CSL/Assertion.lean:6):
+
+```lean
+abbrev Assertion := State → Resource → Prop
+```
+
+Separating conjunction is:
+
+```lean
+def sep (p q : Assertion) : Assertion :=
+  fun st r =>
+    ∃ r₁ r₂,
+      Resource.canCompose r₁ r₂ ∧
+      Resource.Equiv r (Resource.compose r₁ r₂) ∧
+      p st r₁ ∧
+      q st r₂
+```
+
+So `p ∗ q` literally means: split the current resource into compatible pieces, give one to `p`, one to `q`.
+
+The WP frame rule uses this. See [wpInstr_frame](/data/user_data/riyaza/cLean/CLean/WP/Instr.lean:58):
+
+```lean
+(wpInstr ... post ∗ frame) ⊢ₛ
+  wpInstr ... (post ∗ frame)
+```
+
+provided the frame is stable under the instruction step. Stability is:
+
+```lean
+StableUnder step p :=
+  ∀ st st' r, step st st' → p st r → p st' r
+```
+
+So the theory is:
+
+```text
+instruction owns/updates its footprint
+frame owns disjoint compatible resources
+frame is stable under this step
+---------------------------------------
+instruction preserves post ∗ frame
+```
+
+That is exactly separation-logic framing.
+
+Where the “concurrent” part currently stands:
+
+The resource model is concurrency-ready: it can separate ownership of bytes, registers, predicates, lanes, barriers, warp tokens, atomics, fragments, etc. The machine semantics is also small-step and can model scheduler choice. But the checked examples avoid real multi-warp interference by proving:
+
+```lean
+StepMachineSelects inv 0 0
+```
+
+usually from:
+
+```lean
+inv ⊢ₛ OnlyRunnableWarp 0 0
+```
+
+So today it is best described as:
+
+> a first-order-ish shallow separation logic with a PCM-style resource algebra, used for WP/frame reasoning, with concurrency-oriented resources, but currently exercised mostly as a single-warp CSL fragment.
+
+The next real CSL step would be proving preservation under unrelated warp steps: if warp A owns its footprint and warp B steps with disjoint resources, A’s invariant remains stable. That would turn the current single-warp proof discipline into genuine multi-warp concurrent separation reasoning.
+
+================================================================================
+
+USER:
+Wait where/why are we using lists with that equiv operation and not sets/multisets? also what do you mean "current checked proofs mostly use it in single-warp mode."? How are we currently treating lanes vs warps vs blocks vs threads?
+
+================================================================================
+
+ASSISTANT:
+I’ll pull the state/scheduler and control assertions so I can answer this against the actual model, especially how `LaneId`, `WarpId`, CTA/block state, and `StepMachine` interact.
+
+================================================================================
+
+ASSISTANT:
+Yes, this is a real design wart worth noticing.
+
+**Why Lists**
+`Resource` is currently:
+
+```lean
+structure Resource where
+  entries : List Entry
+```
+
+in [Resource.lean](/data/user_data/riyaza/cLean/CLean/CSL/Resource.lean:121).
+
+Composition is list append:
+
+```lean
+def compose (a b : Resource) : Resource :=
+  { entries := a.entries ++ b.entries }
+```
+
+and equality of resources is not Lean equality, but extensional membership equivalence:
+
+```lean
+def Equiv (a b : Resource) : Prop :=
+  ∀ entry, entry ∈ a.entries ↔ entry ∈ b.entries
+```
+
+So the model is “set-like resources represented by lists.” Lists make append, induction, and rewriting easy; `Equiv` quotients away ordering. A true `Finset`/`HashSet` would avoid the explicit equivalence relation but would make some proofs more awkward. A `Multiset` would preserve multiplicity, but the current model intentionally allows duplicating read permissions.
+
+For example, same-byte read/read is compatible:
+
+```lean
+Cell.compatible
+| .byte .read _, .byte .read _ => True
+```
+
+So one read permission can effectively be split into two identical read permissions because `Equiv` ignores duplicate list entries. That gives contraction/shareability for reads. Writes do not have this because write/write is incompatible, so `canCompose` blocks splitting write ownership twice.
+
+This is a reasonable simple PCM-ish model, but it is not a polished resource algebra. It is not cancellative, not quotient-packaged, and not a precise fractional permission model. If later we need serious permission accounting, I would replace this with either:
+
+```text
+ResourceKey → Share × CellShape
+```
+
+or a quotiented finite map/multiset with an explicit share algebra.
+
+**Single-Warp Mode**
+The operational semantics has CTAs, warps, and lanes.
+
+Types:
+
+```lean
+CTAId  := Nat
+WarpId := Nat
+LaneId := Fin 32
+```
+
+State hierarchy:
+
+```text
+State
+  ctas : CTAId ↦ CTAState
+    warps : WarpId ↦ WarpState
+      lanes : Array LaneState  -- 32 lanes
+```
+
+A lane is basically one SIMD lane/thread state: registers, predicates, local memory, PC, and status. A CUDA-style logical thread is represented by `(cta, warp, lane)`. `tid.x` is computed from:
+
+```lean
+warp * 32 + lane.val
+```
+
+then projected through `blockDim`.
+
+The small-step semantics is machine-level nondeterministic over CTA and warp:
+
+```lean
+StepMachine.mk :
+  StepWarp st cta warp st' →
+  StepMachine st st'
+```
+
+So in principle any runnable warp in any CTA can step.
+
+But the checked proofs usually prove preservation only for one selected warp, normally `(0, 0)`. This is encoded by:
+
+```lean
+StepMachineSelects inv 0 0
+```
+
+meaning:
+
+```lean
+if inv holds and StepMachine st st',
+then that machine step is StepWarp st 0 0 st'
+```
+
+Most examples discharge that through:
+
+```lean
+inv ⊢ₛ OnlyRunnableWarp 0 0
+```
+
+So “single-warp mode” means the invariant rules out any machine step except CTA 0, warp 0. We are not yet proving that unrelated warps can step while preserving this warp’s invariant.
+
+**Lanes vs Warps**
+A warp step executes one instruction/terminator for participating lanes.
+
+The control assertion:
+
+```lean
+warpAt cta warp pc lanes
+```
+
+means: the warp exists, runnable lanes are lockstep at `pc`, and the lanes participating in the current unguarded instruction are exactly `lanes`.
+
+Instruction execution computes participants from runnable lanes and guard predicates, then applies the instruction to each participant lane. For ordinary register ops and loads this is `applyToLaneIds?`; stores are sequentialized in participant lane order. Then runnable PCs advance.
+
+So:
+
+- lane state is per-thread state
+- warp state enforces lockstep execution for runnable lanes
+- CTA state holds warps and shared memory
+- IR `Block` means CFG basic block, not CUDA CTA block
+
+Current examples mostly use:
+
+- CTA `0`
+- warp `0`
+- one lane for loop/matmul scalar examples
+- multiple lanes only in the SAXPY vector lift, still within one warp and `n ≤ 32`
+
+So the semantics is multi-CTA/multi-warp capable structurally, but the proof layer currently uses a single selected warp discipline.
+
+<oai-mem-citation>
+<citation_entries>
+MEMORY.md:34-38|note=[used prior proof-stack and single-warp roadmap context]
+MEMORY.md:24-30|note=[used supported-slice scoping context]
+</citation_entries>
+<rollout_ids>
+019e71cc-d5bd-7cf0-97b6-11833f09b760
+</rollout_ids>
+</oai-mem-citation>
+
+================================================================================
+
+USER:
+so what should we do next in your opinion? remember, the large-scale goal here is a fully-featured ptx program verification system
+
+================================================================================
+
+ASSISTANT:
+I’ll answer this as a roadmap, not start changing code. The key judgment call is whether to keep proving bigger examples manually or pause to build the abstraction layer that makes the examples look like real PTX correctness theorems.
+
+================================================================================
+
+ASSISTANT:
+My opinion: next we should stop adding bigger bespoke examples for a moment and build the missing abstraction layer. The core WP substrate is now credible enough. The problem is that the theorem surface still looks like proof plumbing, not a PTX verification system.
+
+The next milestone should be:
+
+```lean
+def saxpyKernel : KernelEnv := ...
+
+theorem saxpy_correct
+    (hpre : SaxpyPre init params xs ys zs)
+    (hterm : TerminatesAt init final) :
+    SaxpyPost final params xs ys
+```
+
+No `SaxpyVectorProofs`, no per-lane byte slices, no `honly`, no manual `DecodedScalar`/`EncodedScalar` assumptions at the top level. Those facts should be derived internally from `SaxpyPre`.
+
+**Priority 1: Public Spec Layer**
+Build high-level predicates:
+
+```lean
+GlobalArrayS32 base n xs
+WritableGlobalArrayS32 base n old
+LaunchSingleWarp params
+KernelLoaded env
+```
+
+Then prove lemmas that lower these into current CSL byte/register/resource assertions. The current WP rules can stay mostly as they are. We need a frontend layer that hides them.
+
+Acceptance criterion: SAXPY and global sum theorems should have human-readable preconditions and postconditions.
+
+**Priority 2: Package Single-Warp Mode**
+Right now single-warp control is expressed through `OnlyRunnableWarp 0 0`. That is correct but too low-level.
+
+Make a clean predicate:
+
+```lean
+SingleWarpKernelMode env cta warp
+```
+
+or similar, and prove:
+
+```lean
+SingleWarpKernelMode ... ∗ inv ⊢ OnlyRunnableWarp cta warp
+```
+
+Then examples stop exposing scheduler facts. This is still not full concurrency, but it makes the current model honest and usable.
+
+**Priority 3: VC Generation / Proof API**
+Users should provide:
+
+- the program
+- the precondition
+- loop invariants
+- the postcondition
+
+They should not manually assemble `blockVC'`, `TerminatorVC`, branch-control facts, and frame permutations.
+
+We should create a layer like:
+
+```lean
+KernelVCsFor env invariants post
+```
+
+with helper tactics or structured constructors that generate one obligation per block. Loops still need user invariants. That is normal. But the user should not have to touch raw terminator internals unless debugging.
+
+**Priority 4: Fix The Resource Algebra Before Real Concurrency**
+For fully-featured PTX, the current list-plus-`Equiv` resource model is probably too informal long-term. It works for the current slice, but before atomics/barriers/shared-memory synchronization, I would redesign or at least wrap it.
+
+I would introduce a proper resource algebra interface:
+
+```lean
+class ResourceAlgebra where
+  valid : R → Prop
+  compose : R → R → R
+  compatible : R → R → Prop
+  equiv : R → R → Prop
+```
+
+Then instantiate it with the current model or a finite-map/share model. For PTX, we will likely want read-sharing, write exclusivity, barrier tokens, atomic permissions, warp tokens, and fragments modeled explicitly.
+
+**Priority 5: True Multi-Warp Preservation**
+A fully-featured verifier cannot keep assuming only warp `(0,0)` steps.
+
+The real theorem should say: if the scheduler steps some other warp, my invariant is preserved by separation/framing. That means proving “unrelated warp stability” lemmas:
+
+```lean
+warpInv cta warp ∗ otherWarpInv cta' warp'
+```
+
+and if `(cta, warp) ≠ (cta', warp')`, a step of one does not break the other except through shared/global resources it owns.
+
+This is where the CSL story becomes real concurrency, not just a sequential WP with resource framing.
+
+**Priority 6: Generalize Examples**
+After the public spec layer exists, revisit examples:
+
+- SAXPY: clean final theorem over arrays.
+- Global sum: parametric `n`, not fixed `n = 3`.
+- Matmul: parametric inner loop, then eventually full grid-level matrix theorem.
+- Add lowered PTX/parser path so correctness is about a parsed/lowered kernel, not only hand-written IR.
+
+**Priority 7: Then Add Hard PTX Features**
+Only after the above:
+
+1. shared memory without barriers
+2. barriers and CTA synchronization
+3. warp collectives
+4. atomics
+5. MMA/fragments
+
+Doing atomics or MMA now would build on an awkward theorem interface and weak concurrency story.
+
+So the short version: the next best move is not “prove a harder kernel.” It is “turn the current proof substrate into a user-facing verification API.” Once SAXPY/global-sum/matmul have clean correctness statements, then expand the PTX feature surface.
+
+<oai-mem-citation>
+<citation_entries>
+MEMORY.md:36-45|note=[used prior proof-stack and roadmap guidance]
+MEMORY.md:24-30|note=[used core-proof-first and docs-only scope context]
+</citation_entries>
+<rollout_ids>
+019e71cc-d5bd-7cf0-97b6-11833f09b760
+</rollout_ids>
+</oai-mem-citation>
+
+================================================================================
+
+USER:
+eh well look at how .loom/ does it. i don't know if i fully agree with your proposed plan here. I agree that we need to improve the proof surface here, but before that, that single warp assumption is scaring me a bit. shouldn't we first confirm/robustify our current (verbose) system to be able to prove general facts without whatever this single warp stuff is? That, plus also redoing our examples to be properly general (again, still probably pretty verbose and ugly) is important. And more importantly, and before all of that stuff, we should redo how our algebra is done do be a proper CSL and PCM as you noted, so that everything is robust.
+
+ Then we can improve the proof surface, though exaclty how we do that i'm not sure i still agree. yes we should eventually look like that, and look at loom to more detailed understand how we should (make new tactics? lemmas? simp/grind lemmas/procs? idk)
+
+================================================================================
+
+ASSISTANT:
+I’ll inspect `.loom/` before answering, because the right next step depends on what pattern it uses for algebra, proof generation, and proof surface. I’ll also check memory briefly for any existing notes on this repo’s proof-stack direction.
+
+================================================================================
+
+ASSISTANT:
+`.loom/` is a separate Lean project checked into this workspace. I’m reading its README and core theory files now, especially the monad/algebra/tactic split, then I’ll map that back to this PTX verifier.
+
+================================================================================
+
+ASSISTANT:
+I think your pushback is right. I would revise the plan.
+
+After looking at `.loom/`, the main lesson is not “make the theorem pretty first.” Loom’s stack is:
+
+1. a principled semantic/algebra layer,
+2. generic WP generation over that layer,
+3. user annotations like `invariant`,
+4. tactics like `loom_solve` that expose named VCs.
+
+For us, the equivalent order should be:
+
+1. fix the resource algebra / CSL foundations,
+2. remove the single-warp proof restriction,
+3. make examples genuinely parametric/general,
+4. then improve the proof surface and automation.
+
+**Why I Agree**
+The single-warp assumption is too structural to paper over with a nicer API. Right now `StepMachine` is already nondeterministic over arbitrary `cta, warp`, but most examples prove:
+
+```lean
+StepMachineSelects inv 0 0
+```
+
+meaning: under this invariant, every machine step must be warp `(0,0)`.
+
+That is okay as a temporary smoke-test mode. It is not okay as the foundation for a fully-featured PTX verifier. If we build pretty theorem wrappers on top of that, we risk hiding a weak scheduler/concurrency story.
+
+**What Loom Suggests**
+Loom is monadic, not CSL/PCM-based in the PTX sense. It uses monad transformer algebras, continuation/WP semantics, `#derive_wp`, source-level `while ... invariant ...`, and tactics that generate named goals.
+
+The part to copy is architectural:
+
+- a small trusted semantic core,
+- generic WP derivation,
+- user-written invariants,
+- generated VCs,
+- automation only after the theory is clean.
+
+The part not directly portable is the monadic source-language shape. PTX is CFG/small-step/SIMT, so our foundation has to handle scheduler steps, warps, lanes, memory ownership, shared memory, atomics, barriers, etc.
+
+**What I Would Do Next**
+First: replace or wrap the current list-resource algebra with a proper resource algebra.
+
+Concrete target:
+
+```lean
+class ResourceAlgebra (R : Type) where
+  valid : R → Prop
+  unit : R
+  comp : R → R → R
+  compatible : R → R → Prop
+  equiv : R → R → Prop
+  -- laws: assoc/comm/unit up to equiv, frame/update laws, etc.
+```
+
+Then instantiate it with a finite-map resource model, probably per-key algebra:
+
+```text
+ResourceKey ↦ CellResource
+```
+
+where same-key composition is defined by the cell algebra:
+
+- read/read byte permissions compose,
+- write is exclusive,
+- values agree when duplicated/read-shared,
+- registers/preds are exclusive,
+- barrier/warp/atomic/fragment tokens get explicit algebras later.
+
+This removes the current “lists plus `Equiv` pretending to be a quotient” issue and gives us a serious base for CSL.
+
+Second: prove arbitrary-scheduler preservation.
+
+The goal should be to stop proving:
+
+```lean
+StepMachineSelects inv 0 0
+```
+
+and instead prove:
+
+```lean
+StepPreserves GlobalKernelInvariant
+```
+
+for arbitrary `StepMachine`.
+
+That means case-splitting on the actual stepped `(cta, warp)`:
+
+```lean
+StepMachine.mk ... (StepWarp.mk ... stepBlock)
+```
+
+Then:
+
+- if this warp owns the active block invariant, use the block VC;
+- all other warp invariants are framed/stable;
+- global/shared resources are protected by separation ownership;
+- writes require exclusive ownership;
+- reads can be shared;
+- unrelated local/register/predicate resources are stable.
+
+That is the real CSL story.
+
+Third: redo examples in the verbose system, before UI polish.
+
+I would make these regression gates:
+
+```lean
+saxpy_vector_kernel_valid_general
+global_sum_loop_kernel_valid_general
+matmul_cell_loop_kernel_valid_general
+```
+
+The important difference is: no fixed `n = 3`, no scheduler-selection assumption, no hidden single-warp mode unless the theorem explicitly says it is a single-warp launch theorem.
+
+For SAXPY, a single-warp theorem with `n ≤ 32` is fine, but it should be because the launch has one warp and all active lanes are in that warp, not because the proof assumes all machine steps are warp 0.
+
+Fourth: only then build the Loom-like proof surface.
+
+For PTX, I’d expect something like:
+
+```lean
+ptx_vcgen
+```
+
+or
+
+```lean
+prove_kernel_correct
+```
+
+that unfolds `KernelSpec.Valid`, generates block VCs, tags obligations by block/instruction/invariant, and leaves human-readable goals. This is where Loom’s `invariant` annotations, `loom_solve!` diagnostics, and named assertions become relevant.
+
+So the revised roadmap is:
+
+1. Resource algebra / CSL refactor.
+2. General scheduler preservation, no `StepMachineSelects` in completed examples.
+3. Parametric examples using the verbose proof layer.
+4. Loom-style VC generation and proof ergonomics.
+5. Then hard PTX features: shared sync, barriers, warp ops, atomics, MMA.
+
+That order is more conservative and more correct for the large-scale goal.
+
+<oai-mem-citation>
+<citation_entries>
+MEMORY.md:36-45|note=[used prior proof-stack and roadmap context]
+MEMORY.md:24-30|note=[used core-proof-first scoping context]
+</citation_entries>
+<rollout_ids>
+019e71cc-d5bd-7cf0-97b6-11833f09b760
+</rollout_ids>
+</oai-mem-citation>
+
+================================================================================
+
+USER:
+<environment_context>
+  <cwd>/data/user_data/riyaza/cLean</cwd>
+  <shell>bash</shell>
+  <current_date>2026-05-31</current_date>
+  <timezone>America/New_York</timezone>
+</environment_context>
+
+================================================================================
+
+USER:
+well wait, why shouldn't we be monadic? cant we define some monadic state structure for our ptx and define operations on it? I remember their monad transformer stuff for vcgen (kinda like a generalized djikstra monad) was interesting.
+
+================================================================================
+
+ASSISTANT:
+I’ll use the Lean 4 skill here because this is a design question about the Lean proof architecture, and I’ll ground the answer in the current repo plus the Loom shape rather than answering abstractly.
+
+================================================================================
+
+ASSISTANT:
+I’m going to re-check the exact current encodings for state/step/WP/CSL and the Loom monad files, because the answer depends on which layer we’re talking about: executable PTX semantics, WP transformer, or proof automation.
+
+================================================================================
+
+ASSISTANT:
+The repo confirms the current setup is already “monadic in spirit” at the instruction level: `stepInstr?` and `stepTerminator?` are deterministic partial state transformers. The missing piece is not monads versus no monads; it is choosing the right monad/logic boundary so scheduler nondeterminism and CSL resources are not hidden.
+
+================================================================================
+
+ASSISTANT:
+**Short Answer**
+Yes, we probably *should* move toward a monadic architecture. The thing to avoid is a plain “PTX is just `StateM State`” model, because PTX verification needs partiality, demonic scheduler nondeterminism, SIMT warp/lane structure, and CSL resources. But a Loom-style generalized Dijkstra/WP monad is a very plausible direction.
+
+Right now the repo is already halfway there, but manually. For example, [CLean/WP/Instr.lean](/data/user_data/riyaza/cLean/CLean/WP/Instr.lean:15) defines:
+
+```lean
+def wpInstr ... :=
+  fun st r =>
+    ∀ st', stepInstr? st cta warp gi = some st' →
+      ∃ r', Resource.Update r r' ∧ post st' r'
+```
+
+That is a predicate transformer. It is basically a weakest liberal precondition over `(State, Resource)`, written directly instead of derived from a monadic semantics.
+
+**What Should Be Monadic**
+I think the right split is:
+
+1. Keep or define executable PTX operations as a monad:
+   ```lean
+   readReg
+   writeReg
+   loadBytes
+   storeBytes
+   currentPc
+   advancePc
+   branch
+   terminate
+   ```
+
+   Today these are mostly buried inside `stepInstr?` / `stepTerminator?`.
+
+2. Model machine scheduling with nondeterminism, not a fixed warp:
+   ```lean
+   choose runnable CTA/warp
+   step that warp
+   ```
+
+   The WP for this should be demonic: to prove correctness, the postcondition must hold for every scheduler choice. This is exactly what would eliminate the scary selected-warp assumption.
+
+3. Make the WP target be CSL assertions:
+   ```lean
+   Assertion := State → Resource → Prop
+   ```
+
+   But before leaning hard on this, we should clean up `Resource` into a real PCM/resource algebra. The current list-plus-equivalence model in [CLean/CSL/Resource.lean](/data/user_data/riyaza/cLean/CLean/CSL/Resource.lean:121) is serviceable but not the foundation I’d want for full PTX concurrency.
+
+**What Loom Is Doing**
+Loom’s key idea is not just “use do-notation.” It defines an abstract monadic algebra:
+
+```lean
+def wp (c : m α) (post : α → l) : l
+```
+
+where `l` is a complete lattice of assertions. Then `wp_bind`, `WPGen.bind`, loop invariants, and VC generation are generic. See [.loom/Loom/MonadAlgebras/WP/Basic.lean](/data/user_data/riyaza/cLean/.loom/Loom/MonadAlgebras/WP/Basic.lean:18) and [.loom/Loom/MonadAlgebras/WP/Gen.lean](/data/user_data/riyaza/cLean/.loom/Loom/MonadAlgebras/WP/Gen.lean:108).
+
+That maps well to us, but only if our assertion algebra is strong enough. For PTX, `l` should eventually be a CSL/BI assertion lattice, not just plain `State → Prop`.
+
+**The Trap**
+A naive monadic refactor like:
+
+```lean
+abbrev PTXM := StateT State Option
+```
+
+would make instruction execution cleaner, but it would not solve the hard verification issues. It would still fail to model:
+
+- arbitrary warp scheduling,
+- partial correctness over all executions,
+- frame-preserving resource updates,
+- shared/global/local ownership,
+- interference between CTAs/warps/lanes,
+- label invariants for unstructured CFG loops.
+
+So I’d say: yes to monads, no to “plain state monad as the whole story.”
+
+**My Recommendation**
+I’d revise the roadmap like this:
+
+1. First define a proper resource algebra / PCM layer.
+2. Then define `CSL.Assertion` as a real ordered/separating assertion structure.
+3. Then introduce a PTX monadic semantics for primitive operations and prove it agrees with current `stepInstr?`.
+4. Then define a demonic nondeterministic machine-step monad for arbitrary scheduler execution.
+5. Then rebuild WP/VC generation Loom-style on top of that.
+6. Only after that improve user-facing syntax/tactics.
+
+So your instinct is right: monadic VC generation is probably the architecture we want. I just would not start by hiding the scheduler and resources inside a convenient `StateT`. The monadic layer should expose those things mathematically, not abstract them away prematurely.
+
+<oai-mem-citation>
+<citation_entries>
+MEMORY.md:36-45|note=[used repo proof-stack and roadmap context]
+MEMORY.md:24-30|note=[used docs-only and core-proof-first context]
+</citation_entries>
+<rollout_ids>
+019e71cc-d5bd-7cf0-97b6-11833f09b760
+</rollout_ids>
+</oai-mem-citation>
+
+================================================================================
+
+USER:
+well wait, why shouldn't we be monadic? cant we define some monadic state structure for our ptx and define operations on it? I remember their monad transformer stuff for vcgen (kinda like a generalized djikstra monad) was interesting.
+
+================================================================================
+
+ASSISTANT:
+I’ll ground this in the actual code instead of answering from memory. I’m going to quickly re-open the PTX semantics/WP files and the Loom monad pieces, then I’ll separate “could be monadic” from “what has to remain explicit for SIMT/concurrency.”
+
+================================================================================
+
+ASSISTANT:
+The key thing I’m seeing is that the current repo already has the mathematical shape of a predicate-transformer semantics: `wpInstr` is literally “for every executable next state, produce an updated resource satisfying post.” Loom packages that pattern through monad algebras; our code currently spells it directly against `State`, `Resource`, and small-step relations.
+
+================================================================================
+
+ASSISTANT:
+Yes, we can be monadic. More strongly: I think the right long-term design is monadic at the VC-generation layer.
+
+What I meant earlier is narrower: we should not replace the hard PTX semantics with a cute deterministic `StateM State` and accidentally hide scheduling, SIMT lockstep, barriers, atomics, faults, and resource ownership. But a Loom-style generalized Dijkstra monad is a very reasonable way to package the WP calculus.
+
+In fact, the current code is already doing a non-monadic, hand-expanded version of that idea.
+
+Current `wpInstr` is basically:
+
+```lean
+def wpInstr cta warp instr post : Assertion :=
+  fun st r =>
+    ∀ st', stepInstr? st cta warp instr = some st' →
+      ∃ r', Resource.Update r r' ∧ post st' r'
+```
+
+That is a predicate transformer. It says: for every concrete next state produced by the executable semantics, the logical resource can be updated and the postcondition holds. Loom would package this as:
+
+```lean
+wp : PtxM α → (α → Assertion) → Assertion
+```
+
+with laws like:
+
+```lean
+wp (pure x) post = post x
+wp (x >>= f) post = wp x (fun y => wp (f y) post)
+```
+
+So yes, there is a very plausible design where PTX instructions become monadic operations and the WP is derived compositionally.
+
+The important part is choosing the right monad.
+
+A bad model would be:
+
+```lean
+StateM State Unit
+```
+
+because that is deterministic and sequential. It would erase the thing we most need to reason about: arbitrary warp/block scheduling.
+
+A better model is something like:
+
+```lean
+PtxM α ≈ State → Set (α × State)
+```
+
+or equivalently a `StateT State` over demonic nondeterminism, maybe with `ExceptT Fault` and `ReaderT` for execution context.
+
+Then machine stepping is not “run warp 0,0”:
+
+```lean
+machineStep : PtxM Unit
+```
+
+It should demoniacally choose any runnable `(cta, warp)` and step that warp. Its WP therefore quantifies over all possible scheduler choices. That is exactly what we want if we are trying to eliminate the scary single-warp proof assumption.
+
+CSL/PCM still matters. The monad gives us sequencing, nondeterminism, exceptions, loops, and VC generation. But the assertion logic still needs ownership and framing:
+
+```lean
+Assertion := State → Resource → Prop
+```
+
+So the monadic WP target should be `Assertion`, not plain `State → Prop`. Loom’s abstraction is nice here because its `l` can be a complete lattice. Our `Assertion` can be made into that lattice pointwise, while also carrying extra separation connectives like:
+
+```lean
+p ∗ q
+p ⊢ₛ q
+```
+
+So monadic WP and CSL are not competing designs. The robust design is:
+
+```text
+executable PTX semantics
+  → monadic effect model with nondet/fault/state
+  → Dijkstra/WP transformer into CSL assertions
+  → separation/PCM frame rules
+  → VC generation/tactics
+```
+
+Loops still need invariants. Loom hides the plumbing better, but it does not magically infer arbitrary loop invariants. For structured loops, the user-facing syntax can look like:
+
+```lean
+while cond
+  invariant I
+do
+  body
+```
+
+For raw PTX CFGs, the analogue is still an invariant map:
+
+```lean
+BlockLabel → Assertion
+```
+
+because PTX is label/jump based, not necessarily structured. A monadic frontend can make common structured cases nicer, but arbitrary CFG verification still needs cutpoint/label invariants.
+
+My current opinion: we should absolutely explore a monadic layer, but in this order:
+
+1. Fix the resource algebra/PCM so `Assertion` is the right logical target.
+2. Define a small `PtxM`/Dijkstra layer whose WP is over `CSL.Assertion`.
+3. Prove that current `wpInstr`, `wpTerminator`, and `wpInstrs` agree with the monadic WP for fixed warp steps.
+4. Define machine-step WP with demonic scheduler choice, not `OnlyRunnableWarp`.
+5. Migrate examples onto that general scheduler model.
+6. Then build Loom-style VC generation/tactics.
+
+So I agree with your instinct. Monadic is probably the right architecture. The warning is just that the monad has to model PTX’s real effects: nondeterministic scheduling, SIMT lane masks, partial/faulting behavior, memory/resource ownership, and later barriers/atomics. A plain state monad would be too weak, but a generalized Dijkstra monad over CSL assertions is exactly the kind of thing we should be aiming at.
+
+================================================================================
+
+USER:
+<environment_context>
+  <current_date>2026-06-01</current_date>
+  <timezone>America/New_York</timezone>
+</environment_context>
+
+================================================================================
+
+USER:
+Wait, so why don't we just use loom as a backend then? Like isn't that exactly what loom is built for? Also doesn't loom use some novel version of the djikstra monad for vcgen? See the paper: '/data/user_data/riyaza/cLean/.loom/Foundational Multi-Modal Program Verifiers.pdf'
+
+Also what we're doing here (i.e. instantiating loom for program verification - particularly in ptx - seems similar to velvet (see code: /data/user_data/riyaza/cLean/.velvet and paper: '/data/user_data/riyaza/cLean/.velvet/Velvet Multi-Modal Verifier.pdf'). what do you think?
+
+================================================================================
+
+ASSISTANT:
+I’ll inspect the Loom and Velvet papers/code locally before answering. The question is really about architectural fit, so I want to distinguish “use Loom wholesale” from “instantiate Loom’s algebra/VC machinery while keeping PTX-specific semantics and CSL resources.”
+
+================================================================================
+
+ASSISTANT:
+`pdftotext` is not installed here, so I’m falling back to source files and available text docs first. I’ll also check whether another PDF extractor is available; if not, the code and READMEs still give enough to answer the backend-design question.
+
+================================================================================
+
+ASSISTANT:
+The paper text confirms the main point: Loom is meant to derive sound VC generators from executable monadic semantics via ordered monad transformer algebras, and Velvet is one instantiation for Dafny-style imperative programs. I’m checking the later Loom/Velvet machinery now to see how much is reusable versus tied to source-level structured programs.
+
+================================================================================
+
+ASSISTANT:
+Yes, I think you’re basically right: **CLean should probably become a PTX-specific Loom instantiation**, not keep growing an entirely separate hand-written WP stack forever.
+
+But “just use Loom” still means doing real adaptation work. Loom is not a black-box verifier for arbitrary small-step semantics; it is a framework for deriving VC generators once your language semantics is presented as an executable monadic semantics with the right algebraic WP interpretation.
+
+The key Loom idea is in [Defs.lean](/data/user_data/riyaza/cLean/.loom/Loom/MonadAlgebras/Defs.lean:52): it defines ordered monad algebras
+
+```lean
+μ : m l → l
+```
+
+where `l` is the assertion lattice. Then WP is generic:
+
+```lean
+wp c post := liftM c post
+```
+
+So yes, it is very much a Dijkstra-monad-style framework, but the paper’s novelty is the **monad transformer algebra** setup: instead of manually defining a Dijkstra monad for each full effect stack, Loom proves reusable algebra instances for effects like `StateT`, `ReaderT`, `ExceptT`, divergence, and nondeterminism.
+
+Velvet is exactly the model we should learn from. It defines:
+
+```lean
+abbrev VelvetM α := NonDetT DivM α
+```
+
+in [VelvetTheory.lean](/data/user_data/riyaza/cLean/.velvet/Velvet/VelvetTheory.lean:3), then its `method ... require ... ensures ...` syntax elaborates to a monadic Lean definition and a generated `triple pre program post` theorem in [Syntax.lean](/data/user_data/riyaza/cLean/.velvet/Velvet/Syntax.lean:343). That is very close to the user experience we eventually want for PTX kernels.
+
+The difference is that Velvet verifies structured source programs over Lean values/arrays. PTX verification has extra semantic weight:
+
+- arbitrary scheduler choice over CTAs/warps
+- SIMT lanes and active masks
+- CFG labels and unstructured branches
+- global/shared/local/param/const memory spaces
+- ghost resources and separation logic
+- barriers, atomics, warp ops, MMA later
+- soundness against our executable PTX small-step semantics
+
+So I would **not** use Velvet as the backend. Velvet is a frontend/verifier built on Loom. For us, Velvet is a design reference. Loom is the backend candidate.
+
+The architectural move I’d make is:
+
+```text
+CLean PTX IR / executable semantics
+  ↓
+PTX monadic semantics or adapter
+  ↓
+Loom MAlgOrdered / WPGen layer
+  ↓
+CSL assertion lattice: State → Resource → Prop
+  ↓
+PTX-specific VC generator for blocks, CFGs, scheduler, lanes
+  ↓
+Velvet-like kernel syntax / prove_correct command
+```
+
+One important subtlety: our assertion type is not plain `State → Prop`. It is currently:
+
+```lean
+State → Resource → Prop
+```
+
+So we need to instantiate Loom’s assertion lattice with CSL assertions, and we still need a proper PCM/separation algebra underneath. Loom gives us generic WP plumbing; it does not automatically give us the PTX resource model or frame rules.
+
+Also, the current repo is on Lean `v4.20.1`, while local `.loom` is `v4.21.0` and `.velvet` is `v4.24.0`. So importing Loom directly is probably a small toolchain migration/porting project, not a one-line dependency change.
+
+My recommendation changed after looking at Loom/Velvet: the next serious design step should be a **Loom bridge prototype**, not more hand-written examples or tactics. Concretely:
+
+1. Port/import enough Loom core: `MAlgOrdered`, `wp`, `WPGen`, `NonDetT`.
+2. Define `CompleteLattice` / likely `CompleteBooleanAlgebra` instances for `CSL.Assertion`.
+3. Prototype a `PtxM` whose WP matches our current `wpInstr`.
+4. Prove one instruction rule, e.g. `assignReg`, agrees with existing semantics.
+5. Add demonic scheduler choice for arbitrary runnable warp, removing the single-warp crutch.
+6. Then rebuild CFG/block VC generation Loom-style.
+7. Only after that, build Velvet-like user syntax for PTX kernels.
+
+So: yes, use Loom as the conceptual/backend foundation. But do it as **CLean-on-Loom**, not **PTX-through-Velvet**. Velvet shows the end-user shape; Loom gives the machinery; CLean still has to supply the PTX semantics, CSL/PCM, scheduler model, and PTX-specific VC layer.
+
+================================================================================
+
+USER:
+Yes of course, Velvet should be helpful as a conceptual/structural guide that we can copy ideas from, but we won't actually use it as a dependency or anything. I'm not sure yet if we should use loom as a backend dependency, or if the modifications we need are too much to use loom directly, rather requiring a fork/custom loom-inspired system.
+
+Now, why are we using CSL and PCM's for this ptx project? Does loom support that? whats the difference between that and velvet? Mathematically, what are we doing here?
+
+================================================================================
+
+USER:
+Yes of course, Velvet should be helpful as a conceptual/structural guide that we can copy ideas from, but we won't actually use it as a dependency or anything. I'm not sure yet if we should use loom as a backend dependency, or if the modifications we need are too much to use loom directly, rather requiring a fork/custom loom-inspired system.
+
+Now, why are we using CSL and PCM's for this ptx project? Does loom support that? whats the difference between that and velvet? Mathematically, what are we doing here? if loom doesn't support it, what mathematics governs how our vcgen should work? if it does, how do we encode this CSL robustly and properly?
+
+================================================================================
+
+ASSISTANT:
+I’ll check whether Loom already has any separation-logic/resource-algebra layer. My expectation is that Loom supports arbitrary assertion lattices, but not CSL-specific PCM laws out of the box; I’ll verify that against the local Loom sources.
+
+================================================================================
+
+ASSISTANT:
+Yes: Loom can support CSL **as the assertion domain**, but Loom does not itself provide a separation-logic/resource-algebra framework.
+
+The split is:
+
+```text
+Loom:
+  generic monadic WP / VC-generation machinery over an assertion lattice l
+
+CLean/PTX:
+  the assertion lattice l should be CSL assertions
+  the CSL assertions are built from a PTX resource algebra / PCM
+```
+
+So Loom gives us the Dijkstra/WP skeleton. We still need to supply the PTX-specific separation logic.
+
+**Why CSL/PCM?**
+PTX is not like Velvet’s simple imperative source language. Velvet mostly reasons about Lean values, arrays, and structured mutable variables. Its assertions are essentially ordinary propositions over program values/state. It does not need ownership to say “this thread owns register `%r1`,” “this warp owns these lane predicates,” “this byte is writable,” or “this shared-memory invariant is protected by a barrier token.”
+
+PTX needs that because we eventually need to reason locally about a concurrent machine:
+
+```text
+global memory byte 0x100 is writable
+∗ lane 3 owns register %r4
+∗ warp 0 owns PC/lockstep facts
+∗ CTA 0 owns shared-memory fragment
+∗ barrier token / atomic token / MMA fragment
+```
+
+The PCM is the algebra of those resources. Mathematically, it gives us a partial composition operation:
+
+```text
+r₁ ⋅ r₂ = r
+```
+
+defined only when resources are compatible. For example:
+
+```text
+write byte a ⋅ write byte a      undefined
+write byte a ⋅ read byte a       undefined
+read byte a ⋅ read byte a        maybe defined, depending on permission model
+reg lane0 %x ⋅ reg lane1 %x      defined
+reg lane0 %x ⋅ reg lane0 %x      undefined
+```
+
+Then separation logic defines:
+
+```lean
+P ∗ Q := fun st r =>
+  ∃ r₁ r₂, r₁ ⋅ r₂ = r ∧ P st r₁ ∧ Q st r₂
+```
+
+Current CLean has a first version of this in [Assertion.lean](/data/user_data/riyaza/cLean/CLean/CSL/Assertion.lean:6) and [Resource.lean](/data/user_data/riyaza/cLean/CLean/CSL/Resource.lean:121), but it is not yet the robust algebra I’d want to build on long-term.
+
+**Does Loom Support This?**
+Loom supports arbitrary assertion lattices. Its core abstraction is `MAlgOrdered`, where a monadic computation is interpreted into some complete lattice `l`; see [Defs.lean](/data/user_data/riyaza/cLean/.loom/Loom/MonadAlgebras/Defs.lean:72). `WPGen` then proves generated VCs sound by showing:
+
+```lean
+get post ≤ wp x post
+```
+
+see [Gen.lean](/data/user_data/riyaza/cLean/.loom/Loom/MonadAlgebras/WP/Gen.lean:108).
+
+So we can set:
+
+```lean
+l := CSL.Assertion
+-- morally:
+CSL.Assertion := State → Resource → Prop
+```
+
+and instantiate the complete lattice pointwise:
+
+```text
+P ≤ Q      := ∀ st r, P st r → Q st r
+P ⊓ Q      := fun st r => P st r ∧ Q st r
+P ⊔ Q      := fun st r => P st r ∨ Q st r
+⊤          := fun _ _ => True
+⊥          := fun _ _ => False
+```
+
+But `∗` is **not** Loom’s lattice conjunction. It is extra BI/separation structure we add on top. Loom does not know anything about `∗`, frame rules, ownership, or PCMs unless we encode and prove those ourselves.
+
+**Important Difference From Velvet**
+Velvet’s proof world is roughly:
+
+```text
+pre : Prop
+post : result → Prop
+```
+
+or for stateful programs, functions into `Prop`.
+
+CLean/PTX’s proof world should be:
+
+```text
+pre : State → Resource → Prop
+post : State → Resource → Prop
+```
+
+Velvet proves facts about values after structured code runs. PTX verification must also prove that the proof owns the right resources, frames unrelated resources, and survives arbitrary interleavings.
+
+So the VC theorem shape is not just ordinary Hoare logic. It is separation-aware Hoare/WP logic:
+
+```text
+{P} instr {Q}
+---------------- frame rule
+{P ∗ R} instr {Q ∗ R}
+```
+
+provided `instr` cannot disturb `R`.
+
+**What Governs The VCGen?**
+Mathematically, the VCGen should be governed by three layers:
+
+1. Dijkstra/WP semantics:
+
+```text
+wp (c >>= f) Q = wp c (fun x => wp (f x) Q)
+```
+
+This is Loom’s part.
+
+2. Separation algebra / BI:
+
+```text
+emp ∗ P ⊣⊢ P
+P ∗ Q ⊣⊢ Q ∗ P
+(P ∗ Q) ∗ R ⊣⊢ P ∗ (Q ∗ R)
+```
+
+This is our PCM/CSL part.
+
+3. Local-action/frame-preservation rules:
+
+For an instruction step:
+
+```text
+wp instr Q st r :=
+  ∀ st', StepInstr st instr st' →
+    ∃ r', ResourceUpdate instr st st' r r' ∧ Q st' r'
+```
+
+Then the frame theorem says:
+
+```text
+(wp instr Q ∗ R) ⊢ wp instr (Q ∗ R)
+```
+
+when `R` is stable under the instruction step.
+
+For scheduler nondeterminism:
+
+```text
+wp machineStep Q =
+  intersection over every runnable cta/warp of wp (warpStep cta warp) Q
+```
+
+That is where the single-warp assumption should disappear. The scheduler is demonic nondeterminism: every runnable warp choice must preserve the global invariant.
+
+**How To Encode Robustly**
+I would not keep growing the current ad hoc list resource model. I’d do this:
+
+1. Define a proper `ResourceAlgebra` / PCM interface:
+```lean
+class ResourceAlgebra (R : Type) where
+  unit : R
+  comp : R → R → Option R
+  valid : R → Prop
+  -- unit, commutativity, associativity, validity, compatibility laws
+```
+
+2. Define assertions generically:
+```lean
+abbrev Assertion (S R : Type) := S → R → Prop
+```
+
+3. Instantiate pointwise `CompleteLattice` / `CompleteBooleanAlgebra` for assertions, so Loom can use them.
+
+4. Define CSL operations separately:
+```lean
+emp
+sep
+wand
+owns
+persistent/pure facts
+```
+
+5. Be careful about pure facts. Loom’s `⌜p⌝` means “if `p`, then top; otherwise bottom.” That is persistent and consumes no ownership. Current CLean’s `CSL.pure` means `p ∧ emp`, which consumes exactly empty resource. Those are different. We should probably keep both, with clearer names.
+
+6. Define PTX primitive specs as Loom `WPGen`s whose generated preconditions are CSL assertions.
+
+7. Prove frame rules and scheduler preservation from the PCM laws.
+
+So the answer is: Loom gives us the right generalized Dijkstra/VCGen substrate, but not the PTX CSL. We need to build the CSL/PCM layer ourselves, then either plug it into Loom or fork a Loom-inspired subset if dependency/toolchain friction gets too high. Mathematically, the clean target is **Loom-style monadic WP over a BI/separation-logic assertion lattice backed by a PTX resource algebra**.
+
+================================================================================
+
+USER:
+Alright, so can you describe to me exactly how velvet was built on top of loom?
+
+================================================================================
+
+ASSISTANT:
+I’ll pull exact line-numbered references for Velvet’s core files so the explanation maps to the implementation rather than just the paper-level story.
+
+================================================================================
+
+ASSISTANT:
+Velvet is built on Loom in three layers:
+
+1. **Loom provides the generic WP engine.**
+2. **Velvet chooses a concrete effect monad.**
+3. **Velvet adds a Dafny-like frontend that elaborates to Loom triples.**
+
+The essential Velvet semantic choice is tiny:
+
+```lean
+abbrev VelvetM α := NonDetT DivM α
+```
+
+in [VelvetTheory.lean](/data/user_data/riyaza/cLean/.velvet/Velvet/VelvetTheory.lean:3).
+
+That means a Velvet program is a Loom `NonDetT` computation over `DivM`, where:
+
+- `DivM` models divergence/nontermination.
+- `NonDetT` models nondeterministic choice and loops.
+- Loom supplies different WP meanings for partial/total correctness and demonic/angelic choice.
+
+Loom’s relevant backend object is `WPGen`:
+
+```lean
+structure WPGen (x : m α) where
+  get : Cont l α
+  prop : ∀ post, get post <= wp x post
+```
+
+See [WP/Gen.lean](/data/user_data/riyaza/cLean/.loom/Loom/MonadAlgebras/WP/Gen.lean:108). This says: “I generated a precondition `get post`, and I have proved it is sound with respect to the real semantic `wp`.”
+
+So Velvet does not invent a new WP calculus. It instantiates Loom’s calculus for `VelvetM`.
+
+The `method` command is the frontend. A Velvet method like:
+
+```lean
+method f (x : Int) return (y : Int)
+  require P
+  ensures Q
+do
+  body
+```
+
+elaborates roughly to:
+
+```lean
+def f (x : Int) : VelvetM Int := do
+  body
+```
+
+The actual elaborator is in [Syntax.lean](/data/user_data/riyaza/cLean/.velvet/Velvet/Syntax.lean:309). The generated definition happens at [Syntax.lean:340](/data/user_data/riyaza/cLean/.velvet/Velvet/Syntax.lean:340):
+
+```lean
+def $name $bindersIdents* : VelvetM $retType := do ...
+```
+
+Mutable arguments are encoded by passing the old value as an input, creating a local mutable variable, and returning the final mutable value as part of the result tuple. That is why Velvet postconditions can mention old and final versions of mutable state.
+
+The frontend also records the verification obligation: the binders, precondition, postcondition, return binder, mutable variables, etc. That bookkeeping is built around [Syntax.lean:362](/data/user_data/riyaza/cLean/.velvet/Velvet/Syntax.lean:362).
+
+Then `prove_correct f by ...` generates the actual theorem:
+
+```lean
+@[loomSpec]
+lemma f_correct ... :
+  triple pre (f args) (fun ret => post) := by
+    unfold f
+    ...
+```
+
+That happens in [Syntax.lean:392](/data/user_data/riyaza/cLean/.velvet/Velvet/Syntax.lean:392), especially the theorem construction at [Syntax.lean:408](/data/user_data/riyaza/cLean/.velvet/Velvet/Syntax.lean:408). It also requires the user to choose semantics options, e.g. partial vs total and demonic vs angelic, at [Syntax.lean:417](/data/user_data/riyaza/cLean/.velvet/Velvet/Syntax.lean:417).
+
+Loops and annotations are encoded using Loom “gadgets.” These are runtime no-ops:
+
+```lean
+invariantGadget
+onDoneGadget
+assertGadget
+decreasingGadget
+```
+
+defined in [WP/Gen.lean](/data/user_data/riyaza/cLean/.loom/Loom/MonadAlgebras/WP/Gen.lean:58). They exist so the WP generator can see annotations inside the monadic program. For example, `WPGen.forWithInvariant` turns a loop invariant annotation into the usual loop VCs: establish the invariant initially, preserve it through the body, and use it at exit. See [WP/Gen.lean:187](/data/user_data/riyaza/cLean/.loom/Loom/MonadAlgebras/WP/Gen.lean:187).
+
+Nondeterminism comes from Loom’s `NonDetT`. Its constructors include `pickCont` and `repeatCont` for choice and loops in [NonDetT/Basic.lean](/data/user_data/riyaza/cLean/.loom/Loom/MonadAlgebras/NonDetT/Basic.lean:14). Under demonic partial correctness, choice becomes an infimum / “all choices” WP; see [NonDetT/Basic.lean:78](/data/user_data/riyaza/cLean/.loom/Loom/MonadAlgebras/NonDetT/Basic.lean:78).
+
+Automation is also Loom-driven. The `wpgen` tactic recursively applies registered `WPGen` specs, using the `@[loomSpec]` attribute. The core search loop is in [WP/Tactic.lean](/data/user_data/riyaza/cLean/.loom/Loom/MonadAlgebras/WP/Tactic.lean:45). Standard specs like `WPGen.bind`, `WPGen.pure`, `WPGen.if`, and loop specs are registered at [WP/Tactic.lean:142](/data/user_data/riyaza/cLean/.loom/Loom/MonadAlgebras/WP/Tactic.lean:142).
+
+Finally, Velvet adds a standard library layer in [Std.lean](/data/user_data/riyaza/cLean/.velvet/Velvet/Std.lean:1): array-update syntax, solver hints, helper lemmas, and test utilities. It also supports executable extraction/testing: `extract_program_for`, decidable pre/post commands, and `derive_tester_for` are implemented in [Syntax.lean:437](/data/user_data/riyaza/cLean/.velvet/Velvet/Syntax.lean:437).
+
+So the full shape is:
+
+```text
+Loom:
+  MAlgOrdered / wp / triple / WPGen / NonDetT / loop VC rules / tactics
+
+Velvet theory:
+  VelvetM := NonDetT DivM
+  partial-vs-total decomposition lemmas
+  nondeterministic choice specs
+
+Velvet syntax:
+  method DSL
+  require / ensures
+  mut argument translation
+  while/invariant syntax
+  prove_correct theorem generation
+
+Velvet std:
+  array syntax
+  solver hints
+  testing/extraction support
+```
+
+For CLean, the analogous design would be: keep PTX-specific semantics and CSL resources, but build a “PTX Velvet” layer that elaborates kernels/specs into Loom-style triples over a PTX monad and CSL assertion lattice.
+
+================================================================================
+
+USER:
+Uh huh, sure, but in this case, we don't want an internal proving interface frontend (dafny-like, where the definition of the program comes with ensures and invariants), rather, an external one such that i could write a parser for real ptx code, and then have a lean theorem proving that it satisfies a mathematical spec (though idk how loop invariants should be treated in this external-verification framework)...
+
+Also, what is NonDetT? And DivM? In our case of PTX, how do we define the state and semantics of ptx?
+
+================================================================================
+
+ASSISTANT:
+I’m going to answer this at the design level, but I’ll keep it tied to the current CLean model: right now PTX is represented as an external `KernelEnv`/CFG plus a small-step machine state, not as an embedded Velvet-style method.
+
+================================================================================
+
+ASSISTANT:
+Yes, for PTX I agree: we should **not** use Velvet’s internal “program + requires + ensures + invariants in one source language” style.
+
+For CLean/PTX, the right frontend is external/extrinsic:
+
+```lean
+def saxpyPTX : KernelEnv := parseOrElaboratePTX "..."
+
+def saxpyPre : CSL.Assertion := ...
+def saxpyPost : CSL.Assertion := ...
+
+def saxpyInv : BlockLabel → CSL.Assertion := ...
+
+theorem saxpy_correct :
+  PTXPartialCorrect saxpyPTX saxpyPre saxpyPost := by
+  apply ptx_vc_sound (invariants := saxpyInv)
+  ptx_vcgen
+```
+
+So the PTX program is just data. The spec and loop invariants are separate proof artifacts. This is more like CompCert/VST/Iris-style external verification than Dafny/Velvet-style intrinsic annotations.
+
+Loop invariants still have to exist mathematically. They just should not be embedded into the PTX program. For unstructured CFGs, the natural form is:
+
+```lean
+BlockLabel → Assertion
+```
+
+or maybe only for cutpoints/loop headers:
+
+```lean
+CutpointMap : BlockLabel → Option Assertion
+```
+
+The theorem statement can stay clean; the proof supplies the invariant map.
+
+**NonDetT**
+`NonDetT` is Loom’s nondeterminism monad transformer. In local Loom it is basically a syntax tree for computations with nondeterministic choice and loops:
+
+```lean
+inductive NonDetT m α where
+  | pure
+  | vis        -- run an underlying monadic effect
+  | pickCont   -- nondeterministically pick a value satisfying p
+  | repeatCont -- loop
+```
+
+Under demonic verification, nondeterministic choice means “all choices must satisfy the postcondition.” For example:
+
+```lean
+pickSuchThat τ p
+```
+
+has WP morally:
+
+```lean
+∀ x, p x → post x
+```
+
+Under angelic semantics, it becomes existential:
+
+```lean
+∃ x, p x ∧ post x
+```
+
+For PTX verification, scheduler choice is demonic: if any runnable warp may step, then the invariant must survive every runnable warp step.
+
+**DivM**
+`DivM` is Loom’s divergence monad:
+
+```lean
+inductive DivM α where
+  | res : α → DivM α
+  | div : DivM α
+```
+
+For partial correctness:
+
+```lean
+wp div post = True
+```
+
+because nontermination does not violate partial correctness.
+
+For total correctness:
+
+```lean
+wp div post = False
+```
+
+because total correctness requires termination.
+
+So for PTX, `DivM` is useful if we want Loom’s partial/total correctness split. Our current target is partial correctness, so divergence/nontermination is allowed unless we separately prove termination.
+
+**PTX State**
+Current CLean already defines an explicit PTX-ish machine state. Roughly:
+
+```text
+State
+  kernelEnv
+  global memory
+  const memory
+  param memory
+  CTAs
+  atomics
+
+CTAState
+  shared memory
+  warps
+  barrier state
+
+WarpState
+  lanes[32]
+  activeMask
+  exitedMask
+
+LaneState
+  registers
+  predicates
+  local memory
+  pc
+  status
+```
+
+So a logical thread is basically:
+
+```lean
+(cta : CTAId, warp : WarpId, lane : LaneId)
+```
+
+A warp step executes one instruction/terminator at the current PC for participating runnable lanes.
+
+Current semantics is small-step, not monadic:
+
+```lean
+StepInstr   : State → CTAId → WarpId → GInstr → State → Prop
+StepBlock   : State → CTAId → WarpId → State → Prop
+StepWarp    : State → CTAId → WarpId → State → Prop
+StepMachine : State → State → Prop
+```
+
+`StepMachine` picks some `(cta, warp)` and steps it. That is the concurrency/scheduler point.
+
+Executable helpers currently compute concrete steps with functions like:
+
+```lean
+stepInstr?      : State → CTAId → WarpId → GInstr → Option State
+stepTerminator? : State → CTAId → WarpId → Terminator → Option State
+stepAt?         : State → CTAId → WarpId → Option State
+```
+
+So the current model is:
+
+```text
+PTX IR/KernelEnv + State
+  → small-step executable semantics
+  → reachability
+  → partial correctness theorem
+```
+
+A Loom version would package the same idea monadically. Semantically, a PTX machine computation should look like:
+
+```text
+State → nondeterministic set of outcomes:
+  divergence
+  fault
+  or (result, new State)
+```
+
+A plausible Loom-style stack is:
+
+```lean
+abbrev PtxM α :=
+  NonDetT (ExceptT PtxFault (StateT State DivM)) α
+```
+
+or an equivalent custom monad. Then:
+
+```lean
+machineStep : PtxM Unit
+```
+
+would demoniacally choose a runnable `(cta, warp)` and execute one warp step.
+
+But we do not have to expose that monadic interpreter as the user’s programming language. The user-facing object can remain:
+
+```lean
+def prog : KernelEnv := ...
+```
+
+and the verifier can internally interpret `prog` into a monadic small-step semantics.
+
+So the clean architecture is:
+
+```text
+external PTX parser
+  → KernelEnv / CFG IR
+
+initial State + mathematical precondition
+  → verification theorem
+
+proof supplies:
+  → loop/cutpoint invariants
+  → resource ownership facts
+  → frame/scheduler preservation facts
+
+backend:
+  → small-step PTX semantics
+  → Loom-style demonic WP
+  → CSL/PCM assertions
+```
+
+That gives us Velvet’s backend virtues without copying Velvet’s intrinsic annotation style.
+
+================================================================================
+
+USER:
+wait i don't like how that extrinsic setup handles loop invariants. How do other extrinsic systems do it? like if you have multiple nested loops, how does a user specify invariants for particular loops?
+
+================================================================================
+
+ASSISTANT:
+You’re right to dislike a raw:
+
+```lean
+BlockLabel → Assertion
+```
+
+as the user-facing story. It is mathematically fine, but ergonomically bad. Extrinsic systems usually do **not** make users write a random total map. They use one of a few patterns.
+
+**1. Annotated Program, Separate From Source**
+Systems often keep the original program immutable, but build a separate “decorated” or “annotated” version for proof:
+
+```lean
+def prog : Program := ...
+
+def proofHints : AnnotationSet := {
+  loop "outer.header" := outerInv,
+  loop "inner.header" := innerInv,
+  assert "after_load" := ...
+}
+```
+
+The invariants are not part of the executable PTX. They are proof metadata. The final theorem only mentions `prog`, `pre`, and `post`; the proof uses `proofHints`.
+
+This is probably the best CLean direction.
+
+**2. Invariants Keyed By Source/CFG Locations**
+For low-level code, extrinsic verifiers usually index invariants by program points:
+
+```lean
+loopInvariant "L_outer" outerInv
+loopInvariant "L_inner" innerInv
+```
+
+Nested loops are not special mathematically. They just have different headers:
+
+```text
+outer_header:
+  ...
+  inner_header:
+    ...
+    br inner_header
+  ...
+  br outer_header
+```
+
+Then:
+
+```lean
+annotations :=
+  .loop "outer_header" outerInv
+  .loop "inner_header" innerInv
+```
+
+The inner invariant can mention the outer loop variables. The proof obligation for entering the inner loop is:
+
+```text
+outer invariant + setup before inner loop ⊢ inner invariant
+```
+
+The proof obligation for exiting the inner loop is:
+
+```text
+inner invariant + exit condition ⊢ state needed by the rest of outer body
+```
+
+So nested loops compose through ordinary entailments.
+
+**3. Structured Loop IDs**
+If the frontend can reconstruct structured loops, it can assign stable loop IDs:
+
+```lean
+.loop 0 outerInv
+.loop 1 innerInv
+```
+
+or better:
+
+```lean
+.loop "outer_k_loop" outerInv
+.loop "inner_tile_loop" innerInv
+```
+
+This is nicer than raw block labels, but it requires CFG analysis. For PTX, I’d avoid relying only on this because optimized/lowered PTX may be less structured.
+
+**4. Cutpoint Invariants**
+For unstructured CFGs, classical Floyd/Hoare verification uses **cutpoints**. A cutpoint is a program location where we summarize potentially cyclic control flow.
+
+For reducible CFGs, loop headers are enough. For irreducible CFGs, you may need extra cutpoints.
+
+So instead of requiring invariants for every block:
+
+```lean
+BlockLabel → Assertion
+```
+
+we should require a sparse map:
+
+```lean
+CutpointMap : BlockLabel → Option Assertion
+```
+
+Then VCGen computes straight-line WPs between cutpoints. This is much better:
+
+```text
+cutpoint L_outer_header: outerInv
+cutpoint L_inner_header: innerInv
+cutpoint exit: post
+```
+
+Blocks without annotations are handled by WP expansion.
+
+**What I’d Want For CLean**
+User-facing proof should look closer to:
+
+```lean
+def saxpyPTX : KernelEnv := ...
+
+def saxpyAnn : PTXAnnotations where
+  loops := [
+    { header := "loop", invariant := saxpyLoopInv }
+  ]
+
+theorem saxpy_correct :
+  PTXPartialCorrect saxpyPTX saxpyPre saxpyPost := by
+  apply verify_ptx saxpyAnn
+  ptx_vcgen
+```
+
+For nested loops:
+
+```lean
+def matmulAnn : PTXAnnotations where
+  loops := [
+    { header := "row_loop", invariant := rowInv },
+    { header := "col_loop", invariant := colInv },
+    { header := "k_loop",   invariant := kInv }
+  ]
+```
+
+The invariants are external proof annotations, not source annotations and not theorem assumptions.
+
+**Mathematically**
+The clean model is Floyd-style verification:
+
+- Associate assertions with selected cutpoints.
+- For every path from one cutpoint to the next, compute WP backwards.
+- Generate a VC saying the source cutpoint invariant implies that path WP.
+- For backedges, this becomes invariant preservation.
+- For exits, invariant plus exit condition implies postcondition.
+
+So the raw internal representation may still be:
+
+```lean
+BlockLabel → Assertion
+```
+
+or sparse equivalent, but the user should interact with:
+
+```lean
+loop "label" invariant inv
+cutpoint "label" invariant inv
+```
+
+That scales to nested loops because each loop header is a distinct program point. The outer invariant does not “contain” the inner invariant globally; it only has to establish it when control enters the inner loop.
+
+================================================================================
+
+USER:
+wait, so can't we treat loop invariants as almost like a "have" statement in regular lean proving? Like within the proof of correctness (which only cares about pre and post), we "claim" a particular loop satisfies a particular invariant, prove that fact, and then can use it?
+
+================================================================================
+
+ASSISTANT:
+Yes. That is probably the right mental model.
+
+A loop invariant is not really part of the program spec. It is a **proof-local cut lemma**. The final theorem only says:
+
+```lean
+theorem saxpy_correct :
+  PTXPartialCorrect saxpyPTX saxpyPre saxpyPost := by
+  ...
+```
+
+Inside the proof, you should be able to write something morally like:
+
+```lean
+have h_loop :
+    LoopCorrect saxpyPTX "loop_header" loopInv loopExitPost := by
+  -- prove initialization, preservation, exit
+
+exact use_loop_summary h_loop ...
+```
+
+That is exactly analogous to:
+
+```lean
+have h : SomeIntermediateFact := by
+  ...
+```
+
+except the intermediate fact is a Hoare/WP fact about a cyclic CFG region.
+
+Mathematically, the while-loop rule is already a “have” rule:
+
+```text
+{ I ∧ b } body { I }
+---------------------------
+{ I } while b do body { I ∧ ¬b }
+```
+
+You “claim” `I` is an invariant, prove the preservation premise, and then the logic lets you replace the whole loop with the summary `I ∧ ¬b`.
+
+For PTX CFGs, the same idea is Floyd-style:
+
+```text
+header invariant I
+
+prove:
+  entry_to_header:  pre ⊢ wp(path_to_header, I)
+
+  backedge:         I ∧ branch_to_body ⊢ wp(body_path, I)
+
+  exit:             I ∧ branch_to_exit ⊢ continuation/post
+```
+
+After that, the loop is summarized by the invariant. The final theorem does not expose `I`; it appears only in the proof term.
+
+For nested loops, this works naturally. In the outer loop preservation proof, when you reach the inner loop, you prove or invoke a local inner-loop summary:
+
+```lean
+have h_inner :
+    LoopCorrect env "inner_header" innerInv innerExitPost := by
+  ...
+
+-- now use h_inner while proving the outer body preserves outerInv
+```
+
+So nested loops are just nested proof cuts. The inner invariant can mention outer-loop variables, because it is proved under the outer-loop context.
+
+The user-facing tactic could look like:
+
+```lean
+theorem matmul_correct :
+  PTXPartialCorrect matmulPTX matmulPre matmulPost := by
+  ptx_start
+  ptx_loop "k_loop" with kInv
+  · -- initialization: current state implies kInv
+  · -- preservation: kInv + k < n, body returns to kInv
+  · -- exit: kInv + k >= n implies post/continuation
+```
+
+For nested loops:
+
+```lean
+ptx_loop "outer" with outerInv
+· ...
+· ptx_loop "inner" with innerInv
+  · ...
+  · ...
+  · ...
+  -- continue proving outer body
+· ...
+```
+
+So yes: external annotations like `PTXAnnotations` are just a convenient batch format for these proof-local `have`s. The core proof theory should support both:
+
+```lean
+apply verify_with_annotations anns
+```
+
+and the more interactive style:
+
+```lean
+have h_loop := ...
+apply use_loop h_loop
+```
+
+For this project, I’d design the foundation around the second style. It is more Lean-native, composes better for nested/irregular CFGs, and keeps the final correctness theorem clean.
+
+================================================================================
+
+USER:
+Okay beautiful I now understand that we should support invariants in both styles and how our extrinsic setup should look to the user. Now shifting to the actual backend, it appears we need to monad-ify our executable semantics completely? How did velvet do that? Like there's the state object, and the instructions (each with their defined semantics). what are velvet's versions of these and how did they do the mapping to the executable monad that loom takes in, and how do we do this for our more complex ptx state/semantics?
+
+================================================================================
+
+ASSISTANT:
+I’ll pull the specific Velvet loop/mutable-variable definitions now, because the key surprise is that Velvet does not have an explicit instruction AST with an interpreter; its “instruction semantics” is mostly Lean’s own monadic `do` elaboration plus Loom gadgets.
+
+================================================================================
+
+ASSISTANT:
+Exactly: Velvet did **not** start with an external AST plus interpreter and then monadify it. Velvet programs are born as Lean monadic terms.
+
+In Velvet, the “program state/instructions” story is much simpler than PTX:
+
+```lean
+abbrev VelvetM α := NonDetT DivM α
+```
+
+[VelvetTheory.lean](/data/user_data/riyaza/cLean/.velvet/Velvet/VelvetTheory.lean:3)
+
+A Velvet `method` elaborates directly to:
+
+```lean
+def methodName (...) : VelvetM ReturnType := do
+  ...
+```
+
+That expansion is at [Syntax.lean](/data/user_data/riyaza/cLean/.velvet/Velvet/Syntax.lean:340). There is no separate `Instr` datatype, no `State` object for registers/memory/PC, and no interpreter over an instruction list.
+
+Velvet’s “instructions” are just Lean `do` constructs:
+
+- `let`, `if`, `return` are Lean terms.
+- `let mut` / assignment are handled by Loom’s custom `DoNames` elaborator.
+- Array assignment is a macro to pure array update, e.g. `arr[i] := v` becomes `Array.set!`.
+- `while` is macro-expanded into a `for _ in Lean.Loop.mk` loop with invariant gadgets.
+
+The loop macro is visible in [Macro.lean](/data/user_data/riyaza/cLean/.loom/CaseStudies/Macro.lean:42): a Velvet-style
+
+```lean
+while cond
+  invariant I
+do body
+```
+
+becomes roughly:
+
+```lean
+for _ in Lean.Loop.mk do
+  invariantGadget [I]
+  onDoneGadget doneCondition
+  if cond then
+    body
+  else break
+```
+
+The loop is then interpreted by Loom’s `NonDetT.repeatCont` / `Loop.forIn` machinery. Loom’s generic WP laws are in [WP/Basic.lean](/data/user_data/riyaza/cLean/.loom/Loom/MonadAlgebras/WP/Basic.lean:18), and `WPGen` proves generated preconditions sound against those WPs in [WP/Gen.lean](/data/user_data/riyaza/cLean/.loom/Loom/MonadAlgebras/WP/Gen.lean:108).
+
+So Velvet’s mapping is:
+
+```text
+Velvet syntax
+  → Lean monadic term : VelvetM α
+  → Loom wp/triple/WPGen
+  → proof obligations
+```
+
+For PTX, we are in a different situation. We already have:
+
+```text
+PTX IR / CFG:
+  KernelEnv, Block, GInstr, Instr, Terminator
+
+Machine state:
+  State, CTAState, WarpState, LaneState, memory, registers, predicates, PC
+
+Executable semantics:
+  stepInstr? / stepTerminator? / stepAt?
+  StepInstr / StepBlock / StepWarp / StepMachine
+```
+
+See the small-step relations in [SmallStep.lean](/data/user_data/riyaza/cLean/CLean/Semantics/SmallStep.lean:7), and executable stepping in [Execution.lean](/data/user_data/riyaza/cLean/CLean/Semantics/Execution.lean:25).
+
+So we should **not** encode PTX as Lean `do` syntax like Velvet. We should monadify the existing interpreter.
+
+The PTX backend should look more like:
+
+```lean
+def execInstr (cta : CTAId) (warp : WarpId) (gi : GInstr) : PtxM Unit :=
+  -- call Helpers.stepInstr? on the current State
+
+def execTerminator (cta : CTAId) (warp : WarpId) (t : Terminator) : PtxM Unit :=
+  -- call Helpers.stepTerminator?
+
+def execWarpStep (cta : CTAId) (warp : WarpId) : PtxM Unit :=
+  -- execute current instr or terminator for that warp
+
+def machineStep : PtxM Unit :=
+  -- demoniacally choose any runnable cta/warp and step it
+```
+
+But there is one important PTX-specific complication Velvet does not have: **CSL resources**.
+
+If we used a plain monad like:
+
+```lean
+StateT State (NonDetT DivM)
+```
+
+then Loom’s WP would talk about:
+
+```lean
+State → Prop
+```
+
+or maybe:
+
+```lean
+State → Resource → Prop
+```
+
+if we generalize the assertion lattice. But a PTX instruction WP currently has this shape:
+
+```lean
+∀ st', realStep st st' →
+  ∃ r', Resource.Update r r' ∧ post st' r'
+```
+
+That existential `r'` is ghost/resource bookkeeping. It is not part of the executable machine state. Also, scheduler nondeterminism is demonic, while resource update is existential/angelic from the proof’s perspective. A plain `StateT + NonDetT` stack does not capture that distinction cleanly.
+
+So for PTX I would not try to force everything into Velvet’s exact `NonDetT DivM` shape. I’d do a PTX-specific monadic effect with a custom WP algebra.
+
+Morally:
+
+```lean
+abbrev Assertion := State → Resource → Prop
+
+wp (stepInstr cta warp gi) post :=
+  fun st r =>
+    ∀ st',
+      Helpers.stepInstr? st cta warp gi = some st' →
+        ∃ r',
+          Resource.Update r r' ∧
+          post () st' r'
+```
+
+For the scheduler:
+
+```lean
+wp machineStep post :=
+  fun st r =>
+    ∀ cta warp st',
+      StepWarp st cta warp st' →
+        ∃ r',
+          Resource.Update r r' ∧
+          post () st' r'
+```
+
+That is the core PTX predicate transformer. Then sequencing is still monadic:
+
+```lean
+wp (x >>= f) post =
+  wp x (fun a => wp (f a) post)
+```
+
+This is where Loom’s architecture helps. We can either:
+
+1. Use Loom as a dependency and define a custom `PtxM` plus `MAlgOrdered PtxM CSL.Assertion`.
+
+2. Fork/copy the small Loom core and build a Loom-inspired `PtxWP` stack specialized to PTX/CSL.
+
+Either way, the PTX executable semantics can remain the existing one. We define monadic PTX primitives as wrappers around `stepInstr?`, `stepTerminator?`, and `StepMachine`, and then prove the monadic WP agrees with the existing small-step semantics.
+
+The migration path I’d use is:
+
+```text
+1. Keep current State and step functions.
+2. Define Assertion := State → Resource → Prop as the Loom assertion lattice.
+3. Define primitive monadic PTX steps that call existing executable semantics.
+4. Define/prove their WP equations.
+5. Prove current wpInstr/wpTerminator are instances of those equations.
+6. Add demonic machine scheduler choice.
+7. Build CFG/loop VCGen on top.
+```
+
+So the answer is: Velvet monadified by **making the source language itself a monadic Lean program**. For PTX, we should monadify by **wrapping the existing external IR interpreter in monadic primitive operations**, with a custom CSL-aware WP for resource updates and scheduler nondeterminism.
+
+================================================================================
+
+USER:
+Ah so in velvet, the state and semantics are literally just lean? And lean's do notation. That's interesting. How does velvet use the DivM and NonDetT to get its working monad from lean's syntax and semantics? And how does loom do vcgen from this? How is this different than what we need for state/semantics, and how does loom's WP algebra instantiate for this? like mathematically what is going on there?
+
+================================================================================
+
+ASSISTANT:
+Yes. In Velvet, the executable semantics is mostly **Lean’s own term semantics plus a monad**.
+
+More precisely, a Velvet program is not an AST interpreted by a separate evaluator. A `method` elaborates into a Lean definition:
+
+```lean
+def f (...) : VelvetM Ret := do
+  ...
+```
+
+where:
+
+```lean
+abbrev VelvetM α := NonDetT DivM α
+```
+
+So Lean elaborates the body into `pure`, `bind`, `if`, `forIn`, etc. Since the expected type is `VelvetM`, those operations are the ones from `NonDetT DivM`.
+
+**What `DivM` Does**
+`DivM` is the divergence effect:
+
+```lean
+inductive DivM α where
+  | res : α → DivM α
+  | div : DivM α
+```
+
+For partial correctness:
+
+```lean
+wp div Q = True
+```
+
+because nontermination is allowed.
+
+For total correctness:
+
+```lean
+wp div Q = False
+```
+
+because nontermination violates total correctness.
+
+That interpretation is given by Loom’s `MAlgOrdered DivM Prop` instances.
+
+**What `NonDetT` Does**
+`NonDetT` is Loom’s nondeterminism/loop transformer. It has constructors like:
+
+```lean
+pure
+vis        -- lift an underlying monadic effect
+pickCont   -- nondeterministic choice
+repeatCont -- loop
+```
+
+Under demonic verification, nondeterministic choice means universal choice:
+
+```lean
+wp (pick x satisfying p) Q = ∀ x, p x → Q x
+```
+
+Under angelic verification, it means existential choice:
+
+```lean
+wp (pick x satisfying p) Q = ∃ x, p x ∧ Q x
+```
+
+Loops are represented by `repeatCont`, and the WP rule quantifies over/proves an invariant. The user-written `while ... invariant ...` syntax is macro-expanded into a `for _ in Lean.Loop.mk` with `invariantGadget` calls. Those gadgets are runtime no-ops, but the VC generator sees them.
+
+**How VCGen Works**
+Loom defines:
+
+```lean
+wp c post := liftM c post
+
+triple pre c post := pre ≤ wp c post
+```
+
+A `WPGen c` is a certificate:
+
+```lean
+structure WPGen (c : m α) where
+  get  : Cont l α
+  prop : ∀ post, get post ≤ wp c post
+```
+
+So VCGen computes a symbolic precondition `get post`, then proves it sound against the real semantic `wp`.
+
+The `wpgen` tactic unfolds the Velvet method, sees a monadic Lean term, and recursively applies registered `WPGen` rules:
+
+```lean
+WPGen.pure
+WPGen.bind
+WPGen.if
+WPGen.forWithInvariant
+WPGen.assert
+...
+```
+
+Then the remaining goal is just:
+
+```lean
+pre ≤ generated_precondition
+```
+
+which simplifies into ordinary Lean/SMT obligations.
+
+**Velvet State**
+Velvet does not have a machine state like PTX.
+
+Local mutable variables are handled syntactically by Loom’s custom `DoNames` elaborator: mutation is compiled into value threading. Mutable arrays are just Lean arrays reassigned to updated copies. Mutable arguments are passed in as old values and returned in the result tuple.
+
+So Velvet’s “state” is basically:
+
+```text
+Lean local variables threaded through monadic code
+```
+
+not:
+
+```text
+register file + PC + memory + warps + lanes
+```
+
+**How PTX Differs**
+For PTX, we already have a deep embedding:
+
+```lean
+KernelEnv
+Block
+GInstr
+Instr
+Terminator
+State
+CTAState
+WarpState
+LaneState
+```
+
+and executable semantics:
+
+```lean
+stepInstr?      : State → CTAId → WarpId → GInstr → Option State
+stepTerminator? : State → CTAId → WarpId → Terminator → Option State
+StepMachine     : State → State → Prop
+```
+
+So we should not do what Velvet does and make PTX source a Lean `do` program. PTX is external data, parsed from real code.
+
+Instead, we should wrap the existing executable semantics in monadic primitives:
+
+```lean
+execInstr      : CTAId → WarpId → GInstr → PtxM Unit
+execTerminator : CTAId → WarpId → Terminator → PtxM Unit
+execWarpStep   : CTAId → WarpId → PtxM Unit
+machineStep    : PtxM Unit
+```
+
+These primitives call or correspond to the existing `stepInstr?`, `stepTerminator?`, and `StepMachine`.
+
+**PTX WP Algebra**
+For PTX, the assertion lattice should be:
+
+```lean
+CSL.Assertion := State → Resource → Prop
+```
+
+So a primitive instruction WP should be morally:
+
+```lean
+wp (execInstr cta warp gi) post :=
+  fun st r =>
+    ∀ st',
+      stepInstr? st cta warp gi = some st' →
+        ∃ r',
+          Resource.Update r r' ∧
+          post () st' r'
+```
+
+For machine scheduling:
+
+```lean
+wp machineStep post :=
+  fun st r =>
+    ∀ cta warp st',
+      StepWarp st cta warp st' →
+        ∃ r',
+          Resource.Update r r' ∧
+          post () st' r'
+```
+
+That is demonic over scheduler choices and existential over ghost resource updates.
+
+This is the main reason PTX probably needs a custom `PtxM`/custom `MAlgOrdered`, not just `StateT State (NonDetT DivM)`. Standard `StateT` gives state predicates, but it does not know about CSL resource splitting, framing, or existential ghost resource updates.
+
+So mathematically:
+
+```text
+Velvet:
+  shallow Lean program
+  m = NonDetT DivM
+  l = Prop / value predicates
+  WP from Loom stock instances
+
+PTX:
+  deep embedded IR + explicit machine state
+  m = custom PTX computation over existing step semantics
+  l = CSL.Assertion = State → Resource → Prop
+  WP from custom PTX MAlgOrdered, Loom-style
+```
+
+We do not need to rewrite every semantic helper. We keep the current executable step functions and define monadic primitives around them. The important proof is that the new monadic WP equations agree with the current `wpInstr`, `wpTerminator`, and machine-step soundness story.
+
+================================================================================
+
+USER:
+I agree on we need to use loom's generality of vcgen instead of taking from how velvet does things here. Quick question: why do we use CSL for ptx instead of whatever velvet does? 
+
+And now can we iron out exactly then what our custom PtxM (using a loom backend) would look like for these purposes?
+
+================================================================================
+
+ASSISTANT:
+Yes. Velvet gets away with ordinary Lean state/semantics because its programs are already Lean monadic terms. PTX cannot do that, because PTX is external code with explicit machine state. That is exactly why our backend needs a custom PTX monad/algebra.
+
+**Why CSL, Not Velvet Logic**
+Velvet mostly verifies structured Lean programs over Lean values:
+
+```lean
+pre  : Prop
+post : α → Prop
+```
+
+or, for stateful effects, ordinary predicates over threaded values. Mutation is value-threaded by Lean elaboration. There is no low-level aliasing model, no global/shared/local memory ownership, no warp scheduler, no per-lane register ownership, no barrier tokens.
+
+PTX needs CSL because we need to reason locally about pieces of a concurrent machine:
+
+```lean
+reg cta warp lane "%r1" v
+∗ pred cta warp lane "%p" b
+∗ globalByte addr .write x
+∗ sharedByte cta off .write y
+∗ warpAt cta warp pc lanes
+```
+
+The PCM/resource algebra tells us when those pieces can coexist. That gives the frame rule:
+
+```text
+{P} instr {Q}
+-----------------------
+{P ∗ R} instr {Q ∗ R}
+```
+
+provided `R` is stable under the instruction. Velvet does not need this kind of ownership accounting; PTX does.
+
+**The Shape I’d Use**
+I would split the PTX monad into two layers:
+
+```lean
+PtxBase  -- primitive PTX effects with custom CSL WP
+PtxM     -- Loom nondeterminism/choice layer over PtxBase
+```
+
+Sketch:
+
+```lean
+abbrev PtxAssertion := State → CSL.Resource → Prop
+
+inductive PtxOp : Type → Type where
+  | getState : PtxOp State
+  | instr : CTAId → WarpId → GInstr → PtxOp Unit
+  | terminator : CTAId → WarpId → Terminator → PtxOp Unit
+  | warpStep : CTAId → WarpId → PtxOp Unit
+```
+
+Then a free monad over those ops:
+
+```lean
+inductive PtxBase (α : Type) where
+  | pure : α → PtxBase α
+  | vis : {β : Type} → PtxOp β → (β → PtxBase α) → PtxBase α
+```
+
+with normal `pure`/`bind`.
+
+The primitive WP is the important part:
+
+```lean
+def wpOp : PtxOp α → (α → PtxAssertion) → PtxAssertion
+  | .getState, Q =>
+      fun st r => Q st st r
+
+  | .instr cta warp gi, Q =>
+      fun st r =>
+        ∀ st',
+          Helpers.stepInstr? st cta warp gi = some st' →
+            ∃ r',
+              CSL.Resource.Update r r' ∧
+              Q () st' r'
+
+  | .terminator cta warp term, Q =>
+      fun st r =>
+        ∀ st',
+          Helpers.stepTerminator? st cta warp term = some st' →
+            ∃ r',
+              CSL.Resource.Update r r' ∧
+              Q () st' r'
+
+  | .warpStep cta warp, Q =>
+      fun st r =>
+        ∀ st',
+          StepWarp st cta warp st' →
+            ∃ r',
+              CSL.Resource.Update r r' ∧
+              Q () st' r'
+```
+
+Then define the monadic WP structurally:
+
+```lean
+def PtxBase.wp : PtxBase α → (α → PtxAssertion) → PtxAssertion
+  | .pure a, Q => Q a
+  | .vis op k, Q => wpOp op (fun x => PtxBase.wp (k x) Q)
+```
+
+This gives the Dijkstra bind law by construction:
+
+```lean
+wp (x >>= f) Q = wp x (fun a => wp (f a) Q)
+```
+
+Then instantiate Loom:
+
+```lean
+instance : MAlgOrdered PtxBase PtxAssertion where
+  μ c := PtxBase.wp c id
+  ...
+```
+
+After that, use Loom’s `NonDetT` for nondeterminism:
+
+```lean
+abbrev PtxM α := NonDetT PtxBase α
+```
+
+In demonic partial-correctness mode, `pickSuchThat` becomes universal choice. That is exactly what we want for scheduler nondeterminism.
+
+**Machine Step**
+Using `NonDetT`, scheduler choice can be written monadically:
+
+```lean
+def execWarpStep (cta : CTAId) (warp : WarpId) : PtxM Unit :=
+  liftM (PtxBase.vis (.warpStep cta warp) PtxBase.pure)
+
+def machineStep : PtxM Unit := do
+  let st ← liftM (PtxBase.vis .getState PtxBase.pure)
+  let cw ← pickSuchThat (CTAId × WarpId)
+    (fun cw => ∃ st', StepWarp st cw.1 cw.2 st')
+  execWarpStep cw.1 cw.2
+```
+
+Under demonic WP, this simplifies morally to:
+
+```lean
+fun st r =>
+  ∀ cta warp,
+    (∃ st', StepWarp st cta warp st') →
+      ∀ st',
+        StepWarp st cta warp st' →
+          ∃ r',
+            Resource.Update r r' ∧ post () st' r'
+```
+
+That is the robust replacement for the single-warp assumption. The invariant must be preserved by every runnable warp.
+
+**Why Not Plain `StateT State`**
+A tempting design is:
+
+```lean
+StateT State (NonDetT DivM)
+```
+
+But that only gives predicates over machine state. It does not explain resource ownership or framing.
+
+Another tempting design is:
+
+```lean
+StateT (State × Resource) ...
+```
+
+but that treats the ghost resource as ordinary global state. That is bad for separation logic: an instruction should update only the local owned footprint and leave framed resources untouched. The current WP shape:
+
+```lean
+∃ r', Resource.Update r r' ∧ post st' r'
+```
+
+is local and frame-friendly. A global ghost-state update is the wrong abstraction.
+
+So the resource should live in the assertion semantics, not in the executable machine state.
+
+**How This Uses Loom**
+Once `PtxBase` has:
+
+```lean
+MAlgOrdered PtxBase PtxAssertion
+```
+
+Loom gives us:
+
+```lean
+wp
+triple
+WPGen
+WPGen.bind
+WPGen.pure
+NonDetT demonic choice
+```
+
+Then we register PTX primitive specs:
+
+```lean
+@[loomSpec]
+def WPGen.execInstr ... : WPGen (execInstr cta warp gi) := ...
+```
+
+and build PTX blocks as monadic programs:
+
+```lean
+def execInstrs : List GInstr → PtxM Unit
+def execBlock : Block → PtxM Unit
+```
+
+The external PTX parser still produces:
+
+```lean
+KernelEnv
+```
+
+The VC generator takes a `KernelEnv`, selected block/path/cutpoint, and builds the corresponding `PtxM` term internally. The user never writes PTX as Lean `do` code.
+
+So the mathematical picture is:
+
+```text
+PTX executable step semantics
+  → primitive PTX operations PtxOp
+  → custom CSL weakest precondition wpOp
+  → PtxBase MAlgOrdered instance
+  → Loom NonDetT for scheduler nondeterminism
+  → Loom WPGen for symbolic VC generation
+  → CFG/cutpoint/invariant layer for whole-kernel correctness
+```
+
+That uses Loom where it is strongest, without pretending PTX is a Velvet-style source language.

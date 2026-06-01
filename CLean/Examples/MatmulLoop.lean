@@ -852,19 +852,27 @@ theorem matmulLoopAt_pred_focus_to_standard
 
 theorem matmulLoop_entry_lookup (params : MatmulCellParams) :
     (matmulLoopEnv params).blocks["entry"]? = some (matmulLoopEntryBlock params) := by
-  simp [matmulLoopEnv, Std.HashMap.getElem?_insert]
+  rw [matmulLoopEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem matmulLoop_loop_lookup (params : MatmulCellParams) :
     (matmulLoopEnv params).blocks["loop"]? = some matmulLoopHeaderBlock := by
-  simp [matmulLoopEnv, Std.HashMap.getElem?_insert]
+  rw [matmulLoopEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem matmulLoop_body_lookup (params : MatmulCellParams) :
     (matmulLoopEnv params).blocks["body"]? = some matmulLoopBodyBlock := by
-  simp [matmulLoopEnv, Std.HashMap.getElem?_insert]
+  rw [matmulLoopEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem matmulLoop_exit_lookup (params : MatmulCellParams) :
     (matmulLoopEnv params).blocks["exit"]? = some (matmulLoopExitBlock params) := by
-  simp [matmulLoopEnv, Std.HashMap.getElem?_insert]
+  rw [matmulLoopEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem matmulLoop_block_lookup
     {params : MatmulCellParams} {label : BlockLabel} {block : Block}
@@ -875,30 +883,35 @@ theorem matmulLoop_block_lookup
           (label = "exit" ∧ block = matmulLoopExitBlock params) := by
   by_cases hentry : label = "entry"
   · subst label
-    simp [matmulLoopEnv, Std.HashMap.getElem?_insert] at hlookup
+    rw [matmulLoopEnv] at hlookup
+    repeat rw [Std.HashMap.getElem?_insert] at hlookup
+    simp at hlookup
     exact Or.inl ⟨rfl, hlookup.symm⟩
   · by_cases hloop : label = "loop"
     · subst label
-      simp [matmulLoopEnv, Std.HashMap.getElem?_insert] at hlookup
+      rw [matmulLoopEnv] at hlookup
+      repeat rw [Std.HashMap.getElem?_insert] at hlookup
+      simp at hlookup
       exact Or.inr (Or.inl ⟨rfl, hlookup.symm⟩)
     · by_cases hbody : label = "body"
       · subst label
-        simp [matmulLoopEnv, Std.HashMap.getElem?_insert] at hlookup
+        rw [matmulLoopEnv] at hlookup
+        repeat rw [Std.HashMap.getElem?_insert] at hlookup
+        simp at hlookup
         exact Or.inr (Or.inr (Or.inl ⟨rfl, hlookup.symm⟩))
       · by_cases hexit : label = "exit"
         · subst label
-          simp [matmulLoopEnv, Std.HashMap.getElem?_insert] at hlookup
+          rw [matmulLoopEnv] at hlookup
+          repeat rw [Std.HashMap.getElem?_insert] at hlookup
+          simp at hlookup
           exact Or.inr (Or.inr (Or.inr ⟨rfl, hlookup.symm⟩))
-        · have hentryBeq : ("entry" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hentry h.symm)
-          have hloopBeq : ("loop" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hloop h.symm)
-          have hbodyBeq : ("body" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hbody h.symm)
-          have hexitBeq : ("exit" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hexit h.symm)
-          simp [matmulLoopEnv, Std.HashMap.getElem?_insert, hentryBeq, hloopBeq,
-            hbodyBeq, hexitBeq] at hlookup
+        · have hentryEq : ¬ "entry" = label := fun h => hentry h.symm
+          have hloopEq : ¬ "loop" = label := fun h => hloop h.symm
+          have hbodyEq : ¬ "body" = label := fun h => hbody h.symm
+          have hexitEq : ¬ "exit" = label := fun h => hexit h.symm
+          rw [matmulLoopEnv] at hlookup
+          repeat rw [Std.HashMap.getElem?_insert] at hlookup
+          simp [hentryEq, hloopEq, hbodyEq, hexitEq] at hlookup
 
 theorem matmulLoop_body_ordinary (params : MatmulCellParams) :
     CFGBodyUsesOrdinaryPcAdvance (matmulLoopEnv params) := by

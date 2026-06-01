@@ -62,19 +62,27 @@ def branchLoopKernelSpec (init : State) (resource : CSL.Resource) : KernelSpec :
 
 theorem branchLoop_entry_lookup :
     branchLoopEnv.blocks["entry"]? = some branchLoopEntryBlock := by
-  simp [branchLoopEnv, Std.HashMap.getElem?_insert]
+  rw [branchLoopEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem branchLoop_loop_lookup :
     branchLoopEnv.blocks["loop"]? = some branchLoopHeaderBlock := by
-  simp [branchLoopEnv, Std.HashMap.getElem?_insert]
+  rw [branchLoopEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem branchLoop_body_lookup :
     branchLoopEnv.blocks["body"]? = some branchLoopBodyBlock := by
-  simp [branchLoopEnv, Std.HashMap.getElem?_insert]
+  rw [branchLoopEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem branchLoop_exit_lookup :
     branchLoopEnv.blocks["exit"]? = some branchLoopExitBlock := by
-  simp [branchLoopEnv, Std.HashMap.getElem?_insert]
+  rw [branchLoopEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem branchLoop_block_lookup
     {label : BlockLabel} {block : Block}
@@ -85,30 +93,35 @@ theorem branchLoop_block_lookup
           (label = "exit" ∧ block = branchLoopExitBlock) := by
   by_cases hentry : label = "entry"
   · subst label
-    simp [branchLoopEnv, Std.HashMap.getElem?_insert] at hlookup
+    rw [branchLoopEnv] at hlookup
+    repeat rw [Std.HashMap.getElem?_insert] at hlookup
+    simp at hlookup
     exact Or.inl ⟨rfl, hlookup.symm⟩
   · by_cases hloop : label = "loop"
     · subst label
-      simp [branchLoopEnv, Std.HashMap.getElem?_insert] at hlookup
+      rw [branchLoopEnv] at hlookup
+      repeat rw [Std.HashMap.getElem?_insert] at hlookup
+      simp at hlookup
       exact Or.inr (Or.inl ⟨rfl, hlookup.symm⟩)
     · by_cases hbody : label = "body"
       · subst label
-        simp [branchLoopEnv, Std.HashMap.getElem?_insert] at hlookup
+        rw [branchLoopEnv] at hlookup
+        repeat rw [Std.HashMap.getElem?_insert] at hlookup
+        simp at hlookup
         exact Or.inr (Or.inr (Or.inl ⟨rfl, hlookup.symm⟩))
       · by_cases hexit : label = "exit"
         · subst label
-          simp [branchLoopEnv, Std.HashMap.getElem?_insert] at hlookup
+          rw [branchLoopEnv] at hlookup
+          repeat rw [Std.HashMap.getElem?_insert] at hlookup
+          simp at hlookup
           exact Or.inr (Or.inr (Or.inr ⟨rfl, hlookup.symm⟩))
-        · have hentryBeq : ("entry" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hentry h.symm)
-          have hloopBeq : ("loop" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hloop h.symm)
-          have hbodyBeq : ("body" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hbody h.symm)
-          have hexitBeq : ("exit" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hexit h.symm)
-          simp [branchLoopEnv, Std.HashMap.getElem?_insert, hentryBeq, hloopBeq,
-            hbodyBeq, hexitBeq] at hlookup
+        · have hentryEq : ¬ "entry" = label := fun h => hentry h.symm
+          have hloopEq : ¬ "loop" = label := fun h => hloop h.symm
+          have hbodyEq : ¬ "body" = label := fun h => hbody h.symm
+          have hexitEq : ¬ "exit" = label := fun h => hexit h.symm
+          rw [branchLoopEnv] at hlookup
+          repeat rw [Std.HashMap.getElem?_insert] at hlookup
+          simp [hentryEq, hloopEq, hbodyEq, hexitEq] at hlookup
 
 theorem branchLoop_body_ordinary :
     CFGBodyUsesOrdinaryPcAdvance branchLoopEnv := by
@@ -392,19 +405,27 @@ def loopSumKernelSpec
 
 theorem loopSum_entry_lookup (n : Nat) :
     (loopSumEnv n).blocks["entry"]? = some loopSumEntryBlock := by
-  simp [loopSumEnv, Std.HashMap.getElem?_insert]
+  rw [loopSumEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem loopSum_loop_lookup (n : Nat) :
     (loopSumEnv n).blocks["loop"]? = some (loopSumHeaderBlock n) := by
-  simp [loopSumEnv, Std.HashMap.getElem?_insert]
+  rw [loopSumEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem loopSum_body_lookup (n : Nat) :
     (loopSumEnv n).blocks["body"]? = some loopSumBodyBlock := by
-  simp [loopSumEnv, Std.HashMap.getElem?_insert]
+  rw [loopSumEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem loopSum_exit_lookup (n : Nat) :
     (loopSumEnv n).blocks["exit"]? = some loopSumExitBlock := by
-  simp [loopSumEnv, Std.HashMap.getElem?_insert]
+  rw [loopSumEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem loopSum_block_lookup
     {n : Nat} {label : BlockLabel} {block : Block}
@@ -415,30 +436,35 @@ theorem loopSum_block_lookup
           (label = "exit" ∧ block = loopSumExitBlock) := by
   by_cases hentry : label = "entry"
   · subst label
-    simp [loopSumEnv, Std.HashMap.getElem?_insert] at hlookup
+    rw [loopSumEnv] at hlookup
+    repeat rw [Std.HashMap.getElem?_insert] at hlookup
+    simp at hlookup
     exact Or.inl ⟨rfl, hlookup.symm⟩
   · by_cases hloop : label = "loop"
     · subst label
-      simp [loopSumEnv, Std.HashMap.getElem?_insert] at hlookup
+      rw [loopSumEnv] at hlookup
+      repeat rw [Std.HashMap.getElem?_insert] at hlookup
+      simp at hlookup
       exact Or.inr (Or.inl ⟨rfl, hlookup.symm⟩)
     · by_cases hbody : label = "body"
       · subst label
-        simp [loopSumEnv, Std.HashMap.getElem?_insert] at hlookup
+        rw [loopSumEnv] at hlookup
+        repeat rw [Std.HashMap.getElem?_insert] at hlookup
+        simp at hlookup
         exact Or.inr (Or.inr (Or.inl ⟨rfl, hlookup.symm⟩))
       · by_cases hexit : label = "exit"
         · subst label
-          simp [loopSumEnv, Std.HashMap.getElem?_insert] at hlookup
+          rw [loopSumEnv] at hlookup
+          repeat rw [Std.HashMap.getElem?_insert] at hlookup
+          simp at hlookup
           exact Or.inr (Or.inr (Or.inr ⟨rfl, hlookup.symm⟩))
-        · have hentryBeq : ("entry" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hentry h.symm)
-          have hloopBeq : ("loop" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hloop h.symm)
-          have hbodyBeq : ("body" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hbody h.symm)
-          have hexitBeq : ("exit" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hexit h.symm)
-          simp [loopSumEnv, Std.HashMap.getElem?_insert, hentryBeq, hloopBeq,
-            hbodyBeq, hexitBeq] at hlookup
+        · have hentryEq : ¬ "entry" = label := fun h => hentry h.symm
+          have hloopEq : ¬ "loop" = label := fun h => hloop h.symm
+          have hbodyEq : ¬ "body" = label := fun h => hbody h.symm
+          have hexitEq : ¬ "exit" = label := fun h => hexit h.symm
+          rw [loopSumEnv] at hlookup
+          repeat rw [Std.HashMap.getElem?_insert] at hlookup
+          simp [hentryEq, hloopEq, hbodyEq, hexitEq] at hlookup
 
 theorem loopSum_body_ordinary (n : Nat) :
     CFGBodyUsesOrdinaryPcAdvance (loopSumEnv n) := by
@@ -2187,19 +2213,27 @@ theorem globalSumXResources_preserve_global_store
 
 theorem globalSum_entry_lookup (n xBase outBase : Nat) :
     (globalSumEnv n xBase outBase).blocks["entry"]? = some (globalSumEntryBlock xBase) := by
-  simp [globalSumEnv, Std.HashMap.getElem?_insert]
+  rw [globalSumEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem globalSum_loop_lookup (n xBase outBase : Nat) :
     (globalSumEnv n xBase outBase).blocks["loop"]? = some (globalSumHeaderBlock n) := by
-  simp [globalSumEnv, Std.HashMap.getElem?_insert]
+  rw [globalSumEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem globalSum_body_lookup (n xBase outBase : Nat) :
     (globalSumEnv n xBase outBase).blocks["body"]? = some globalSumBodyBlock := by
-  simp [globalSumEnv, Std.HashMap.getElem?_insert]
+  rw [globalSumEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem globalSum_exit_lookup (n xBase outBase : Nat) :
     (globalSumEnv n xBase outBase).blocks["exit"]? = some (globalSumExitBlock outBase) := by
-  simp [globalSumEnv, Std.HashMap.getElem?_insert]
+  rw [globalSumEnv]
+  repeat rw [Std.HashMap.getElem?_insert]
+  simp
 
 theorem globalSum_block_lookup
     {n xBase outBase : Nat} {label : BlockLabel} {block : Block}
@@ -2210,30 +2244,35 @@ theorem globalSum_block_lookup
           (label = "exit" ∧ block = globalSumExitBlock outBase) := by
   by_cases hentry : label = "entry"
   · subst label
-    simp [globalSumEnv, Std.HashMap.getElem?_insert] at hlookup
+    rw [globalSumEnv] at hlookup
+    repeat rw [Std.HashMap.getElem?_insert] at hlookup
+    simp at hlookup
     exact Or.inl ⟨rfl, hlookup.symm⟩
   · by_cases hloop : label = "loop"
     · subst label
-      simp [globalSumEnv, Std.HashMap.getElem?_insert] at hlookup
+      rw [globalSumEnv] at hlookup
+      repeat rw [Std.HashMap.getElem?_insert] at hlookup
+      simp at hlookup
       exact Or.inr (Or.inl ⟨rfl, hlookup.symm⟩)
     · by_cases hbody : label = "body"
       · subst label
-        simp [globalSumEnv, Std.HashMap.getElem?_insert] at hlookup
+        rw [globalSumEnv] at hlookup
+        repeat rw [Std.HashMap.getElem?_insert] at hlookup
+        simp at hlookup
         exact Or.inr (Or.inr (Or.inl ⟨rfl, hlookup.symm⟩))
       · by_cases hexit : label = "exit"
         · subst label
-          simp [globalSumEnv, Std.HashMap.getElem?_insert] at hlookup
+          rw [globalSumEnv] at hlookup
+          repeat rw [Std.HashMap.getElem?_insert] at hlookup
+          simp at hlookup
           exact Or.inr (Or.inr (Or.inr ⟨rfl, hlookup.symm⟩))
-        · have hentryBeq : ("entry" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hentry h.symm)
-          have hloopBeq : ("loop" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hloop h.symm)
-          have hbodyBeq : ("body" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hbody h.symm)
-          have hexitBeq : ("exit" == label) = false :=
-            (beq_eq_false_iff_ne).2 (fun h => hexit h.symm)
-          simp [globalSumEnv, Std.HashMap.getElem?_insert, hentryBeq, hloopBeq,
-            hbodyBeq, hexitBeq] at hlookup
+        · have hentryEq : ¬ "entry" = label := fun h => hentry h.symm
+          have hloopEq : ¬ "loop" = label := fun h => hloop h.symm
+          have hbodyEq : ¬ "body" = label := fun h => hbody h.symm
+          have hexitEq : ¬ "exit" = label := fun h => hexit h.symm
+          rw [globalSumEnv] at hlookup
+          repeat rw [Std.HashMap.getElem?_insert] at hlookup
+          simp [hentryEq, hloopEq, hbodyEq, hexitEq] at hlookup
 
 theorem globalSum_body_ordinary (n xBase outBase : Nat) :
     CFGBodyUsesOrdinaryPcAdvance (globalSumEnv n xBase outBase) := by

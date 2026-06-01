@@ -15,7 +15,7 @@ package cLean {
   -- Add include path for local cblas.h symlink
   -- moreLeancArgs := #["-I./.local/include"]
 }
-require mathlib from git "https://github.com/leanprover-community/mathlib4" @ "v4.20.1"
+require mathlib from git "https://github.com/leanprover-community/mathlib4" @ "v4.24.0"
 -- require scilean from git "https://github.com/lecopivo/SciLean" @ "v4.20.1"
 
 
