@@ -7,4 +7,5 @@ logs/
 CODEX.log
 lean4-skills
 .loom
+.velvet
 .iris-lean
