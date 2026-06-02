@@ -1,0 +1,4 @@
+[submodule ".loom"]
+	path = .loom
+	url = https://github.com/verse-lab/loom
+	branch = master
